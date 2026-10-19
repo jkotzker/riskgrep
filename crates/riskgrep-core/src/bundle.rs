@@ -111,6 +111,8 @@ fn collect_meta(rules: &yara_x::Rules, rulesets: &[&Ruleset]) -> Result<HashMap<
     Ok(out)
 }
 
+type Cached = (yara_x::Rules, HashMap<String, RuleMeta>);
+
 /// Read a cached bundle. `Ok(None)` means no cache entry exists; `Err` carries
 /// a warning explaining why an existing entry was not used.
 fn read_cached(
@@ -118,7 +120,7 @@ fn read_cached(
     dir: &Path,
     file: &Path,
     rulesets: &[&Ruleset],
-) -> std::result::Result<Option<(yara_x::Rules, HashMap<String, RuleMeta>)>, String> {
+) -> std::result::Result<Option<Cached>, String> {
     let euid = unsafe { libc::geteuid() };
     for d in [cache_dir, dir] {
         let md = match fs::symlink_metadata(d) {
