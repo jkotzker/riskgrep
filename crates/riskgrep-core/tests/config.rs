@@ -1,5 +1,7 @@
 use riskgrep_core::config::{baseline_path, load, Action, Mode, Overrides, Threshold};
+use riskgrep_core::meta::RuleMeta;
 use riskgrep_core::model::Category;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -225,4 +227,62 @@ fn action_serializes_lowercase_and_rejects_others() {
     let e = env(Some("[git]\non_error = \"Block\"\n"), None);
     assert!(load(Mode::Cli, None, Overrides::default()).is_err());
     let _ = e.root();
+}
+
+#[test]
+fn ignore_lists_layer_independently() {
+    let e = env(
+        Some("[ignore]\nrules = [{ path = \"docs/**\", rules = [\"generic_api_key\"] }]\n"),
+        Some("[ignore]\npaths = [\"vendor/**\"]\n"),
+    );
+    let c = load(Mode::Git, Some(e.root()), Overrides::default()).unwrap();
+    assert!(c.ignore.ignores("vendor/x.rs", "any"));
+    assert!(c.ignore.ignores("docs/a.md", "generic_api_key"));
+    assert!(!c.ignore.ignores("docs/a.md", "other"));
+}
+
+fn meta(weight: f64) -> RuleMeta {
+    RuleMeta {
+        category: cat("secret"),
+        weight,
+        tiers: None,
+        family: None,
+        family_cap: None,
+        post: vec![],
+    }
+}
+
+fn with_weights(w: &str) -> riskgrep_core::config::Config {
+    let e = env(Some(&format!("weight_overrides = {w}\n")), None);
+    let c = load(Mode::Cli, None, Overrides::default()).unwrap();
+    drop(e);
+    c
+}
+
+fn bundle_meta() -> HashMap<String, RuleMeta> {
+    HashMap::from([("secrets-core:aws".to_string(), meta(5.0))])
+}
+
+#[test]
+fn weight_override_applies_and_skips_unloaded_namespace() {
+    let c = with_weights(r#"{ "secrets-core:aws" = 7.5, "other-set:x" = 1.0 }"#);
+    let mut m = bundle_meta();
+    c.apply_weight_overrides(&mut m).unwrap();
+    assert_eq!(m["secrets-core:aws"].weight, 7.5);
+    assert_eq!(m.len(), 1);
+}
+
+#[test]
+fn weight_override_errors() {
+    let mut m = bundle_meta();
+    let c = with_weights(r#"{ "secrets-core:nope" = 1.0 }"#);
+    let err = c.apply_weight_overrides(&mut m).unwrap_err();
+    assert!(err.to_string().contains("secrets-core:nope"));
+    let c = with_weights(r#"{ "secrets-core:aws" = 100.5 }"#);
+    assert!(c.apply_weight_overrides(&mut m).is_err());
+    let c = with_weights(r#"{ "secrets-core:aws" = nan }"#);
+    assert!(c.apply_weight_overrides(&mut m).is_err());
+    let c = with_weights(r#"{ "noprefix" = 1.0 }"#);
+    assert!(c.apply_weight_overrides(&mut m).is_err());
+    assert_eq!(m["secrets-core:aws"].weight, 5.0);
 }

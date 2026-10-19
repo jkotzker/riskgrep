@@ -6,7 +6,7 @@
 use crate::classify::Limits;
 use crate::meta::RuleMeta;
 use crate::model::Category;
-use crate::suppress::{IgnoreRules, IgnoreSpec};
+use crate::suppress::{IgnoreRules, IgnoreSpec, RuleIgnore};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -169,6 +169,13 @@ struct GitLayer {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct IgnoreLayer {
+    paths: Option<Vec<String>>,
+    rules: Option<Vec<RuleIgnore>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Layer {
     categories: Option<Vec<Category>>,
     rulesets: Option<Vec<String>>,
@@ -176,7 +183,7 @@ struct Layer {
     weight_overrides: Option<BTreeMap<String, f64>>,
     trusted_repos: Option<Vec<PathBuf>>,
     limits: Option<LimitsLayer>,
-    ignore: Option<IgnoreSpec>,
+    ignore: Option<IgnoreLayer>,
     claude_code: Option<ClaudeLayer>,
     git: Option<GitLayer>,
 }
@@ -202,7 +209,7 @@ fn merge_map<K: Ord, V>(into: &mut BTreeMap<K, V>, from: BTreeMap<K, V>) {
 }
 
 impl Config {
-    fn merge(&mut self, l: Layer, trust: bool) -> Result<(), ConfigError> {
+    fn merge(&mut self, l: Layer, trust: bool, spec: &mut IgnoreSpec) {
         if let Some(v) = l.categories {
             self.categories = Some(v);
         }
@@ -237,8 +244,13 @@ impl Config {
                 self.limits.time_budget = Duration::from_millis(v);
             }
         }
-        if let Some(spec) = l.ignore {
-            self.ignore = IgnoreRules::new(spec).map_err(|e| ConfigError(e.0))?;
+        if let Some(x) = l.ignore {
+            if let Some(v) = x.paths {
+                spec.paths = v;
+            }
+            if let Some(v) = x.rules {
+                spec.rules = v;
+            }
         }
         if let Some(x) = l.claude_code {
             if let Some(map) = x.thresholds {
@@ -279,23 +291,47 @@ impl Config {
                 self.git.full_files = v;
             }
         }
-        Ok(())
     }
 
     /// Set `weight` on each bundle rule named in `weight_overrides`
-    /// (`namespace:rule` keys). A key naming no loaded rule is an error.
+    /// (`namespace:rule` keys). A key whose namespace is not loaded this run
+    /// is skipped; an unknown rule in a loaded namespace, a key without a
+    /// namespace, or a weight outside -100..=100 (or NaN) is an error.
     pub fn apply_weight_overrides(
         &self,
         meta: &mut HashMap<String, RuleMeta>,
     ) -> Result<(), ConfigError> {
         for (key, w) in &self.weight_overrides {
-            match meta.get_mut(key) {
-                Some(m) => m.weight = *w,
-                None => {
-                    return Err(ConfigError(format!(
-                        "weight_overrides: no loaded rule `{key}`"
-                    )))
-                }
+            if !(-100.0..=100.0).contains(w) {
+                return Err(ConfigError(format!(
+                    "weight_overrides: `{key}` weight is outside -100..=100"
+                )));
+            }
+        }
+        let loaded: std::collections::HashSet<&str> = meta
+            .keys()
+            .filter_map(|k| k.split_once(':').map(|(ns, _)| ns))
+            .collect();
+        let mut updates = Vec::new();
+        for (key, w) in &self.weight_overrides {
+            let Some((ns, _)) = key.split_once(':') else {
+                return Err(ConfigError(format!(
+                    "weight_overrides: `{key}` is not a `namespace:rule` key"
+                )));
+            };
+            if !loaded.contains(ns) {
+                continue;
+            }
+            if !meta.contains_key(key) {
+                return Err(ConfigError(format!(
+                    "weight_overrides: no rule `{key}` in loaded ruleset `{ns}`"
+                )));
+            }
+            updates.push((key.clone(), *w));
+        }
+        for (key, w) in updates {
+            if let Some(m) = meta.get_mut(&key) {
+                m.weight = w;
             }
         }
         Ok(())
@@ -326,21 +362,23 @@ pub fn load(
     cli_overrides: Overrides,
 ) -> Result<Config, ConfigError> {
     let mut cfg = Config::default();
+    let mut spec = IgnoreSpec::default();
     if let Some(layer) = user_config_path()
         .map(|p| read_layer(&p))
         .transpose()?
         .flatten()
     {
-        cfg.merge(layer, true)?;
+        cfg.merge(layer, true, &mut spec);
     }
     if let Some(root) = repo_root {
         let allowed = mode != Mode::ClaudeCode || is_trusted(root, &cfg.trusted_repos);
         if allowed {
             if let Some(layer) = read_layer(&root.join(REPO_CONFIG))? {
-                cfg.merge(layer, false)?;
+                cfg.merge(layer, false, &mut spec);
             }
         }
     }
+    cfg.ignore = IgnoreRules::new(spec).map_err(|e| ConfigError(e.0))?;
     if let Some(c) = cli_overrides.categories {
         cfg.categories = Some(c);
     }

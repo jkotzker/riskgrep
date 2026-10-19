@@ -138,6 +138,8 @@ fn units(ev: &crate::model::Evidence) -> Vec<Option<&[u8; 32]>> {
     }
 }
 
+/// A second copy of an already-baselined secret in the same file shares its
+/// fingerprint and is treated as known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Baseline {
     pub key: [u8; 32],
@@ -203,15 +205,25 @@ impl Baseline {
         let mut json = serde_json::to_vec_pretty(&f).map_err(|e| SuppressError(e.to_string()))?;
         json.push(b'\n');
         let name = path.display();
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o644)
-            .open(path)
-            .map_err(|e| SuppressError(format!("cannot write baseline {name}: {e}")))?;
-        file.write_all(&json)
-            .map_err(|e| SuppressError(format!("cannot write baseline {name}: {e}")))
+        let fail = |e: std::io::Error| SuppressError(format!("cannot write baseline {name}: {e}"));
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(format!(".tmp{}", std::process::id()));
+        let tmp = std::path::PathBuf::from(tmp);
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o644)
+                .open(&tmp)?;
+            file.write_all(&json)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result.map_err(fail)
     }
 
     fn contains(&self, rule: &str, rel_path: &str, digest: Option<&[u8; 32]>) -> bool {
