@@ -25,8 +25,17 @@ fn report_json_shape() {
         category: cat("secret"),
         weight: 90.0,
         count: 1,
-        locations: vec![Location { start: 4, end: 24, line_start: 1, line_end: 1 }],
-        shape: vec![ShapeFacts::Tensor { dtype: "F32".into(), shape: vec![2, 3], name: None }],
+        locations: vec![Location {
+            start: 4,
+            end: 24,
+            line_start: 1,
+            line_end: 1,
+        }],
+        shape: vec![ShapeFacts::Tensor {
+            dtype: "<f4".into(),
+            shape: vec![10, 192],
+            name: None,
+        }],
         fingerprints: vec![[0u8; 32]],
     });
     let r = Report::from_targets("0.1.0", "bundle-1", vec![t]);
@@ -35,12 +44,20 @@ fn report_json_shape() {
         assert!(v.get(k).is_some(), "missing {k}");
     }
     let s = &v["summary"];
-    for k in ["scores", "targets", "scanned", "partial", "skipped", "unscanned", "suppressed"] {
+    for k in [
+        "scores",
+        "targets",
+        "scanned",
+        "partial",
+        "skipped",
+        "unscanned",
+        "suppressed",
+    ] {
         assert!(s.get(k).is_some(), "missing summary.{k}");
     }
     assert_eq!(s["scores"]["secret"], 90.0);
     let t0 = &v["targets"][0];
-    assert_eq!(t0["status"]["status"], "scanned");
+    assert_eq!(t0["status"], "scanned");
     assert_eq!(t0["target"], "a.env");
     let e = &t0["evidence"][0];
     for k in ["rule", "category", "weight", "count", "locations", "shape"] {
@@ -49,18 +66,44 @@ fn report_json_shape() {
     assert_eq!(e["category"], "secret");
     assert_eq!(e["locations"][0]["line_start"], 1);
     assert_eq!(e["locations"][0]["end"], 24);
-    assert_eq!(e["shape"][0]["Tensor"]["dtype"], "F32");
+    assert_eq!(
+        e["shape"][0],
+        serde_json::json!({"dtype": "<f4", "shape": [10, 192]})
+    );
+    let p = Report::from_targets(
+        "0.1.0",
+        "b",
+        vec![target(
+            "p",
+            1.0,
+            TargetStatus::Partial {
+                not_read: "tail".into(),
+            },
+        )],
+    );
+    let pv = serde_json::to_value(&p).unwrap();
+    assert_eq!(pv["targets"][0]["status"], "partial");
+    assert_eq!(pv["targets"][0]["not_read"], "tail");
 }
 
 #[test]
 fn status_variants_serialize_tagged() {
-    let p = serde_json::to_value(TargetStatus::Partial { not_read: "middle".into() }).unwrap();
+    let p = serde_json::to_value(TargetStatus::Partial {
+        not_read: "middle".into(),
+    })
+    .unwrap();
     assert_eq!(p["status"], "partial");
     assert_eq!(p["not_read"], "middle");
-    let s = serde_json::to_value(TargetStatus::Skipped { reason: "binary".into() }).unwrap();
+    let s = serde_json::to_value(TargetStatus::Skipped {
+        reason: "binary".into(),
+    })
+    .unwrap();
     assert_eq!(s["status"], "skipped");
     assert_eq!(s["reason"], "binary");
-    let u = serde_json::to_value(TargetStatus::Unscanned { reason: "limit".into() }).unwrap();
+    let u = serde_json::to_value(TargetStatus::Unscanned {
+        reason: "limit".into(),
+    })
+    .unwrap();
     assert_eq!(u["status"], "unscanned");
 }
 
@@ -71,7 +114,13 @@ fn summary_takes_max() {
         "b",
         vec![
             target("a", 40.0, TargetStatus::Scanned),
-            target("b", 95.0, TargetStatus::Partial { not_read: "x".into() }),
+            target(
+                "b",
+                95.0,
+                TargetStatus::Partial {
+                    not_read: "x".into(),
+                },
+            ),
             target("c", 10.0, TargetStatus::Skipped { reason: "r".into() }),
             target("d", 0.0, TargetStatus::Unscanned { reason: "r".into() }),
         ],
@@ -99,7 +148,10 @@ fn scores_rounded_in_json() {
     let r = Report::from_targets(
         "0.1.0",
         "b",
-        vec![target("a", 72.46, TargetStatus::Scanned), target("b", 72.44, TargetStatus::Scanned)],
+        vec![
+            target("a", 72.46, TargetStatus::Scanned),
+            target("b", 72.44, TargetStatus::Scanned),
+        ],
     );
     let v = serde_json::to_value(&r).unwrap();
     assert_eq!(v["targets"][0]["scores"]["secret"], 72.5);

@@ -27,8 +27,14 @@ pub struct Location {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum ShapeFacts {
-    Tensor { dtype: String, shape: Vec<u64>, name: Option<String> },
+    Tensor {
+        dtype: String,
+        shape: Vec<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -58,6 +64,7 @@ pub enum TargetStatus {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TargetReport {
     pub target: String,
+    #[serde(flatten)]
     pub status: TargetStatus,
     #[serde(serialize_with = "ser_scores")]
     pub scores: BTreeMap<Category, f64>,
