@@ -1016,6 +1016,8 @@ version = "0.1.0"
 name = "riskgrep-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "yara-x",
 ]
 

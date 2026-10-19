@@ -7,3 +7,7 @@ authors.workspace = true
 
 [dependencies]
 yara-x = { version = "=1.21.0", default-features = false, features = ["constant-folding", "exact-atoms", "fast-regexp", "math-module", "string-module", "native-code-serialization"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
