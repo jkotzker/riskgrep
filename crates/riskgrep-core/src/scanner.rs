@@ -231,7 +231,7 @@ fn new_scanner<'r>(engine: &'r Engine, cfg: &Config) -> yara_x::Scanner<'r> {
 /// Resolve the enabled rulesets: built-ins plus `extra_ruleset_dirs`, narrowed
 /// to `cfg.rulesets` when it names any, then to rulesets scoring an enabled
 /// category.
-fn resolve_rulesets(cfg: &Config, base: Option<&Path>) -> Result<Vec<Ruleset>, RiskGrepError> {
+pub fn resolve_rulesets(cfg: &Config, base: Option<&Path>) -> Result<Vec<Ruleset>, RiskGrepError> {
     let mut all = builtin_rulesets();
     for d in &cfg.extra_ruleset_dirs {
         let dir = match base {

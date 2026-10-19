@@ -1,0 +1,90 @@
+# Cases for `riskgrep rules test`; the generator language is in rulesets/README.md.
+
+[[case]]
+rule = "path_biometric_name"
+synth = "text:hello"
+path = "VoicePrint/notes.txt"
+expect = 30
+
+[[case]]
+rule = "npy_float_tensor"
+synth = "npy:<f4:10x192"
+path = "a.npy"
+expect = 70
+
+[[case]]
+rule = "npz_float_tensor"
+synth = "npz:<f4:4x256"
+path = "a.npz"
+expect = 70
+
+[[case]]
+rule = "safetensors_named_embedding"
+synth = "safetensors:speaker_embedding=F32@1x192;other=F32@1x128"
+path = "model.safetensors"
+expect = 85
+
+[[case]]
+rule = "safetensors_float_tensor"
+synth = "safetensors:layer.0.weight=F32@768x768"
+path = "w.safetensors"
+expect = 30
+
+[[case]]
+rule = "printed_float_run"
+synth = "floats:256:python"
+path = "notes.txt"
+expect = 40
+
+[[case]]
+rule = "printed_float_run"
+synth = "floats:256:numpy"
+path = "notes.txt"
+expect = 40
+
+[[case]]
+rule = "printed_float_run"
+synth = "floats:256:json"
+path = "notes.txt"
+expect = 40
+
+[[case]]
+rule = "printed_float_run"
+synth = "csv:100x10"
+path = "sensor.csv"
+expect = 40
+
+[[case]]
+# A float run in a file whose name also matches the path rule: both combine.
+rule = "printed_float_run"
+synth = "floats:256:python"
+path = "speaker_embedding.txt"
+expect = 58
+
+# Hard negatives: each names the rule that must stay silent.
+
+[[case]]
+# Integer arrays are not embeddings.
+rule = "npy_float_tensor"
+synth = "npy:<i8:10x192"
+path = "a.npy"
+expect = "none"
+
+[[case]]
+rule = "printed_float_run"
+synth = "prices:300"
+path = "prices.csv"
+expect = "none"
+
+[[case]]
+rule = "printed_float_run"
+synth = "log:300"
+path = "app.log"
+expect = "none"
+
+[[case]]
+# Too few floats to be an embedding.
+rule = "printed_float_run"
+synth = "floats:5:python"
+path = "small.json"
+expect = "none"

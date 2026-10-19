@@ -41,3 +41,30 @@ Pattern identifiers starting with `$re`, `$hdr`, or `$hit` are evidence anchors:
 `path` holds the path being scanned, for path heuristics (`path matches /.../i`).
 
 Regexes are compiled without Unicode, so use `(?i)` for ASCII case folding; YARA-X regexes have no lookaround.
+
+## Rule tests (`tests.toml`)
+
+A ruleset directory may hold a `tests.toml`; `riskgrep rules test` runs it against the embedded rulesets. Each `[[case]]` generates a sample file, scans it with only that ruleset enabled, and checks the result:
+
+| Key | Meaning |
+|---|---|
+| `rule` | Bare rule id the case is about (must exist in the ruleset) |
+| `synth` | Generator spec for the sample's content (below) |
+| `expect` | A score: the rule must fire and the rule's category must score that (to 0.1). `"none"`: the rule must not fire |
+| `path` | Optional. Sample file name, relative to a scratch directory that is the working directory for the scan; this is the path that path rules see. Default `sample.txt` |
+
+Samples are generated at run time from fixed seeds, so nothing sensitive is stored. Positive cases count towards the "rules have a passing positive case" figure that `rules test` prints; the secrets ruleset's generated gitleaks rules are covered only where a generator below can produce a matching sample.
+
+### Generator specs
+
+| Spec | Content |
+|---|---|
+| `secret:KIND[:SEED]` | `riskgrep_core::synth::fake_secret`, inside a few lines of source code (tokens as `let id = "...";`; block and whole-line kinds as they are). Seed default 7 |
+| `npy:DTYPE:DIMS` | `.npy` file, e.g. `npy:<f4:10x192` |
+| `npz:DTYPE:DIMS` | `.npz` holding one `.npy` member, e.g. `npz:<f4:4x256` |
+| `safetensors:NAME=DTYPE@DIMS[;...]` | safetensors file, e.g. `safetensors:speaker_embedding=F32@1x192;other=F32@1x128` |
+| `floats:N:STYLE` | N printed floats; style `python`, `numpy`, or `json` |
+| `csv:ROWSxCOLS` | CSV of random floats |
+| `der:HEX[:SEED]` | The hex bytes, then 300 random bytes (DER key and key-store headers) |
+| `prices:N`, `log:N` | N lines of price-list CSV or log text with small decimals (hard negatives for float rules) |
+| `text:LITERAL` | The literal text; `\n` and `\t` are escapes |

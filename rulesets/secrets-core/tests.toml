@@ -1,0 +1,110 @@
+# Cases for `riskgrep rules test`; the generator language is in rulesets/README.md.
+
+[[case]]
+rule = "aws_access_token"
+synth = "secret:aws_access_key"
+path = "src/main.rs"
+expect = 95
+
+[[case]]
+rule = "github_pat"
+synth = "secret:github_pat"
+path = "src/main.rs"
+expect = 95
+
+[[case]]
+rule = "anthropic_api_key"
+synth = "secret:anthropic_key"
+path = "src/main.rs"
+expect = 95
+
+[[case]]
+rule = "private_key"
+synth = "secret:pem_private_key"
+path = "deploy/id_rsa"
+expect = 95
+
+[[case]]
+rule = "generic_api_key"
+synth = "secret:generic_api_key_assignment"
+path = "settings.py"
+expect = 50
+
+[[case]]
+rule = "stripe_access_token"
+synth = "secret:stripe_key"
+path = "src/main.rs"
+expect = 95
+
+[[case]]
+rule = "slack_bot_token"
+synth = "secret:slack_bot_token"
+path = "src/main.rs"
+expect = 95
+
+[[case]]
+rule = "npm_access_token"
+synth = "secret:npm_token"
+path = "src/main.rs"
+expect = 95
+
+[[case]]
+rule = "openai_api_key"
+synth = "secret:openai_key"
+path = "src/main.rs"
+expect = 95
+
+[[case]]
+rule = "pkcs12_keystore"
+synth = "der:3082012c"
+path = "certs/client.p12"
+expect = 90
+
+[[case]]
+rule = "der_key_file"
+synth = "der:3082012c020100"
+path = "keys/server.der"
+expect = 90
+
+[[case]]
+rule = "der_key_file"
+synth = "der:3077020101"
+path = "keys/server.key"
+expect = 90
+
+# Hard negatives: each names the rule that must stay silent.
+
+[[case]]
+# Entropy below the rule's minimum.
+rule = "generic_api_key"
+synth = "secret:low_entropy_generic"
+path = "settings.py"
+expect = "none"
+
+[[case]]
+# gitleaks' EXAMPLE-key allowlist.
+rule = "aws_access_token"
+synth = "secret:aws_example_key"
+path = "src/main.rs"
+expect = "none"
+
+[[case]]
+# Global path allowlist: vendored dependencies are not scanned for tokens.
+rule = "github_pat"
+synth = "secret:github_pat"
+path = "node_modules/dep/index.js"
+expect = "none"
+
+[[case]]
+# An X.509 certificate is DER but not a key.
+rule = "der_key_file"
+synth = "der:3082031c30820204"
+path = "certs/server.der"
+expect = "none"
+
+[[case]]
+# A key-store extension without a DER header.
+rule = "der_key_file"
+synth = "text:not a der file\n"
+path = "keys/server.key"
+expect = "none"
