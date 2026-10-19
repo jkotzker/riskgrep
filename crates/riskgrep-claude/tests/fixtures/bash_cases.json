@@ -1,0 +1,1447 @@
+[
+  {
+    "name": "sensitive-canary: $(...) substitution body is read",
+    "command": "echo $(cat sub1.txt)",
+    "cwd_files": [
+      "sub1.txt"
+    ],
+    "expect_files": [
+      "sub1.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sensitive-canary: backtick substitution body is read",
+    "command": "echo `cat sub2.txt`",
+    "cwd_files": [
+      "sub2.txt"
+    ],
+    "expect_files": [
+      "sub2.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sensitive-canary: process substitution body is read",
+    "command": "diff <(cat sub3.txt) /dev/null",
+    "cwd_files": [
+      "sub3.txt"
+    ],
+    "expect_files": [
+      "sub3.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sensitive-canary: heredoc with harmless content",
+    "command": "cat <<EOF\nhello world\nEOF",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: nested substitution",
+    "command": "echo $(echo $(cat sub_nested.txt))",
+    "cwd_files": [
+      "sub_nested.txt"
+    ],
+    "expect_files": [
+      "sub_nested.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sensitive-canary: substitution inside double quotes",
+    "command": "echo \"$(cat sub_dq.txt)\"",
+    "cwd_files": [
+      "sub_dq.txt"
+    ],
+    "expect_files": [
+      "sub_dq.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sensitive-canary: substitution inside single quotes is text",
+    "command": "echo '$(cat sub_sq.txt)'",
+    "cwd_files": [
+      "sub_sq.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: classic cat",
+    "command": "cat classic.txt",
+    "cwd_files": [
+      "classic.txt"
+    ],
+    "expect_files": [
+      "classic.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: piped commands",
+    "command": "cat pipe.txt | grep key",
+    "cwd_files": [
+      "pipe.txt"
+    ],
+    "expect_files": [
+      "pipe.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: multiple arguments",
+    "command": "cat f1.txt f2.txt",
+    "cwd_files": [
+      "f1.txt",
+      "f2.txt"
+    ],
+    "expect_files": [
+      "f1.txt",
+      "f2.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: newline-separated commands",
+    "command": "echo hi\ncat multiline.txt",
+    "cwd_files": [
+      "multiline.txt"
+    ],
+    "expect_files": [
+      "multiline.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: and-list",
+    "command": "ls && cat and.txt",
+    "cwd_files": [
+      "and.txt"
+    ],
+    "expect_files": [
+      "and.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: semicolon list",
+    "command": "ls; cat semi.txt",
+    "cwd_files": [
+      "semi.txt"
+    ],
+    "expect_files": [
+      "semi.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: newline-separated safe commands",
+    "command": "echo one\necho two",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: subshell",
+    "command": "(cat subshell.txt)",
+    "cwd_files": [
+      "subshell.txt"
+    ],
+    "expect_files": [
+      "subshell.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: subshell after &&",
+    "command": "echo hi && (cat subshell_and.txt)",
+    "cwd_files": [
+      "subshell_and.txt"
+    ],
+    "expect_files": [
+      "subshell_and.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: subshell piped onward",
+    "command": "(cat subshell_pipe.txt) | head",
+    "cwd_files": [
+      "subshell_pipe.txt"
+    ],
+    "expect_files": [
+      "subshell_pipe.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: brace group",
+    "command": "{ cat brace_group.txt; }",
+    "cwd_files": [
+      "brace_group.txt"
+    ],
+    "expect_files": [
+      "brace_group.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: command after then",
+    "command": "if true; then cat if_then.txt; fi",
+    "cwd_files": [
+      "if_then.txt"
+    ],
+    "expect_files": [
+      "if_then.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: command after do",
+    "command": "for f in a; do cat for_do.txt; done",
+    "cwd_files": [
+      "for_do.txt"
+    ],
+    "expect_files": [
+      "for_do.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: awk program using $(NF) in single quotes",
+    "command": "awk '{print $(NF)}' awk_nf.txt",
+    "cwd_files": [
+      "awk_nf.txt"
+    ],
+    "expect_files": [
+      "awk_nf.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: command in a while condition",
+    "command": "while cat while_cond.txt; do :; done",
+    "cwd_files": [
+      "while_cond.txt"
+    ],
+    "expect_files": [
+      "while_cond.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: command in an until condition",
+    "command": "until cat until_cond.txt; do :; done",
+    "cwd_files": [
+      "until_cond.txt"
+    ],
+    "expect_files": [
+      "until_cond.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: command in an if condition",
+    "command": "if cat if_cond.txt; then :; fi",
+    "cwd_files": [
+      "if_cond.txt"
+    ],
+    "expect_files": [
+      "if_cond.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: quoted subshell is text",
+    "command": "echo '(cat quoted_subshell.txt)'",
+    "cwd_files": [
+      "quoted_subshell.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: file name with a space, double-quoted",
+    "command": "cat \"with space.txt\"",
+    "cwd_files": [
+      "with space.txt"
+    ],
+    "expect_files": [
+      "with space.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: if= operand of echo is not a read",
+    "command": "echo if=not_dd.txt",
+    "cwd_files": [
+      "not_dd.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary (adapted): wc reads its operand (catch-all; upstream allows)",
+    "command": "wc -l wc_file.txt",
+    "cwd_files": [
+      "wc_file.txt"
+    ],
+    "expect_files": [
+      "wc_file.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: quoted > is an operand",
+    "command": "cat \">\" quoted_gt.txt",
+    "cwd_files": [
+      "quoted_gt.txt"
+    ],
+    "expect_files": [
+      "quoted_gt.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: quoted >> is an operand",
+    "command": "cat \">>\" quoted_gtgt.txt",
+    "cwd_files": [
+      "quoted_gtgt.txt"
+    ],
+    "expect_files": [
+      "quoted_gtgt.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: unquoted > target is a write",
+    "command": "cat > real_gt.txt",
+    "cwd_files": [
+      "real_gt.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: unquoted >> target is a write",
+    "command": "cat >> real_gtgt.txt",
+    "cwd_files": [
+      "real_gtgt.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: < with no space",
+    "command": "cat <stdin_nospace.txt",
+    "cwd_files": [
+      "stdin_nospace.txt"
+    ],
+    "expect_files": [
+      "stdin_nospace.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: < with a space",
+    "command": "cat < stdin_space.txt",
+    "cwd_files": [
+      "stdin_space.txt"
+    ],
+    "expect_files": [
+      "stdin_space.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: joined redirection 1: cat 2>&1 .env",
+    "command": "cat 2>&1 .env",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: joined redirection 2: cat &>/dev/null .env",
+    "command": "cat &>/dev/null .env",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: joined redirection 3: cat 2>|/dev/null .env",
+    "command": "cat 2>|/dev/null .env",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: joined redirection 4: cat >|/dev/stdout .env",
+    "command": "cat >|/dev/stdout .env",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: joined redirection 5: cat 2>\\\\n&1 .env",
+    "command": "cat 2>\\\n&1 .env",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: joined redirection 6: cat >\\\\n|/dev/stdout .env",
+    "command": "cat >\\\n|/dev/stdout .env",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: joined redirection 7: dash -c 'true &>/dev/stdout cat .env'",
+    "command": "dash -c 'true &>/dev/stdout cat .env'",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: head 2>&1 on a file",
+    "command": "head -n 50 2>&1 secrets.yml",
+    "cwd_files": [
+      "secrets.yml"
+    ],
+    "expect_files": [
+      "secrets.yml"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: write target after 2>&1 (joined)",
+    "command": "cat plain.txt 2>&1>out.txt",
+    "cwd_files": [
+      "plain.txt",
+      "out.txt"
+    ],
+    "expect_files": [
+      "plain.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: write target after 2>&1 (spaced)",
+    "command": "cat plain.txt 2>&1 >out.txt",
+    "cwd_files": [
+      "plain.txt",
+      "out.txt"
+    ],
+    "expect_files": [
+      "plain.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: echo hi >&2",
+    "command": "echo hi >&2",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: <&3 duplicates a descriptor",
+    "command": "cat <&3",
+    "cwd_files": [
+      "3"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary (adapted): env wrapper with joined redirection",
+    "command": "env 2>&1 cat f",
+    "cwd_files": [
+      "f"
+    ],
+    "expect_files": [
+      "f"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary (adapted): parameter expansion with default",
+    "command": "echo ${TOKEN:-fallback}",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sensitive-canary: output process substitution body is read",
+    "command": "echo hi >(cat psub_out.txt)",
+    "cwd_files": [
+      "psub_out.txt"
+    ],
+    "expect_files": [
+      "psub_out.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sensitive-canary: heredoc writing a script mentioning .env",
+    "command": "cat > deploy.sh <<'EOF'\ncat .env\nEOF",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: heredoc body naming a file is text",
+    "command": "cat > s.sh <<EOF\ncat heredoc_body.txt\nEOF",
+    "cwd_files": [
+      "heredoc_body.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: <<- heredoc with tab-indented delimiter",
+    "command": "cat > s.sh <<-EOF\n\tcat .env\n\tEOF",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: ssh heredoc is remote",
+    "command": "ssh host <<EOF\ncat ssh_heredoc.txt\nEOF",
+    "cwd_files": [
+      "ssh_heredoc.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary (adapted): bash fed a program on a heredoc is unresolved",
+    "command": "bash <<'EOF'\ncat local_shell_heredoc.txt\nEOF",
+    "cwd_files": [
+      "local_shell_heredoc.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sensitive-canary (adapted): sh -s fed a program on a heredoc is unresolved",
+    "command": "sh -s <<'EOF'\ncat local_shell_heredoc.txt\nEOF",
+    "cwd_files": [
+      "local_shell_heredoc.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sensitive-canary (adapted): python3 - fed a program on a heredoc is unresolved",
+    "command": "python3 - <<'EOF'\nprint(open('local_shell_heredoc.txt').read())\nEOF",
+    "cwd_files": [
+      "local_shell_heredoc.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sensitive-canary: command after a heredoc",
+    "command": "cat <<EOF\nhi\nEOF\ncat after_heredoc.txt",
+    "cwd_files": [
+      "after_heredoc.txt"
+    ],
+    "expect_files": [
+      "after_heredoc.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: command after a hyphenated heredoc delimiter",
+    "command": "cat > s.sh <<EOF-1\nhi\nEOF-1\ncat hyphen_delim.txt",
+    "cwd_files": [
+      "hyphen_delim.txt"
+    ],
+    "expect_files": [
+      "hyphen_delim.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: command after a partly quoted heredoc delimiter",
+    "command": "cat > s.sh <<E\"O\"F\nhi\nEOF\ncat mixed_delim.txt",
+    "cwd_files": [
+      "mixed_delim.txt"
+    ],
+    "expect_files": [
+      "mixed_delim.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: hyphenated delimiter hides its own body",
+    "command": "cat > deploy.sh <<EOF-1\ncat .env\nEOF-1",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: ANSI-C quoted path",
+    "command": "cat $'ansi_c.txt'",
+    "cwd_files": [
+      "ansi_c.txt"
+    ],
+    "expect_files": [
+      "ansi_c.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: locale quoted path",
+    "command": "cat $\"locale_q.txt\"",
+    "cwd_files": [
+      "locale_q.txt"
+    ],
+    "expect_files": [
+      "locale_q.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: ANSI-C quoted path with a space",
+    "command": "cat $'ansi space.txt'",
+    "cwd_files": [
+      "ansi space.txt"
+    ],
+    "expect_files": [
+      "ansi space.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: ANSI-C hex escape decodes",
+    "command": "cat $'hexe\\x73c.txt'",
+    "cwd_files": [
+      "hexesc.txt"
+    ],
+    "expect_files": [
+      "hexesc.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: comment does not hide the next line 1",
+    "command": "# Check what's configured\ncat .env",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: comment does not hide the next line 2",
+    "command": "# \"x\ncat .env",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: comment does not hide the next line 3",
+    "command": "(( 1 ))# it's\ncat .env",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: comment does not hide the next line 4",
+    "command": "case x in x)# it's\n cat .env;; esac",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: comment does not hide the next line 5",
+    "command": "f()# it's\n{ cat .env; }; f",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [
+      ".env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: << inside a comment",
+    "command": "# usage: cat <<EOF\ncat secrets.txt",
+    "cwd_files": [
+      "secrets.txt"
+    ],
+    "expect_files": [
+      "secrets.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: comment after a word",
+    "command": "ls # it's here\ncat secrets.txt",
+    "cwd_files": [
+      "secrets.txt"
+    ],
+    "expect_files": [
+      "secrets.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: comment names a file that is not read",
+    "command": "cat notes.md # don't print .env",
+    "cwd_files": [
+      "notes.md",
+      ".env"
+    ],
+    "expect_files": [
+      "notes.md"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sensitive-canary: heredoc body line with # it's stays text",
+    "command": "cat > deploy.sh <<'EOF'\n# it's\ncat .env\nEOF",
+    "cwd_files": [
+      ".env"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "head with a count",
+    "command": "head -n 5 notes.txt",
+    "cwd_files": [
+      "notes.txt"
+    ],
+    "expect_files": [
+      "notes.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "tail -f",
+    "command": "tail -f app.log",
+    "cwd_files": [
+      "app.log"
+    ],
+    "expect_files": [
+      "app.log"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "grep pattern then file",
+    "command": "grep -r password config.yml",
+    "cwd_files": [
+      "config.yml"
+    ],
+    "expect_files": [
+      "config.yml"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "rg into a nested file",
+    "command": "rg token src/a.rs",
+    "cwd_files": [
+      "src/a.rs"
+    ],
+    "expect_files": [
+      "src/a.rs"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sed script then file",
+    "command": "sed -n 1p data.csv",
+    "cwd_files": [
+      "data.csv"
+    ],
+    "expect_files": [
+      "data.csv"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "jq filter then file",
+    "command": "jq . data.json",
+    "cwd_files": [
+      "data.json"
+    ],
+    "expect_files": [
+      "data.json"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "base64 input flag",
+    "command": "base64 -i key.pem",
+    "cwd_files": [
+      "key.pem"
+    ],
+    "expect_files": [
+      "key.pem"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "strings, xxd and od",
+    "command": "strings a.bin; xxd b.bin | od c.bin",
+    "cwd_files": [
+      "a.bin",
+      "b.bin",
+      "c.bin"
+    ],
+    "expect_files": [
+      "a.bin",
+      "b.bin",
+      "c.bin"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "less and more",
+    "command": "less a.log && more b.log",
+    "cwd_files": [
+      "a.log",
+      "b.log"
+    ],
+    "expect_files": [
+      "a.log",
+      "b.log"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "cp source",
+    "command": "cp id_rsa backup/id_rsa.bak",
+    "cwd_files": [
+      "id_rsa"
+    ],
+    "expect_files": [
+      "id_rsa"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "scp source",
+    "command": "scp creds.json user@host:",
+    "cwd_files": [
+      "creds.json"
+    ],
+    "expect_files": [
+      "creds.json"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "rsync source",
+    "command": "rsync -av secrets.env host:/tmp/",
+    "cwd_files": [
+      "secrets.env"
+    ],
+    "expect_files": [
+      "secrets.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "dd if= operand",
+    "command": "dd if=disk.img of=copy.img",
+    "cwd_files": [
+      "disk.img"
+    ],
+    "expect_files": [
+      "disk.img"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "substitution output used as an argument",
+    "command": "cat \"$(printf f)\"",
+    "cwd_files": [
+      "f"
+    ],
+    "expect_files": [
+      "f"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "substitution with no file names",
+    "command": "cat $(ls)",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "arithmetic expansion",
+    "command": "echo $((1+2))",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "parameter expansion in a path",
+    "command": "cat $HOME/.netrc",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "file name with spaces, single-quoted",
+    "command": "cat 'my secret file.txt'",
+    "cwd_files": [
+      "my secret file.txt"
+    ],
+    "expect_files": [
+      "my secret file.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "file name with a single quote",
+    "command": "cat 'it'\\''s.txt'",
+    "cwd_files": [
+      "it's.txt"
+    ],
+    "expect_files": [
+      "it's.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "file name with double quotes",
+    "command": "cat \"say \\\"hi\\\".txt\"",
+    "cwd_files": [
+      "say \"hi\".txt"
+    ],
+    "expect_files": [
+      "say \"hi\".txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "file name with an escaped space",
+    "command": "cat back\\ slash.txt",
+    "cwd_files": [
+      "back slash.txt"
+    ],
+    "expect_files": [
+      "back slash.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "file name with a newline, ANSI-C quoted",
+    "command": "cat $'line\\nbreak.txt'",
+    "cwd_files": [
+      "line\nbreak.txt"
+    ],
+    "expect_files": [
+      "line\nbreak.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "file name with a newline, double-quoted",
+    "command": "cat \"two\nlines.txt\"",
+    "cwd_files": [
+      "two\nlines.txt"
+    ],
+    "expect_files": [
+      "two\nlines.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "glob expands against the filesystem",
+    "command": "cat *.env",
+    "cwd_files": [
+      "a.env",
+      "b.env",
+      "c.txt"
+    ],
+    "expect_files": [
+      "a.env",
+      "b.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "glob matching nothing contributes nothing",
+    "command": "cat *.nomatch",
+    "cwd_files": [
+      "c.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "glob in a subdirectory",
+    "command": "cat conf/*.yml",
+    "cwd_files": [
+      "conf/a.yml",
+      "conf/b.yml",
+      "c.yml"
+    ],
+    "expect_files": [
+      "conf/a.yml",
+      "conf/b.yml"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "glob does not match dot files",
+    "command": "cat *",
+    "cwd_files": [
+      "visible.txt",
+      ".hidden"
+    ],
+    "expect_files": [
+      "visible.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "quoted glob is literal",
+    "command": "cat \"*.env\"",
+    "cwd_files": [
+      "a.env",
+      "*.env"
+    ],
+    "expect_files": [
+      "*.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "brace expansion",
+    "command": "cat {a,b}.txt",
+    "cwd_files": [
+      "a.txt",
+      "b.txt",
+      "c.txt"
+    ],
+    "expect_files": [
+      "a.txt",
+      "b.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "input redirection with fd 0",
+    "command": "cat 0< input.txt",
+    "cwd_files": [
+      "input.txt"
+    ],
+    "expect_files": [
+      "input.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "here-string is not a file read",
+    "command": "cat <<< \"data.txt\"",
+    "cwd_files": [
+      "data.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "output redirection with append and dup",
+    "command": "cat a.txt >> log.txt 2>&1",
+    "cwd_files": [
+      "a.txt",
+      "log.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "--flag=path value",
+    "command": "grep --file=patterns.txt x",
+    "cwd_files": [
+      "patterns.txt"
+    ],
+    "expect_files": [
+      "patterns.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "-f=path value",
+    "command": "grep -f=pats.txt x",
+    "cwd_files": [
+      "pats.txt"
+    ],
+    "expect_files": [
+      "pats.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "operand after --",
+    "command": "cat -- -dash.txt",
+    "cwd_files": [
+      "-dash.txt"
+    ],
+    "expect_files": [
+      "-dash.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "directory is not a regular file",
+    "command": "cat sub",
+    "cwd_files": [
+      "sub/inner.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "duplicate spellings collapse",
+    "command": "cat ./a.txt a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "assignment prefix",
+    "command": "X=1 cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sudo wrapper",
+    "command": "sudo -u root cat shadow.txt",
+    "cwd_files": [
+      "shadow.txt"
+    ],
+    "expect_files": [
+      "shadow.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "bash -c payload parsed recursively",
+    "command": "bash -c 'cat inner.txt'",
+    "cwd_files": [
+      "inner.txt"
+    ],
+    "expect_files": [
+      "inner.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "bash -lc payload parsed recursively",
+    "command": "bash -lc 'cat inner.txt'",
+    "cwd_files": [
+      "inner.txt"
+    ],
+    "expect_files": [
+      "inner.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sh -c payload with a list",
+    "command": "sh -c \"head -1 a.txt && cat b.txt\"",
+    "cwd_files": [
+      "a.txt",
+      "b.txt"
+    ],
+    "expect_files": [
+      "a.txt",
+      "b.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "zsh -c payload with a parameter expansion",
+    "command": "zsh -c 'cat $X'",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "python -c is unresolved",
+    "command": "python -c 'print(open(\"x.txt\").read())'",
+    "cwd_files": [
+      "x.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "perl -e is unresolved",
+    "command": "perl -e 'print 1'",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "python script file",
+    "command": "python3 script.py",
+    "cwd_files": [
+      "script.py"
+    ],
+    "expect_files": [
+      "script.py"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "node script file",
+    "command": "node build.js",
+    "cwd_files": [
+      "build.js"
+    ],
+    "expect_files": [
+      "build.js"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "ruby script file",
+    "command": "ruby task.rb",
+    "cwd_files": [
+      "task.rb"
+    ],
+    "expect_files": [
+      "task.rb"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sh script file",
+    "command": "sh setup.sh",
+    "cwd_files": [
+      "setup.sh"
+    ],
+    "expect_files": [
+      "setup.sh"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "deno run",
+    "command": "deno run main.ts",
+    "cwd_files": [
+      "main.ts"
+    ],
+    "expect_files": [
+      "main.ts"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "npx",
+    "command": "npx eslint src.js",
+    "cwd_files": [
+      "src.js"
+    ],
+    "expect_files": [
+      "src.js"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "uv run",
+    "command": "uv run tool.py",
+    "cwd_files": [
+      "tool.py"
+    ],
+    "expect_files": [
+      "tool.py"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "parse failure falls back to whitespace split",
+    "command": "cat a.txt \"unterminated",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "echo of a file name still matches the catch-all",
+    "command": "echo a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "function body is read",
+    "command": "f() { cat fn.txt; }; f",
+    "cwd_files": [
+      "fn.txt"
+    ],
+    "expect_files": [
+      "fn.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "case arm body is read",
+    "command": "case $1 in x) cat arm.txt;; esac",
+    "cwd_files": [
+      "arm.txt"
+    ],
+    "expect_files": [
+      "arm.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "command substitution in an assignment",
+    "command": "X=$(cat assigned.txt)",
+    "cwd_files": [
+      "assigned.txt"
+    ],
+    "expect_files": [
+      "assigned.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "unquoted heredoc substitution runs",
+    "command": "cat <<EOF\n$(cat in_heredoc.txt)\nEOF",
+    "cwd_files": [
+      "in_heredoc.txt"
+    ],
+    "expect_files": [
+      "in_heredoc.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "compound command input redirection",
+    "command": "{ cat; } < grouped.txt",
+    "cwd_files": [
+      "grouped.txt"
+    ],
+    "expect_files": [
+      "grouped.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "input redirection on another descriptor",
+    "command": "exec 3< fd3.txt",
+    "cwd_files": [
+      "fd3.txt"
+    ],
+    "expect_files": [
+      "fd3.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "for loop values are checked",
+    "command": "for f in a.txt b.txt; do echo; done",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "spaced nested subshells are not arithmetic",
+    "command": "( ( cat nested.txt ) )",
+    "cwd_files": [
+      "nested.txt"
+    ],
+    "expect_files": [
+      "nested.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "arithmetic command is not a read",
+    "command": "(( x = 1 ))",
+    "cwd_files": [
+      "x"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  }
+]
