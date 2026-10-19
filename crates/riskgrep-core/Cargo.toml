@@ -13,7 +13,7 @@ include_dir = "0.7.4"
 toml = "1.1.8"
 libc = "0.2.191"
 regex = "1.13"
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 serde_json = "1"
 
 [dev-dependencies]

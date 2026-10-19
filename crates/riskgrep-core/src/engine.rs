@@ -139,25 +139,52 @@ impl Engine {
             };
             if has_anchor {
                 let index = lines.get_or_insert_with(|| LineIndex::new(content));
+                // Verdicts of whole-content processors, computed once per rule.
+                let mut whole: Vec<Option<Option<ShapeFacts>>> = vec![None; chain.len()];
+                let mut kept: Vec<(Range<usize>, Vec<ShapeFacts>)> = Vec::new();
                 for mut range in dedupe(ranges) {
                     let mut shapes: Vec<ShapeFacts> = Vec::new();
-                    let mut kept = true;
-                    for post in chain {
-                        match post.apply(content, range.clone()) {
+                    let mut alive = true;
+                    for (i, post) in chain.iter().enumerate() {
+                        let result = if post.whole_content() {
+                            let verdict =
+                                whole[i].get_or_insert_with(|| match post.apply(content, 0..0) {
+                                    PostResult::KeepWithShape(_, s) => Some(s),
+                                    _ => None,
+                                });
+                            match verdict {
+                                Some(s) => PostResult::KeepWithShape(range.clone(), s.clone()),
+                                None => PostResult::Drop,
+                            }
+                        } else {
+                            post.apply(content, range.clone())
+                        };
+                        match result {
                             PostResult::Keep(r) => range = r,
                             PostResult::KeepWithShape(r, s) => {
                                 range = r;
                                 shapes.push(s);
                             }
                             PostResult::Drop => {
-                                kept = false;
+                                alive = false;
                                 break;
                             }
                         }
                     }
-                    if !kept || range.end > content.len() {
-                        continue;
+                    if alive && range.start < range.end && range.end <= content.len() {
+                        kept.push((range, shapes));
                     }
+                }
+                // Post-processors can narrow distinct matches to one range.
+                kept.sort_by_key(|a| (a.0.start, a.0.end));
+                kept.dedup_by(|dup, first| {
+                    let same = dup.0 == first.0;
+                    if same {
+                        first.1.append(&mut dup.1);
+                    }
+                    same
+                });
+                for (range, shapes) in kept {
                     let (line_start, line_end) = index.lines(range.start as u64, range.end as u64);
                     ev.locations.push(Location {
                         start: range.start as u64,

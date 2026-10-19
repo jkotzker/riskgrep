@@ -25,6 +25,12 @@ pub enum PostResult {
 
 pub trait Post: Send + Sync {
     fn apply(&self, content: &[u8], m: Range<usize>) -> PostResult;
+
+    /// True when the verdict depends only on `content`, never on the match
+    /// range, so the engine may compute it once per rule per scan.
+    fn whole_content(&self) -> bool {
+        false
+    }
 }
 
 /// Compile a regex with the bundle-wide settings.

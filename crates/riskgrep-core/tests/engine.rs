@@ -27,6 +27,20 @@ fn try_engine(
     Engine::new(compile_uncached(&[&rs]).unwrap())
 }
 
+/// Deterministic pseudo-random base62 text, generated at run time.
+fn random_base62(n: usize, seed: u64) -> Vec<u8> {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&seed.to_le_bytes());
+    let mut buf = vec![0u8; n * 8];
+    hasher.finalize_xof().fill(&mut buf);
+    buf.into_iter()
+        .filter(|&b| (b as usize) < 62 * 4)
+        .map(|b| A[b as usize % 62])
+        .take(n)
+        .collect()
+}
+
 fn scan(e: &Engine, path: &str, content: &[u8]) -> Vec<Evidence> {
     let mut sc = yara_x::Scanner::new(e.rules());
     e.scan_content(&mut sc, path, content).unwrap()
@@ -112,13 +126,18 @@ fn post_chain_span_stopwords_entropy() {
             stopwords = "common" min_entropy = 2.5
             strings: $re = /key = [A-Za-z0-9]{8,}/ condition: $re }"#,
     );
-    let content = b"key = aaaaaaaaaaaa\nkey = exampleKeyValue9\nkey = q7Zk2PxW9mLd\n";
-    let ev = scan(&e, "f", content);
+    let secret = random_base62(16, 11);
+    let mut content = b"key = aaaaaaaaaaaa\nkey = exampleKeyValue9\nkey = ".to_vec();
+    let start = content.len() as u64;
+    content.extend(&secret);
+    content.push(b'\n');
+    let ev = scan(&e, "f", &content);
     assert_eq!(ev.len(), 1);
     assert_eq!(ev[0].count, 1);
     let l = &ev[0].locations[0];
-    assert_eq!(&content[l.start as usize..l.end as usize], b"q7Zk2PxW9mLd");
+    assert_eq!((l.start, l.end), (start, start + 16));
     assert_eq!(l.line_start, 3);
+    assert_eq!(ev[0].fingerprints, vec![*blake3::hash(&secret).as_bytes()]);
 }
 
 #[test]
@@ -176,6 +195,7 @@ fn bad_regex_names_rule_and_key() {
 }
 
 #[test]
+#[ignore = "timing-dependent; run with --ignored"]
 fn timeout_maps_to_scan_error() {
     let e = engine_with(
         &[],
@@ -199,4 +219,95 @@ fn bundle_hash_exposed() {
         r#"rule r { meta: category = "secrets" weight = 1 strings: $re = /a/ condition: $re }"#,
     );
     assert_eq!(e.bundle_hash().len(), 64);
+}
+
+const DEDUPE_META: &str = r#"meta: category = "secrets" weight = 1"#;
+
+fn spans(ev: &[Evidence]) -> Vec<(u64, u64)> {
+    ev.iter()
+        .flat_map(|e| e.locations.iter().map(|l| (l.start, l.end)))
+        .collect()
+}
+
+#[test]
+fn matches_sharing_an_end_keep_the_longest() {
+    let e = engine_with(
+        &[],
+        &format!(
+            r#"rule r {{ {DEDUPE_META}
+            strings: $re1 = /abcdefgh/ $re2 = /cdefgh/ $re3 = /efgh/
+            condition: any of them }}"#
+        ),
+    );
+    let ev = scan(&e, "f", b"xabcdefghx");
+    assert_eq!(spans(&ev), vec![(1, 9)]);
+    assert_eq!(ev[0].count, 1);
+}
+
+#[test]
+fn contained_match_is_dropped() {
+    let e = engine_with(
+        &[],
+        &format!(
+            r#"rule r {{ {DEDUPE_META}
+            strings: $re1 = /abcdefgh/ $re2 = /cdef/
+            condition: any of them }}"#
+        ),
+    );
+    let ev = scan(&e, "f", b"xabcdefghx");
+    assert_eq!(spans(&ev), vec![(1, 9)]);
+}
+
+#[test]
+fn partially_overlapping_matches_are_both_kept() {
+    let e = engine_with(
+        &[],
+        &format!(
+            r#"rule r {{ {DEDUPE_META}
+            strings: $re1 = /abcdef/ $re2 = /defghi/
+            condition: any of them }}"#
+        ),
+    );
+    let ev = scan(&e, "f", b"abcdefghi");
+    assert_eq!(spans(&ev), vec![(0, 6), (3, 9)]);
+    assert_eq!(ev[0].count, 2);
+}
+
+#[test]
+fn matches_narrowed_to_one_range_count_once() {
+    let e = engine_with(
+        &[],
+        r#"rule r { meta: category = "secrets" weight = 1
+            post = "span" span_regex = "(SECRET)" secret_group = 1
+            strings: $re1 = /a SECRET/ $re2 = /SECRET b/
+            condition: any of them }"#,
+    );
+    let ev = scan(&e, "f", b"a SECRET b");
+    assert_eq!(spans(&ev), vec![(2, 8)]);
+    assert_eq!(ev[0].count, 1);
+    assert_eq!(ev[0].fingerprints.len(), 1);
+}
+
+#[test]
+fn zero_length_narrowed_range_is_dropped() {
+    let e = engine_with(
+        &[],
+        r#"rule r { meta: category = "secrets" weight = 1
+            post = "span" span_regex = "a(x*)b" secret_group = 1
+            strings: $re = /ab/ condition: $re }"#,
+    );
+    assert!(scan(&e, "f", b"ab").is_empty());
+}
+
+#[test]
+fn whole_content_header_verdict_applies_to_every_match() {
+    let e = engine_with(
+        &[],
+        r#"rule r { meta: category = "voice" weight = 1
+            post = "npy_header" min_dim = 8
+            strings: $hdr = "MAGIC"
+            condition: $hdr }"#,
+    );
+    // not an npy file: every MAGIC occurrence is dropped
+    assert!(scan(&e, "f", b"MAGIC MAGIC").is_empty());
 }

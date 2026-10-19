@@ -10,6 +10,8 @@ use std::ops::Range;
 const NPY_MAGIC: &[u8] = b"\x93NUMPY";
 /// Bytes read from each `.npy` member of an archive.
 const NPZ_MEMBER_BYTES: u64 = 4096;
+/// Archive members examined per file.
+const NPZ_MAX_MEMBERS: usize = 1024;
 /// Largest safetensors JSON header accepted.
 const SAFETENSORS_HEADER_MAX: u64 = 104_857_600;
 
@@ -28,7 +30,6 @@ fn parse_npy_header(header: &str) -> Option<(String, Vec<u64>)> {
     let quote = descr.chars().next().filter(|c| *c == '\'' || *c == '"')?;
     let body = &descr[1..];
     let descr = &body[..body.find(quote)?];
-    let dtype = descr.trim_start_matches(['<', '>', '|', '=']);
 
     let shape = value_after(header, "'shape'")?.strip_prefix('(')?;
     let shape = &shape[..shape.find(')')?];
@@ -38,7 +39,7 @@ fn parse_npy_header(header: &str) -> Option<(String, Vec<u64>)> {
         .filter(|s| !s.is_empty())
         .map(|s| s.trim_end_matches(['L', 'l']).parse::<u64>().ok())
         .collect::<Option<Vec<u64>>>()?;
-    Some((dtype.to_string(), dims))
+    Some((descr.to_string(), dims))
 }
 
 /// Dtype and shape of an `.npy` buffer when it is a float array with a
@@ -60,7 +61,8 @@ fn npy_qualifies(data: &[u8], min_dim: u64) -> Option<(String, Vec<u64>)> {
     };
     let header = data.get(start..start.checked_add(len)?)?;
     let (dtype, shape) = parse_npy_header(std::str::from_utf8(header).ok()?)?;
-    (is_float(&dtype) && shape.iter().any(|&d| d >= min_dim)).then_some((dtype, shape))
+    let kind = dtype.trim_start_matches(['<', '>', '|', '=']);
+    (is_float(kind) && shape.iter().any(|&d| d >= min_dim)).then_some((dtype, shape))
 }
 
 pub struct NpyHeader {
@@ -68,6 +70,10 @@ pub struct NpyHeader {
 }
 
 impl Post for NpyHeader {
+    fn whole_content(&self) -> bool {
+        true
+    }
+
     fn apply(&self, content: &[u8], m: Range<usize>) -> PostResult {
         match npy_qualifies(content, self.min_dim) {
             Some((dtype, shape)) => PostResult::KeepWithShape(
@@ -88,11 +94,15 @@ pub struct NpzMembers {
 }
 
 impl Post for NpzMembers {
+    fn whole_content(&self) -> bool {
+        true
+    }
+
     fn apply(&self, content: &[u8], m: Range<usize>) -> PostResult {
         let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(content)) else {
             return PostResult::Drop;
         };
-        for i in 0..zip.len() {
+        for i in 0..zip.len().min(NPZ_MAX_MEMBERS) {
             let Ok(file) = zip.by_index(i) else { continue };
             let Some(name) = file.name().strip_suffix(".npy").map(str::to_string) else {
                 continue;
@@ -172,6 +182,10 @@ impl SafetensorsHeader {
 }
 
 impl Post for SafetensorsHeader {
+    fn whole_content(&self) -> bool {
+        true
+    }
+
     fn apply(&self, content: &[u8], m: Range<usize>) -> PostResult {
         match self.qualifying(content) {
             Some(shape) => PostResult::KeepWithShape(m, shape),

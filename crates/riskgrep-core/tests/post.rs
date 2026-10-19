@@ -106,7 +106,7 @@ fn npy_float_kept_int_dropped() {
     let p = NpyHeader { min_dim: 192 };
     let f = npy("<f4", "(10, 192)");
     let r = p.apply(&f, 0..f.len());
-    assert_eq!(tensor(&r), ("f4", &[10, 192][..], None));
+    assert_eq!(tensor(&r), ("<f4", &[10, 192][..], None));
     let i = npy("<i8", "(500,)");
     assert_eq!(p.apply(&i, 0..i.len()), PostResult::Drop);
     let small = npy("<f4", "(10, 20)");
@@ -164,7 +164,7 @@ fn npz_members() {
         ("emb.npy", npy("<f4", "(1, 192)")),
     ]);
     let r = p.apply(&both, 0..4);
-    assert_eq!(tensor(&r), ("f4", &[1, 192][..], Some("emb")));
+    assert_eq!(tensor(&r), ("<f4", &[1, 192][..], Some("emb")));
     let ints = npz(&[
         ("ids.npy", npy("<i8", "(500,)")),
         ("readme.txt", b"x".to_vec()),
