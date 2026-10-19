@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use riskgrep_claude::bash::{bash_targets, BashTargets};
+use riskgrep_claude::bash::{bash_targets, bash_targets_within, BashTargets};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -158,6 +158,72 @@ fn nesting_at_the_parse_limit_still_parses() {
     let got = bash_targets(&groups, tmp.path());
     assert!(!got.unresolved, "64 nested groups fell back");
     assert_eq!(got.files.len(), 1);
+}
+
+// The two keyword-nesting tests run on the default test thread: the
+// dedicated analysis thread lives inside `bash_targets`.
+#[test]
+fn if_nesting_5000_returns_unresolved() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let command = format!(
+        "{}cat x{}",
+        "if true; then ".repeat(5_000),
+        "; fi".repeat(5_000)
+    );
+    let got = bash_targets(&command, tmp.path());
+    assert!(got.unresolved);
+}
+
+#[test]
+fn while_nesting_5000_returns_unresolved() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let command = format!(
+        "{}cat x{}",
+        "while true; do ".repeat(5_000),
+        "; done".repeat(5_000)
+    );
+    let got = bash_targets(&command, tmp.path());
+    assert!(got.unresolved);
+}
+
+#[test]
+fn oversized_command_scans_its_head_and_is_unresolved() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    populate(tmp.path(), &["a.txt".to_string(), "tail.txt".to_string()]);
+    let mut command = "cat a.txt; ".repeat(10_000); // 110,000 bytes
+    command.push_str("cat tail.txt");
+    let got = bash_targets(&command, tmp.path());
+    assert!(got.unresolved);
+    let names: Vec<String> = got
+        .files
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["a.txt".to_string()],
+        "only the first 64 KiB is scanned"
+    );
+}
+
+#[test]
+fn spent_budget_stops_work() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    populate(tmp.path(), &["a.txt".to_string()]);
+    let got = bash_targets_within("cat a.txt", tmp.path(), Duration::ZERO);
+    assert!(got.unresolved);
+    assert!(got.files.is_empty());
+}
+
+#[test]
+fn brace_words_are_capped_across_a_command() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Each word is within the per-word cap; together they exceed the total.
+    let command = format!("cat{}", " {1..999}".repeat(20));
+    let start = Instant::now();
+    let got = bash_targets(&command, tmp.path());
+    assert!(got.unresolved);
+    assert!(start.elapsed() < Duration::from_secs(2));
 }
 
 #[test]

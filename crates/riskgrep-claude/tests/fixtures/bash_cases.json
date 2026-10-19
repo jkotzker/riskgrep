@@ -1149,13 +1149,13 @@
     "expect_unresolved": false
   },
   {
-    "name": "directory is not a regular file",
+    "name": "directory argument is unresolved",
     "command": "cat sub",
     "cwd_files": [
       "sub/inner.txt"
     ],
     "expect_files": [],
-    "expect_unresolved": false
+    "expect_unresolved": true
   },
   {
     "name": "duplicate spellings collapse",
@@ -1443,5 +1443,404 @@
     ],
     "expect_files": [],
     "expect_unresolved": false
+  },
+  {
+    "name": "unbroken (( running nested subshells",
+    "command": "((cat x) )",
+    "cwd_files": [
+      "x"
+    ],
+    "expect_files": [
+      "x"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "substitution in an arithmetic command",
+    "command": "(( $(cat secret.env) ))",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "substitution in an arithmetic assignment",
+    "command": "((x=$(cat y)))",
+    "cwd_files": [
+      "y"
+    ],
+    "expect_files": [
+      "y"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "substitution in an arithmetic for header",
+    "command": "for ((i=$(cat secret.env); i<3; i++)); do :; done",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "substitution in an arithmetic expansion",
+    "command": "echo $(( $(cat n.txt) + 1 ))",
+    "cwd_files": [
+      "n.txt"
+    ],
+    "expect_files": [
+      "n.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "ls piped to xargs cat",
+    "command": "ls | xargs cat",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "find -exec cat",
+    "command": "find . -name '*.env' -exec cat {} \\;",
+    "cwd_files": [
+      "a.env"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "find -exec sh -c payload",
+    "command": "find . -exec sh -c 'cat secret.env' \\;",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "xargs sh -c payload",
+    "command": "xargs sh -c 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "xargs cat with input redirection",
+    "command": "xargs cat < list",
+    "cwd_files": [
+      "list"
+    ],
+    "expect_files": [
+      "list"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "xargs -a list cat",
+    "command": "xargs -a list cat",
+    "cwd_files": [
+      "list"
+    ],
+    "expect_files": [
+      "list"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "eval of literal words",
+    "command": "eval cat secret.env",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "eval of a quoted list",
+    "command": "eval 'cat a.txt; cat b.txt'",
+    "cwd_files": [
+      "a.txt",
+      "b.txt"
+    ],
+    "expect_files": [
+      "a.txt",
+      "b.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "eval with an expansion",
+    "command": "eval \"cat $F\"",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "env -S split string",
+    "command": "env -S 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "cd then a relative read",
+    "command": "cd sub && cat x",
+    "cwd_files": [
+      "sub/x"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "pushd then a relative read",
+    "command": "pushd sub; cat x; popd",
+    "cwd_files": [
+      "sub/x"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "cd inside bash -c",
+    "command": "bash -c 'cd sub; cat x'",
+    "cwd_files": [
+      "sub/x"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "source a file",
+    "command": "source x",
+    "cwd_files": [
+      "x"
+    ],
+    "expect_files": [
+      "x"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": ". a file",
+    "command": ". x",
+    "cwd_files": [
+      "x"
+    ],
+    "expect_files": [
+      "x"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "trap action",
+    "command": "trap 'cat secret.env' EXIT",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "watch arguments",
+    "command": "watch cat secret.env",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "watch with an interval and a quoted command",
+    "command": "watch -n 5 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "su -c payload",
+    "command": "su -c 'cat secret.env' root",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sudo sh -c payload",
+    "command": "sudo sh -c 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "git show of a blob",
+    "command": "git show HEAD:x",
+    "cwd_files": [
+      "x"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "git cat-file",
+    "command": "git cat-file -p HEAD",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "git status names nothing",
+    "command": "git status",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "tar of a directory",
+    "command": "tar czf out.tgz dir",
+    "cwd_files": [
+      "dir/a"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "zip -r of a directory",
+    "command": "zip -r out.zip dir",
+    "cwd_files": [
+      "dir/a"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "cp -r of a directory",
+    "command": "cp -r dir backup",
+    "cwd_files": [
+      "dir/a"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep -r over .",
+    "command": "grep -r TOKEN .",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep -r with no path",
+    "command": "grep -r TOKEN",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep with no path reads stdin",
+    "command": "grep TOKEN",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "rg with no path",
+    "command": "rg TOKEN",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "rg -e pattern with a file",
+    "command": "rg -e TOKEN a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "recursive glob is not walked",
+    "command": "cat **/*.env",
+    "cwd_files": [
+      "a.env",
+      "sub/b.env"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "brace expansion over the cap",
+    "command": "cat {1..2000}.txt",
+    "cwd_files": [
+      "1.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep with . as its pattern",
+    "command": "grep -c . a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "ls of a directory",
+    "command": "ls sub",
+    "cwd_files": [
+      "sub/a"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
   }
 ]

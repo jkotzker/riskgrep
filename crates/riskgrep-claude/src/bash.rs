@@ -4,10 +4,13 @@
 //! redirection target that names an existing regular file is a target. The
 //! answer is marked `unresolved` whenever the command could read something the
 //! parse cannot name: a word built from an expansion, a substitution whose
-//! output becomes an argument, an interpreter running code, or a parse failure.
+//! output becomes an argument, an interpreter or executor running code, a
+//! change of directory, a directory argument, a parse failure, or the time
+//! budget running out.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Files a shell command would read, and whether the answer is incomplete.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -19,31 +22,59 @@ pub struct BashTargets {
     pub unresolved: bool,
 }
 
+/// Time [`bash_targets`] may spend before it stops and reports unresolved.
+pub const DEFAULT_BUDGET: Duration = Duration::from_millis(500);
+
 /// Glob matches one command may yield before the walk stops (unresolved).
 const WALK_LIMIT: usize = 10_000;
-/// Nesting of `sh -c` payloads and substitution bodies analysed recursively.
+/// Nesting of `sh -c` payloads, executors and substitution bodies analysed
+/// recursively.
 const MAX_DEPTH: usize = 16;
-/// Commands longer than this are not parsed (whitespace split only).
-const MAX_COMMAND_BYTES: usize = 1 << 20;
-/// Bracket nesting beyond which a command is not parsed, so a recursive
-/// parser cannot exhaust the stack.
-const MAX_BRACKET_NESTING: usize = 64;
+/// Commands longer than this are not parsed: the first this-many bytes get
+/// the whitespace-split catch-all and the result is unresolved.
+const MAX_COMMAND_BYTES: usize = 64 * 1024;
+/// Stack of the thread the analysis runs on.
+const ANALYSIS_STACK_BYTES: usize = 64 << 20;
+/// Estimated nesting (see [`nesting_estimate`]) beyond which a command is not
+/// parsed. brush-parser recurses once per level; on a 64 MiB stack 2,000
+/// nested `if` statements parsed in a debug build and 4,000 in a release
+/// build (measured 2026-10-19), so 256 leaves a wide margin.
+const MAX_NESTING: usize = 256;
 /// Words a single brace expansion may produce.
 const MAX_BRACE_WORDS: usize = 1_000;
+/// Words all brace expansions in one parse may produce together.
+const MAX_TOTAL_BRACE_WORDS: usize = 10_000;
 
-/// Returns the files `command` would read when run in `cwd`.
+/// Returns the files `command` would read when run in `cwd`, spending at most
+/// [`DEFAULT_BUDGET`].
 pub fn bash_targets(command: &str, cwd: &Path) -> BashTargets {
-    let mut st = State {
-        cwd,
-        files: Vec::new(),
-        seen: HashSet::new(),
-        unresolved: false,
-        glob_budget: WALK_LIMIT,
-    };
-    analyze(command, 0, &mut st);
-    BashTargets {
-        files: st.files,
-        unresolved: st.unresolved,
+    bash_targets_within(command, cwd, DEFAULT_BUDGET)
+}
+
+/// Like [`bash_targets`], but stops and reports unresolved once `budget` has
+/// elapsed. A single parse cannot be interrupted; it is bounded by the
+/// command-size and nesting limits instead.
+pub fn bash_targets_within(command: &str, cwd: &Path, budget: Duration) -> BashTargets {
+    let deadline = Instant::now() + budget;
+    let owned_command = command.to_string();
+    let owned_cwd = cwd.to_path_buf();
+    // A deep parse recurses; a dedicated thread gives it a known stack.
+    let worker = std::thread::Builder::new()
+        .name("riskgrep-bash".to_string())
+        .stack_size(ANALYSIS_STACK_BYTES)
+        .spawn(move || {
+            let mut st = State::new(&owned_cwd, deadline);
+            analyze(&owned_command, 0, &mut st);
+            st.finish()
+        });
+    match worker.map(|handle| handle.join()) {
+        Ok(Ok(targets)) => targets,
+        // The thread could not start or panicked: whitespace split only.
+        _ => {
+            let mut st = State::new(cwd, deadline);
+            st.fallback(command);
+            st.finish()
+        }
     }
 }
 
@@ -126,33 +157,90 @@ impl CandBuf {
 // ---------------------------------------------------------------------------
 // Analysis of the parsed form.
 
+/// What a path turned out to be, cached per absolute path.
+#[derive(Clone)]
+enum Probe {
+    File(PathBuf),
+    Dir,
+    Other,
+}
+
 struct State<'a> {
     cwd: &'a Path,
+    deadline: Instant,
     files: Vec<PathBuf>,
     seen: HashSet<PathBuf>,
+    probed: HashMap<PathBuf, Probe>,
     unresolved: bool,
     glob_budget: usize,
 }
 
+impl<'a> State<'a> {
+    fn new(cwd: &'a Path, deadline: Instant) -> Self {
+        State {
+            cwd,
+            deadline,
+            files: Vec::new(),
+            seen: HashSet::new(),
+            probed: HashMap::new(),
+            unresolved: false,
+            glob_budget: WALK_LIMIT,
+        }
+    }
+
+    fn finish(self) -> BashTargets {
+        BashTargets {
+            files: self.files,
+            unresolved: self.unresolved,
+        }
+    }
+
+    /// True (and the result unresolved) once the time budget is spent.
+    fn out_of_time(&mut self) -> bool {
+        if Instant::now() >= self.deadline {
+            self.unresolved = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The catch-all over a whitespace split of the first
+    /// [`MAX_COMMAND_BYTES`] bytes, for commands that are not parsed.
+    fn fallback(&mut self, src: &str) {
+        self.unresolved = true;
+        let mut end = src.len().min(MAX_COMMAND_BYTES);
+        while !src.is_char_boundary(end) {
+            end -= 1;
+        }
+        for word in src[..end].split_whitespace() {
+            if self.out_of_time() {
+                return;
+            }
+            self.add_literal(word, true);
+        }
+    }
+}
+
 fn analyze(src: &str, depth: usize, st: &mut State) {
-    if depth > MAX_DEPTH {
+    if depth > MAX_DEPTH || st.out_of_time() {
         st.unresolved = true;
         return;
     }
-    let ir = if src.len() > MAX_COMMAND_BYTES || bracket_nesting(src) > MAX_BRACKET_NESTING {
+    let ir = if src.len() > MAX_COMMAND_BYTES || nesting_estimate(src) > MAX_NESTING {
         None
     } else {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| front::parse(src))).unwrap_or(None)
     };
     let Some(ir) = ir else {
-        st.unresolved = true;
-        for word in src.split_whitespace() {
-            st.add_literal(word);
-        }
+        st.fallback(src);
         return;
     };
     st.unresolved |= ir.unresolved;
     for cmd in &ir.cmds {
+        if st.out_of_time() {
+            return;
+        }
         handle_simple(cmd, depth, st);
     }
     for body in &ir.nested {
@@ -160,19 +248,53 @@ fn analyze(src: &str, depth: usize, st: &mut State) {
     }
 }
 
-/// Deepest nesting of `(`, `{` and `[`, ignoring quoting; a cheap bound used
-/// only to refuse pathological input.
-fn bracket_nesting(src: &str) -> usize {
+/// An upper estimate of how deeply `src` nests, ignoring quoting. Brackets
+/// count one level; `if`, `while`, `until`, `for`, `select` and `case` count
+/// two (the construct and its `then`/`do` body). Used only to refuse input
+/// that could exhaust the parser's stack.
+fn nesting_estimate(src: &str) -> usize {
+    let mut stack: Vec<(u8, usize)> = Vec::new();
     let (mut depth, mut max) = (0usize, 0usize);
-    for b in src.bytes() {
-        match b {
-            b'(' | b'{' | b'[' => {
-                depth += 1;
-                max = max.max(depth);
+    let mut push = |stack: &mut Vec<(u8, usize)>, depth: &mut usize, kind: u8, weight: usize| {
+        stack.push((kind, weight));
+        *depth += weight;
+        max = max.max(*depth);
+    };
+    let pop = |stack: &mut Vec<(u8, usize)>, depth: &mut usize, kind: u8| {
+        if let Some(pos) = stack.iter().rposition(|(k, _)| *k == kind) {
+            for (_, weight) in stack.drain(pos..) {
+                *depth -= weight;
             }
-            b')' | b'}' | b']' => depth = depth.saturating_sub(1),
+        }
+    };
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_alphabetic() || b == b'_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            match &src[start..i] {
+                "if" => push(&mut stack, &mut depth, b'i', 2),
+                "while" | "until" | "for" | "select" => push(&mut stack, &mut depth, b'l', 2),
+                "case" => push(&mut stack, &mut depth, b'c', 2),
+                "fi" => pop(&mut stack, &mut depth, b'i'),
+                "done" => pop(&mut stack, &mut depth, b'l'),
+                "esac" => pop(&mut stack, &mut depth, b'c'),
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'(' | b'[' => push(&mut stack, &mut depth, b'(', 1),
+            b'{' => push(&mut stack, &mut depth, b'{', 1),
+            b')' | b']' => pop(&mut stack, &mut depth, b'('),
+            b'}' => pop(&mut stack, &mut depth, b'{'),
             _ => {}
         }
+        i += 1;
     }
     max
 }
@@ -185,14 +307,65 @@ const WRAPPERS: &[&str] = &[
     "sudo", "doas", "env", "nohup", "nice", "time", "command", "exec", "builtin", "stdbuf",
     "timeout",
 ];
+/// Commands that change the directory later relative paths resolve against,
+/// or read and run a file in the current shell.
+const CONTEXT_CHANGERS: &[&str] = &["cd", "pushd", "popd", "source", "."];
+/// `git` subcommands that print repository content not named as a path.
+const GIT_READERS: &[&str] = &[
+    "show", "cat-file", "archive", "grep", "blame", "diff", "log", "stash",
+];
+
+/// Commands whose first operand is a pattern, filter or script rather than
+/// a path, so `jq . f` or `grep . f` is not a directory argument.
+const PATTERN_FIRST: &[&str] = &[
+    "grep", "egrep", "fgrep", "rg", "ag", "ack", "ugrep", "jq", "yq", "sed", "awk", "gawk",
+];
+
+/// Index of a command's pattern operand, if it has one: the first word
+/// after the name that is not an option, unless the pattern was given with
+/// `-e`/`-f`.
+fn pattern_position(words: &[Word]) -> Option<usize> {
+    let name = literal(words.first())?;
+    if !PATTERN_FIRST.contains(&base_name(&name)) {
+        return None;
+    }
+    let mut position = None;
+    for (i, w) in words.iter().enumerate().skip(1) {
+        let text = literal(Some(w))?;
+        if matches!(
+            text.as_str(),
+            "-e" | "-f" | "--regexp" | "--file" | "--expression"
+        ) || text.starts_with("--regexp=")
+            || text.starts_with("--file=")
+            || text.starts_with("--expression=")
+        {
+            return None;
+        }
+        if position.is_none() && !text.starts_with('-') {
+            position = Some(i);
+        }
+    }
+    position
+}
 
 fn handle_simple(cmd: &Simple, depth: usize, st: &mut State) {
     let is_dd = cmd.is_command && literal(cmd.words.first()).as_deref() == Some("dd");
-    for word in cmd.words.iter().chain(cmd.reads.iter()) {
-        st.add_word(word, is_dd);
+    let pattern_at = if cmd.is_command {
+        pattern_position(&cmd.words)
+    } else {
+        None
+    };
+    for (i, word) in cmd.words.iter().enumerate() {
+        // Neither the command name (`. file`) nor a pattern operand is a
+        // directory argument.
+        let not_a_path = cmd.is_command && i == 0 || pattern_at == Some(i);
+        st.add_word(word, is_dd, !not_a_path);
+    }
+    for word in &cmd.reads {
+        st.add_word(word, false, true);
     }
     if cmd.is_command {
-        classify(cmd, depth, st);
+        classify(&cmd.words, depth, st);
     }
 }
 
@@ -208,25 +381,83 @@ fn base_name(s: &str) -> &str {
     s.rsplit('/').next().unwrap_or(s)
 }
 
-/// Marks the result unresolved for interpreters and recurses into `sh -c`.
-fn classify(cmd: &Simple, depth: usize, st: &mut State) {
-    let words = &cmd.words;
+/// Joins literal words with spaces; any other word makes the result
+/// unresolved and is left out.
+fn join_literals(words: &[Word], st: &mut State) -> String {
+    let mut line = String::new();
+    for w in words {
+        match literal(Some(w)) {
+            Some(text) => {
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(&text);
+            }
+            None => st.unresolved = true,
+        }
+    }
+    line
+}
+
+/// Index of the first word after leading options, where `takes_value`
+/// says which options consume the next word. `--` ends the options.
+fn skip_options(words: &[Word], takes_value: impl Fn(&str) -> bool) -> usize {
     let mut i = 0;
+    while let Some(arg) = literal(words.get(i)) {
+        if arg == "--" {
+            return i + 1;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            break;
+        }
+        i += if takes_value(&arg) { 2 } else { 1 };
+    }
+    i.min(words.len())
+}
+
+/// Classifies one command line: recurses into commands it runs, and marks
+/// the result unresolved for interpreters, executors and context changers.
+fn classify(words: &[Word], depth: usize, st: &mut State) {
+    if depth > MAX_DEPTH {
+        st.unresolved = true;
+        return;
+    }
+    let mut i = 0;
+    let mut privileged = false;
     // Skip wrappers such as `sudo -u root` or `env X=1`.
     while let Some(name) = literal(words.get(i)) {
         let name = base_name(&name).to_string();
         if !WRAPPERS.contains(&name.as_str()) {
             break;
         }
+        privileged |= name == "sudo" || name == "doas";
         i += 1;
         while let Some(arg) = literal(words.get(i)) {
+            // `env -S STRING` splits STRING into the command line it runs.
+            let split = if name == "env" && (arg == "-S" || arg == "--split-string") {
+                Some((literal(words.get(i + 1)), i + 2))
+            } else if name == "env" {
+                arg.strip_prefix("--split-string=")
+                    .map(|v| (Some(v.to_string()), i + 1))
+            } else {
+                None
+            };
+            if let Some((value, rest_at)) = split {
+                let Some(value) = value else {
+                    st.unresolved = true;
+                    return;
+                };
+                let rest = join_literals(words.get(rest_at..).unwrap_or(&[]), st);
+                analyze(&format!("{value} {rest}"), depth + 1, st);
+                return;
+            }
             let takes_value = matches!(
                 (name.as_str(), arg.as_str()),
                 (
-                    "sudo",
+                    "sudo" | "doas",
                     "-u" | "-g" | "-C" | "-D" | "-h" | "-p" | "-r" | "-t" | "-U"
                 ) | ("nice", "-n")
-                    | ("env", "-u" | "-C" | "-S")
+                    | ("env", "-u" | "-C")
             );
             if arg.starts_with('-') && arg != "-" {
                 i += if takes_value { 2 } else { 1 };
@@ -243,15 +474,201 @@ fn classify(cmd: &Simple, depth: usize, st: &mut State) {
     let Some(name) = literal(words.get(i)) else {
         return;
     };
-    let name = base_name(&name);
+    let name = base_name(&name).to_string();
     let rest = &words[i + 1..];
-    if SHELLS.contains(&name) {
-        shell_invocation(rest, depth, st);
-    } else if name.starts_with("python")
-        || INTERPRETERS.contains(&name)
-        || (name == "uv" && literal(rest.first()).as_deref() == Some("run"))
-    {
+    match name.as_str() {
+        n if SHELLS.contains(&n) => {
+            if privileged {
+                st.unresolved = true;
+            }
+            shell_invocation(rest, depth, st);
+        }
+        n if CONTEXT_CHANGERS.contains(&n) => st.unresolved = true,
+        "eval" => {
+            let line = join_literals(rest, st);
+            analyze(&line, depth + 1, st);
+        }
+        "trap" => {
+            st.unresolved = true;
+            if let Some(action) = literal(rest.first()) {
+                analyze(&action, depth + 1, st);
+            }
+        }
+        "watch" => {
+            // watch runs its arguments, joined, with `sh -c`.
+            st.unresolved = true;
+            let at = skip_options(rest, |o| {
+                matches!(o, "-n" | "--interval" | "-q" | "--equexit")
+            });
+            let line = join_literals(&rest[at..], st);
+            analyze(&line, depth + 1, st);
+        }
+        "xargs" | "parallel" => {
+            st.unresolved = true;
+            let at = skip_options(rest, |o| {
+                matches!(
+                    o,
+                    "-a" | "-d"
+                        | "-E"
+                        | "-I"
+                        | "-L"
+                        | "-n"
+                        | "-P"
+                        | "-s"
+                        | "-j"
+                        | "--arg-file"
+                        | "--delimiter"
+                        | "--max-args"
+                        | "--max-procs"
+                        | "--max-lines"
+                        | "--jobs"
+                )
+            });
+            classify(&rest[at..], depth + 1, st);
+        }
+        "su" => {
+            st.unresolved = true;
+            let mut j = 0;
+            while j < rest.len() {
+                let arg = literal(rest.get(j)).unwrap_or_default();
+                let payload = match arg.as_str() {
+                    "-c" | "--command" => literal(rest.get(j + 1)),
+                    _ => arg.strip_prefix("--command=").map(str::to_string),
+                };
+                if let Some(payload) = payload {
+                    analyze(&payload, depth + 1, st);
+                }
+                j += 1;
+            }
+        }
+        "find" => find_exec(rest, depth, st),
+        "git" => {
+            let at = skip_options(rest, |o| {
+                matches!(o, "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace")
+            });
+            if literal(rest.get(at)).is_some_and(|sub| GIT_READERS.contains(&sub.as_str())) {
+                st.unresolved = true;
+            }
+        }
+        // These search the working directory when given no path.
+        "rg" | "ag" | "ack" | "ugrep" => {
+            if search_operands(rest, RG_VALUE_SHORT).is_none_or(|s| s.paths == 0) {
+                st.unresolved = true;
+            }
+        }
+        // grep reads stdin without a path unless it recurses.
+        "grep" | "egrep" | "fgrep" => {
+            if search_operands(rest, GREP_VALUE_SHORT).is_none_or(|s| s.recursive && s.paths == 0) {
+                st.unresolved = true;
+            }
+        }
+        n if n.starts_with("python")
+            || INTERPRETERS.contains(&n)
+            || (n == "uv" && literal(rest.first()).as_deref() == Some("run")) =>
+        {
+            st.unresolved = true;
+        }
+        _ => {}
+    }
+}
+
+/// Short options that take a value, per search tool.
+const GREP_VALUE_SHORT: &[char] = &['e', 'f', 'm', 'A', 'B', 'C', 'd', 'D'];
+const RG_VALUE_SHORT: &[char] = &[
+    'e', 'f', 'g', 't', 'T', 'm', 'A', 'B', 'C', 'j', 'M', 'E', 'r',
+];
+/// Long options that take a separate value (rg and grep).
+const SEARCH_VALUE_LONG: &[&str] = &[
+    "--regexp",
+    "--file",
+    "--glob",
+    "--iglob",
+    "--type",
+    "--type-not",
+    "--max-count",
+    "--context",
+    "--after-context",
+    "--before-context",
+    "--threads",
+    "--replace",
+    "--max-columns",
+    "--encoding",
+    "--sort",
+    "--sortr",
+    "--directories",
+    "--devices",
+];
+
+struct SearchOperands {
+    /// Path operands given (positionals other than the pattern).
+    paths: usize,
+    /// `-r`, `-R` or `--recursive` was given.
+    recursive: bool,
+}
+
+/// Counts the path operands of a grep-like command; `None` when a word is
+/// not literal.
+fn search_operands(args: &[Word], value_short: &[char]) -> Option<SearchOperands> {
+    let mut pattern_given = false;
+    let mut recursive = false;
+    let mut positionals = 0usize;
+    let mut options_done = false;
+    let mut j = 0;
+    while j < args.len() {
+        let arg = literal(args.get(j))?;
+        j += 1;
+        if options_done || !arg.starts_with('-') || arg == "-" {
+            positionals += 1;
+            continue;
+        }
+        if arg == "--" {
+            options_done = true;
+        } else if let Some(long) = arg.strip_prefix("--") {
+            let name = long.split('=').next().unwrap_or(long);
+            recursive |= matches!(name, "recursive" | "dereference-recursive");
+            pattern_given |= matches!(name, "regexp" | "file");
+            if !long.contains('=') && SEARCH_VALUE_LONG.contains(&arg.as_str()) {
+                j += 1;
+            }
+        } else {
+            // A cluster such as `-rn`, `-e PATTERN` or `-ePATTERN`.
+            for (k, ch) in arg[1..].char_indices() {
+                if value_short.contains(&ch) {
+                    pattern_given |= ch == 'e' || ch == 'f';
+                    if k + ch.len_utf8() == arg.len() - 1 {
+                        j += 1; // the value is the next word
+                    }
+                    break;
+                }
+                recursive |= ch == 'r' || ch == 'R';
+            }
+        }
+    }
+    let paths = if pattern_given {
+        positionals
+    } else {
+        positionals.saturating_sub(1)
+    };
+    Some(SearchOperands { paths, recursive })
+}
+
+/// `find ... -exec CMD ;` runs CMD on files it finds: unresolved, and any
+/// command line given literally is classified (`-exec sh -c '...' \;`).
+fn find_exec(args: &[Word], depth: usize, st: &mut State) {
+    let mut j = 0;
+    while j < args.len() {
+        let is_exec = literal(args.get(j))
+            .is_some_and(|a| matches!(a.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"));
+        j += 1;
+        if !is_exec {
+            continue;
+        }
         st.unresolved = true;
+        let start = j;
+        while j < args.len() && !literal(args.get(j)).is_some_and(|a| a == ";" || a == "+") {
+            j += 1;
+        }
+        classify(&args[start..j], depth + 1, st);
     }
 }
 
@@ -294,7 +711,9 @@ fn shell_invocation(args: &[Word], depth: usize, st: &mut State) {
 }
 
 impl State<'_> {
-    fn add_word(&mut self, word: &Word, is_dd: bool) {
+    /// Adds the files a word names. With `dirs_unresolve`, a word naming a
+    /// directory marks the result unresolved (directories are not walked).
+    fn add_word(&mut self, word: &Word, is_dd: bool, dirs_unresolve: bool) {
         let Word::Resolved(cands) = word else {
             self.unresolved = true;
             return;
@@ -303,10 +722,10 @@ impl State<'_> {
             match &cand.pattern {
                 Some(pattern) => self.add_glob(pattern, &cand.text),
                 None => {
-                    self.add_literal(&cand.text);
+                    self.add_literal(&cand.text, dirs_unresolve);
                     if cand.text.starts_with('-') || (is_dd && cand.text.starts_with("if=")) {
                         if let Some((_, value)) = cand.text.split_once('=') {
-                            self.add_literal(value);
+                            self.add_literal(value, dirs_unresolve);
                         }
                     }
                 }
@@ -314,7 +733,7 @@ impl State<'_> {
         }
     }
 
-    fn add_literal(&mut self, text: &str) {
+    fn add_literal(&mut self, text: &str, dirs_unresolve: bool) {
         if text.is_empty() || text.contains('\0') {
             return;
         }
@@ -324,23 +743,41 @@ impl State<'_> {
         } else {
             self.cwd.join(path)
         };
-        self.add_path(&full);
+        self.add_path(full, dirs_unresolve);
     }
 
-    fn add_path(&mut self, path: &Path) {
-        let Ok(meta) = std::fs::metadata(path) else {
-            return;
+    fn add_path(&mut self, path: PathBuf, dirs_unresolve: bool) {
+        let probe = match self.probed.get(&path) {
+            Some(probe) => probe.clone(),
+            None => {
+                let probe = match std::fs::metadata(&path) {
+                    Ok(meta) if meta.is_file() => {
+                        Probe::File(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()))
+                    }
+                    Ok(meta) if meta.is_dir() => Probe::Dir,
+                    _ => Probe::Other,
+                };
+                self.probed.insert(path, probe.clone());
+                probe
+            }
         };
-        if !meta.is_file() {
-            return;
-        }
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        if self.seen.insert(canon.clone()) {
-            self.files.push(canon);
+        match probe {
+            Probe::File(canon) => {
+                if self.seen.insert(canon.clone()) {
+                    self.files.push(canon);
+                }
+            }
+            Probe::Dir if dirs_unresolve => self.unresolved = true,
+            Probe::Dir | Probe::Other => {}
         }
     }
 
     fn add_glob(&mut self, pattern: &str, text: &str) {
+        if pattern.contains("**") {
+            // A recursive walk; not attempted.
+            self.unresolved = true;
+            return;
+        }
         let full = if pattern.starts_with('/') {
             pattern.to_string()
         } else {
@@ -361,17 +798,17 @@ impl State<'_> {
         };
         let Ok(paths) = glob::glob_with(&full, options) else {
             // Not a valid pattern: the shell passes it through literally.
-            self.add_literal(text);
+            self.add_literal(text, true);
             return;
         };
         for entry in paths {
-            if self.glob_budget == 0 {
+            if self.glob_budget == 0 || self.out_of_time() {
                 self.unresolved = true;
                 return;
             }
             self.glob_budget -= 1;
             if let Ok(path) = entry {
-                self.add_path(&path);
+                self.add_path(path, true);
             }
         }
     }
@@ -496,7 +933,7 @@ fn decode_ansi_c(s: &str) -> String {
 mod front {
     use super::{
         decode_ansi_c, home_dir, remove_line_continuations, CandBuf, Ir, Simple, Word,
-        MAX_BRACE_WORDS,
+        MAX_BRACE_WORDS, MAX_TOTAL_BRACE_WORDS,
     };
     use brush_parser::ast::{
         self, Command, CommandPrefixOrSuffixItem as Item, CompoundCommand, CompoundList,
@@ -527,7 +964,8 @@ mod front {
         let mut w = Walker {
             ir: Ir::default(),
             options,
-            source,
+            source: source.chars().collect(),
+            brace_budget: MAX_TOTAL_BRACE_WORDS,
         };
         for list in &program.complete_commands {
             w.list(list);
@@ -538,8 +976,11 @@ mod front {
     struct Walker {
         ir: Ir,
         options: ParserOptions,
-        /// The text that was parsed, for checking source positions.
-        source: String,
+        /// The text that was parsed, by character, for checking source
+        /// positions (brush-parser counts characters, not bytes).
+        source: Vec<char>,
+        /// Brace-expansion words this parse may still produce.
+        brace_budget: usize,
     }
 
     /// How expansions inside a word affect the result.
@@ -626,17 +1067,29 @@ mod front {
                     // subshells, spaced) as an arithmetic command. Bash
                     // treats only an unbroken `((` as arithmetic, so a
                     // spaced one is analysed as the commands it holds.
-                    let opens: String = self
-                        .source
-                        .chars()
-                        .skip(a.loc.start.index)
-                        .take(2)
-                        .collect();
-                    if opens != "((" {
-                        self.ir.nested.push(a.expr.value.clone());
+                    let value = &a.expr.value;
+                    self.arithmetic_substitutions(value);
+                    let start = a.loc.start.index;
+                    let unbroken = self.source.get(start..start + 2) == Some(&['(', '('][..]);
+                    if !unbroken {
+                        self.ir.nested.push(value.clone());
+                    } else if !value.contains(['$', '`'])
+                        && brush_parser::arithmetic::parse(value).is_err()
+                    {
+                        // `((cat x) )`: bash runs nested subshells, but
+                        // brush-parser has dropped a parenthesis, so the
+                        // structure is uncertain.
+                        self.ir.unresolved = true;
+                        self.ir.nested.push(value.clone());
                     }
                 }
-                CompoundCommand::ArithmeticForClause(f) => self.list(&f.body.list),
+                CompoundCommand::ArithmeticForClause(f) => {
+                    let parts = [&f.initializer, &f.condition, &f.updater];
+                    for expr in parts.into_iter().flatten() {
+                        self.arithmetic_substitutions(&expr.value);
+                    }
+                    self.list(&f.body.list);
+                }
                 CompoundCommand::BraceGroup(g) => self.list(&g.list),
                 CompoundCommand::Subshell(s) => self.list(&s.list),
                 CompoundCommand::ForClause(f) => {
@@ -832,9 +1285,13 @@ mod front {
                         Some(home) => buf.quoted(&home),
                         None => known = false,
                     },
-                    WordPiece::TildeExpansion(_)
-                    | WordPiece::ParameterExpansion(_)
-                    | WordPiece::ArithmeticExpression(_) => known = false,
+                    WordPiece::TildeExpansion(_) | WordPiece::ParameterExpansion(_) => {
+                        known = false
+                    }
+                    WordPiece::ArithmeticExpression(expr) => {
+                        self.arithmetic_substitutions(&expr.value);
+                        known = false;
+                    }
                     WordPiece::CommandSubstitution(body) => {
                         self.ir.nested.push(body.clone());
                         known = false;
@@ -853,18 +1310,45 @@ mod front {
 
         /// The raw words produced by brace expansion of `raw`; `None` when
         /// the expansion is too large.
-        fn brace_expand(&self, raw: &str) -> Option<Vec<String>> {
+        fn brace_expand(&mut self, raw: &str) -> Option<Vec<String>> {
             if !raw.contains('{') {
                 return Some(vec![raw.to_string()]);
             }
             match word::parse_brace_expansions(raw, &self.options) {
-                Ok(Some(pieces)) => expand_brace_pieces(&pieces),
+                Ok(Some(pieces)) => {
+                    let limit = MAX_BRACE_WORDS.min(self.brace_budget);
+                    let words = expand_brace_pieces(&pieces, limit)?;
+                    self.brace_budget -= words.len();
+                    Some(words)
+                }
                 Ok(None) | Err(_) => Some(vec![raw.to_string()]),
+            }
+        }
+
+        /// Records the bodies of `$(...)` and backquote substitutions inside
+        /// an arithmetic expression (they run), marking the result
+        /// unresolved when there are any.
+        fn arithmetic_substitutions(&mut self, expr: &str) {
+            if !expr.contains("$(") && !expr.contains('`') {
+                return;
+            }
+            let before = self.ir.nested.len();
+            match word::parse_heredoc(expr, &self.options) {
+                Ok(pieces) => {
+                    let mut buf = CandBuf::default();
+                    self.pieces(&pieces, false, Mode::BodiesOnly, &mut buf);
+                }
+                Err(_) => self.ir.unresolved = true,
+            }
+            if self.ir.nested.len() > before {
+                self.ir.unresolved = true;
             }
         }
     }
 
-    fn expand_brace_pieces(pieces: &[BraceExpressionOrText]) -> Option<Vec<String>> {
+    /// Expands parsed brace pieces; `None` once more than `limit` words
+    /// would be produced (checked before each allocation).
+    fn expand_brace_pieces(pieces: &[BraceExpressionOrText], limit: usize) -> Option<Vec<String>> {
         let mut acc = vec![String::new()];
         for piece in pieces {
             let alternatives: Vec<String> = match piece {
@@ -872,6 +1356,7 @@ mod front {
                 BraceExpressionOrText::Expr(members) => {
                     let mut alts = Vec::new();
                     for m in members {
+                        let room = limit.checked_sub(alts.len())?;
                         match m {
                             BraceExpressionMember::NumberSequence {
                                 start,
@@ -881,7 +1366,7 @@ mod front {
                                 let step = increment.unsigned_abs().max(1);
                                 let (lo, hi) = (*start.min(end), *start.max(end));
                                 let count = (hi.abs_diff(lo) / step).saturating_add(1);
-                                if count > MAX_BRACE_WORDS as u64 {
+                                if count > room as u64 {
                                     return None;
                                 }
                                 let mut v: Vec<String> = (0..count)
@@ -897,9 +1382,12 @@ mod front {
                                 end,
                                 increment,
                             } => {
-                                let step = increment.unsigned_abs().max(1) as u32;
+                                let step = increment.unsigned_abs().max(1);
                                 let (lo, hi) =
                                     ((*start).min(*end) as u32, (*start).max(*end) as u32);
+                                if u64::from(hi - lo) / step + 1 > room as u64 {
+                                    return None;
+                                }
                                 let mut v: Vec<String> = (lo..=hi)
                                     .step_by(step as usize)
                                     .filter_map(char::from_u32)
@@ -911,14 +1399,14 @@ mod front {
                                 alts.extend(v);
                             }
                             BraceExpressionMember::Child(children) => {
-                                alts.extend(expand_brace_pieces(children)?);
+                                alts.extend(expand_brace_pieces(children, room)?);
                             }
                         }
                     }
                     alts
                 }
             };
-            if acc.len().saturating_mul(alternatives.len()) > MAX_BRACE_WORDS {
+            if acc.len().saturating_mul(alternatives.len()) > limit {
                 return None;
             }
             acc = acc
