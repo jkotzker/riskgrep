@@ -1824,6 +1824,15 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "regex",
+ "regex-syntax",
+ "riskgrep-core",
+ "serde",
+ "sha2",
+ "tempfile",
+ "toml",
+]
 
 [[package]]
 name = "yara-x"

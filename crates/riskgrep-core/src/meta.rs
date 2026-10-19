@@ -77,6 +77,11 @@ impl<'a> Raw<'a> {
         match self.get(key) {
             None => Ok(None),
             Some(MetaValue::String(s)) => Ok(Some((*s).to_string())),
+            // YARA-X stores a literal containing escapes (regexes) as bytes.
+            Some(MetaValue::Bytes(b)) => match std::str::from_utf8(b) {
+                Ok(s) => Ok(Some(s.to_string())),
+                Err(_) => Err(self.err(format_args!("`{key}` must be a string"))),
+            },
             Some(_) => Err(self.err(format_args!("`{key}` must be a string"))),
         }
     }

@@ -1,0 +1,5 @@
+id = "secrets_core"
+version = "0.1.0"
+licence = "MIT (rules derived from gitleaks) AND (MIT OR Apache-2.0)"
+description = "Credentials and keys: rules generated from gitleaks, plus key-store files"
+categories = ["secret"]

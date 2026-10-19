@@ -102,3 +102,34 @@ fn meta_rejects_bad_family_cap_and_tiers() {
     assert!(parse("category = \"x\"\nweight = 1\nfamily_cap = 101").is_err());
     assert!(parse("category = \"x\"\nweight = 1\ntiers = \"nope\"").is_err());
 }
+
+#[test]
+fn meta_string_with_escapes_is_accepted() {
+    // YARA-X stores a string literal containing escapes as bytes.
+    let m = parse(
+        r#"category = "secret"
+weight = 50
+post = "span,allow_regex"
+span_regex = "\\bk=\"(\\w+)\""
+allow_regex = "^\\d+$""#,
+    )
+    .unwrap();
+    assert_eq!(
+        m.post,
+        vec![
+            PostSpec::Span {
+                regex: r#"\bk="(\w+)""#.into(),
+                group: 0
+            },
+            PostSpec::AllowRegex {
+                regex: r"^\d+$".into()
+            },
+        ]
+    );
+}
+
+#[test]
+fn meta_rejects_non_utf8_string() {
+    let e = parse("category = \"secret\"\nweight = 50\nfamily = \"\\xff\"").unwrap_err();
+    assert!(e.0.contains("`family` must be a string"), "{e}");
+}

@@ -196,3 +196,129 @@ pub fn csv_rows(rows: usize, cols: usize) -> String {
     }
     out
 }
+
+const BASE62: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const BASE32: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+const URLSAFE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+const LOWER36: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+
+impl Rng {
+    fn below(&mut self, n: usize) -> usize {
+        (self.next_u64() % n as u64) as usize
+    }
+
+    fn pick(&mut self, alphabet: &[u8], n: usize) -> String {
+        (0..n)
+            .map(|_| alphabet[self.below(alphabet.len())] as char)
+            .collect()
+    }
+}
+
+fn base64(data: &[u8]) -> String {
+    const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
+        for k in 0..4 {
+            if k <= c.len() {
+                out.push(B64[(n >> (18 - 6 * k) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Kinds accepted by [`fake_secret`].
+pub const FAKE_SECRET_KINDS: &[&str] = &[
+    "aws_access_key",
+    "aws_example_key",
+    "github_pat",
+    "anthropic_key",
+    "pem_private_key",
+    "generic_api_key_assignment",
+    "low_entropy_generic",
+    "stripe_key",
+    "slack_bot_token",
+    "npm_token",
+    "openai_key",
+];
+
+/// A fake credential in a provider's format, derived from `seed`. Kinds
+/// ending in `generic` or `assignment` return a whole `api_key = "..."` line;
+/// the others return the token alone. Panics on an unknown kind.
+pub fn fake_secret(kind: &str, seed: u64) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(kind.as_bytes());
+    h.update(&seed.to_le_bytes());
+    let mut r = Rng(h.finalize_xof());
+    match kind {
+        "aws_access_key" => format!("AKIA{}", r.pick(BASE32, 16)),
+        "aws_example_key" => format!("AKIA{}EXAMPLE", r.pick(BASE32, 9)),
+        "github_pat" => format!("ghp_{}", r.pick(BASE62, 36)),
+        "anthropic_key" => format!("sk-ant-api03-{}AA", r.pick(URLSAFE, 93)),
+        "pem_private_key" => {
+            let mut der = vec![0u8; 600];
+            r.fill(&mut der);
+            let body = base64(&der);
+            let lines: Vec<&str> = body
+                .as_bytes()
+                .chunks(64)
+                .map(|l| std::str::from_utf8(l).expect("ascii"))
+                .collect();
+            format!(
+                "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+                lines.join("\n")
+            )
+        }
+        "generic_api_key_assignment" => format!("api_key = \"{}\"", r.pick(BASE62, 32)),
+        "low_entropy_generic" => format!("api_key = \"{}\"", "a".repeat(24)),
+        "stripe_key" => format!("sk_live_{}", r.pick(BASE62, 24)),
+        "slack_bot_token" => format!(
+            "xoxb-{}-{}-{}",
+            r.pick(b"0123456789", 12),
+            r.pick(b"0123456789", 12),
+            r.pick(BASE62, 24)
+        ),
+        "npm_token" => format!("npm_{}", r.pick(LOWER36, 36)),
+        "openai_key" => format!(
+            "sk-proj-{}T3BlbkFJ{}",
+            r.pick(URLSAFE, 74),
+            r.pick(URLSAFE, 74)
+        ),
+        other => panic!("unknown fake secret kind `{other}`"),
+    }
+}
+
+const WORDS: &[&str] = &[
+    "value", "count", "index", "buffer", "result", "config", "item", "name", "path", "size",
+    "total", "offset", "handler", "request", "response", "user", "data", "list", "node", "width",
+    "height", "cursor", "session", "token", "key", "cache", "retry", "limit",
+];
+
+/// Source-code-like ASCII text of exactly `len` bytes: functions,
+/// assignments, calls, and comments built from common identifiers.
+pub fn source_text(len: usize, seed: u64) -> String {
+    let mut r = Rng::new(seed ^ 0x736f_7572_6365);
+    let mut out = String::with_capacity(len + 128);
+    while out.len() < len {
+        let a = WORDS[r.below(WORDS.len())];
+        let b = WORDS[r.below(WORDS.len())];
+        let n = r.below(10_000);
+        match r.below(8) {
+            0 => writeln!(out, "fn {a}_{b}({a}: u32, {b}: &str) -> u32 {{").unwrap(),
+            1 => writeln!(out, "    let {a}_{b} = {n};").unwrap(),
+            2 => writeln!(out, "    // update the {a} before the {b} is read").unwrap(),
+            3 => writeln!(out, "    if {a} > {n} {{ return {b}.len() as u32; }}").unwrap(),
+            4 => writeln!(out, "    {a}.{b}(&{a}_{b}, \"{b}\");").unwrap(),
+            5 => writeln!(out, "    let {a}_key = {b}.get(\"{a}\").unwrap_or({n});").unwrap(),
+            6 => writeln!(out, "}}\n").unwrap(),
+            _ => writeln!(out, "use crate::{a}::{{{b}, {a}_{b}}};").unwrap(),
+        }
+    }
+    out.truncate(len);
+    out
+}
