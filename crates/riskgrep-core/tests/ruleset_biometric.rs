@@ -192,3 +192,51 @@ fn synth_is_deterministic() {
         synth::printed_floats(70, FloatStyle::NumpyRepr)
     );
 }
+
+fn timed_scan(f: &Fixture, bytes: usize) -> (std::time::Duration, u32) {
+    // Dense CSV of 10 floats per row, trimmed to about `bytes` bytes.
+    let rows = bytes / 60 + 1;
+    let text = synth::csv_rows(rows, 10);
+    let t = text.as_bytes();
+    let t = &t[..t.len().min(bytes)];
+    let start = std::time::Instant::now();
+    let ev = scan(f, "data.csv", t);
+    let elapsed = start.elapsed();
+    assert_eq!(ev.len(), 1);
+    (elapsed, ev[0].count)
+}
+
+#[test]
+fn dense_float_scan_is_fast() {
+    let f = fixture();
+    for bytes in [256 << 10, 1 << 20] {
+        let (d, count) = timed_scan(&f, bytes);
+        eprintln!("debug {bytes} bytes: {d:?}");
+        assert_eq!(count, 1, "one run");
+        // Debug builds are several times slower than release; 1 s covers 1 MiB.
+        assert!(d.as_secs_f64() < 1.0, "{bytes} bytes took {d:?}");
+    }
+}
+
+#[test]
+#[ignore = "release timing; run with --release -- --ignored"]
+fn dense_float_scan_8mib_release() {
+    let f = fixture();
+    let (d, _) = timed_scan(&f, 8 << 20);
+    eprintln!("release 8 MiB: {d:?}");
+    assert!(d.as_millis() < 250, "took {d:?}");
+}
+
+#[test]
+fn pathological_digit_text_is_fast_and_negative() {
+    let f = fixture();
+    for text in [
+        "1".repeat(1 << 20),
+        "1.".repeat(1 << 19),
+        "-".repeat(1 << 20),
+    ] {
+        let start = std::time::Instant::now();
+        assert!(scan(&f, "x.txt", text.as_bytes()).is_empty());
+        assert!(start.elapsed().as_secs_f64() < 1.0);
+    }
+}

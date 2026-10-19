@@ -1,6 +1,7 @@
 //! Post-processors: Rust refinements applied to each YARA match.
 
 mod entropy;
+mod floats;
 mod span;
 mod tensor;
 mod words;
@@ -12,6 +13,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 pub use entropy::Entropy;
+pub use floats::FloatRun;
 pub use span::{AllowRegex, Span};
 pub use tensor::{NpyHeader, NpzMembers, SafetensorsHeader};
 pub use words::Stopwords;
@@ -30,6 +32,14 @@ pub trait Post: Send + Sync {
     /// range, so the engine may compute it once per rule per scan.
     fn whole_content(&self) -> bool {
         false
+    }
+
+    /// Processors that find their own ranges return them here, computed in
+    /// one pass over `content`; the engine then uses them instead of the
+    /// rule's pattern matches (which only trigger the rule). `Some(vec![])`
+    /// means the rule yields no evidence.
+    fn runs(&self, _content: &[u8]) -> Option<Vec<Range<usize>>> {
+        None
     }
 }
 
@@ -57,6 +67,9 @@ pub fn build(
             Box::new(Stopwords::new(words))
         }
         PostSpec::AllowRegex { regex } => Box::new(AllowRegex::new(re("allow_regex", regex)?)),
+        PostSpec::FloatRun { min_floats } => Box::new(FloatRun {
+            min_floats: *min_floats,
+        }),
         PostSpec::NpyHeader { min_dim } => Box::new(NpyHeader { min_dim: *min_dim }),
         PostSpec::NpzMembers { min_dim } => Box::new(NpzMembers { min_dim: *min_dim }),
         PostSpec::SafetensorsHeader {

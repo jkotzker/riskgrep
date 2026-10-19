@@ -27,6 +27,7 @@ Post-processors and their arguments:
 | `entropy` | `min_entropy` (required): drops matches below the Shannon entropy |
 | `stopwords` | `stopwords` (required): list name; drops matches containing a listed word |
 | `allow_regex` | `allow_regex` (required): drops matches the regex accepts |
+| `float_run` | `min_floats` (required): finds maximal runs of at least that many printed floats (separators: commas, whitespace, brackets) in one linear pass. It supplies the evidence ranges itself, so the rule's patterns (any name) are only a cheap trigger |
 | `npy_header` | `min_dim` (required): `.npy` float array with a dimension >= `min_dim` |
 | `npz_members` | `min_dim` (required): `.npz` with such a float member |
 | `safetensors_header` | `min_dim` (required), `name_regex` (optional): float tensor with such a dimension and, if given, a matching name |

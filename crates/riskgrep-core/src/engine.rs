@@ -121,10 +121,26 @@ impl Engine {
             };
             let mut has_anchor = false;
             let mut ranges = Vec::new();
-            for p in rule.patterns() {
-                if is_anchor(p.identifier()) {
-                    has_anchor = true;
-                    ranges.extend(p.matches().map(|m| m.range()));
+            // A range-producing processor replaces the pattern matches: the
+            // rule's patterns are only its cheap trigger.
+            let producer = chain
+                .iter()
+                .enumerate()
+                .find_map(|(i, p)| p.runs(content).map(|r| (i, r)));
+            let mut producer_idx = None;
+            if let Some((i, runs)) = producer {
+                if runs.is_empty() {
+                    continue;
+                }
+                has_anchor = true;
+                ranges = runs;
+                producer_idx = Some(i);
+            } else {
+                for p in rule.patterns() {
+                    if is_anchor(p.identifier()) {
+                        has_anchor = true;
+                        ranges.extend(p.matches().map(|m| m.range()));
+                    }
                 }
             }
 
@@ -146,6 +162,9 @@ impl Engine {
                     let mut shapes: Vec<ShapeFacts> = Vec::new();
                     let mut alive = true;
                     for (i, post) in chain.iter().enumerate() {
+                        if producer_idx == Some(i) {
+                            continue;
+                        }
                         let result = if post.whole_content() {
                             let verdict =
                                 whole[i].get_or_insert_with(|| match post.apply(content, 0..0) {

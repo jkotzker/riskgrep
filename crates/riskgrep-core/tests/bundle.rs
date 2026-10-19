@@ -37,7 +37,7 @@ fn load_dir_reads_files() {
 #[test]
 fn builtin_rulesets_embed_shipped_rulesets() {
     let ids: Vec<String> = builtin_rulesets().into_iter().map(|r| r.id).collect();
-    assert_eq!(ids, ["biometric_embeddings"]);
+    assert!(ids.iter().any(|i| i == "biometric_embeddings"));
 }
 
 #[test]

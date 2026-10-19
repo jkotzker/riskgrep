@@ -34,6 +34,9 @@ pub enum PostSpec {
     AllowRegex {
         regex: String,
     },
+    FloatRun {
+        min_floats: u64,
+    },
     NpyHeader {
         min_dim: u64,
     },
@@ -159,6 +162,9 @@ impl RuleMeta {
             },
             "allow_regex" => PostSpec::AllowRegex {
                 regex: raw.need(raw.string("allow_regex")?, "allow_regex", name)?,
+            },
+            "float_run" => PostSpec::FloatRun {
+                min_floats: raw.need(raw.uint("min_floats")?, "min_floats", name)?,
             },
             "npy_header" => PostSpec::NpyHeader {
                 min_dim: raw.need(raw.uint("min_dim")?, "min_dim", name)?,
