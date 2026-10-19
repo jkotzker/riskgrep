@@ -1,4 +1,5 @@
 pub mod bundle;
+pub mod cache;
 pub mod classify;
 pub mod engine;
 pub mod lines;

@@ -37,7 +37,7 @@ pub enum ShapeFacts {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Evidence {
     /// Bare rule identifier, e.g. `aws_access_token`.
     pub rule: String,

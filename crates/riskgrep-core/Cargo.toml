@@ -15,6 +15,7 @@ libc = "0.2.191"
 regex = "1.13"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
