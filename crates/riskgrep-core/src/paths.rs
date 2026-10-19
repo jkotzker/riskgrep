@@ -1,23 +1,40 @@
 //! Cache locations and private-directory handling.
 
+use std::ffi::OsString;
 use std::fs::{self, DirBuilder, Permissions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Per-user cache directory: `~/Library/Caches/riskgrep` on macOS,
-/// `$XDG_CACHE_HOME/riskgrep` or `~/.cache/riskgrep` elsewhere.
-pub fn cache_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    if cfg!(target_os = "macos") {
-        return home.join("Library/Caches/riskgrep");
+/// `$XDG_CACHE_HOME/riskgrep` or `~/.cache/riskgrep` elsewhere. `None` when no
+/// absolute location can be derived; the result is never a relative path.
+pub fn cache_dir() -> Option<PathBuf> {
+    cache_dir_for(
+        std::env::var_os("HOME"),
+        std::env::var_os("XDG_CACHE_HOME"),
+        cfg!(target_os = "macos"),
+    )
+}
+
+/// Pure form of [`cache_dir`] taking the environment values explicitly.
+pub fn cache_dir_for(
+    home: Option<OsString>,
+    xdg: Option<OsString>,
+    macos: bool,
+) -> Option<PathBuf> {
+    let absolute = |v: Option<OsString>| v.map(PathBuf::from).filter(|p| p.is_absolute());
+    if !macos {
+        if let Some(x) = absolute(xdg) {
+            return Some(x.join("riskgrep"));
+        }
     }
-    match std::env::var_os("XDG_CACHE_HOME") {
-        Some(x) if !x.is_empty() => PathBuf::from(x).join("riskgrep"),
-        _ => home.join(".cache/riskgrep"),
-    }
+    let home = absolute(home)?;
+    Some(if macos {
+        home.join("Library/Caches/riskgrep")
+    } else {
+        home.join(".cache/riskgrep")
+    })
 }
 
 /// Create `p` (and missing parents) with mode 0700; tighten an existing

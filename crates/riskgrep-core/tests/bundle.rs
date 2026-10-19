@@ -189,3 +189,15 @@ fn concurrent_compiles_same_key() {
         }
     });
 }
+
+#[test]
+fn compile_uncached_sets_warning() {
+    let d = tempfile::tempdir().unwrap();
+    let rs = write_ruleset(d.path(), "t1", RULE);
+    let b = riskgrep_core::bundle::compile_uncached(&[&rs]).unwrap();
+    assert!(b.compiled);
+    assert_eq!(
+        b.cache_warning.as_deref(),
+        Some("cache disabled: no absolute cache directory")
+    );
+}

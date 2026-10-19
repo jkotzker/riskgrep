@@ -179,25 +179,44 @@ pub fn load_or_compile(rulesets: &[&Ruleset], cache_dir: &Path) -> Result<Bundle
         Err(w) => cache_warning = Some(w),
     }
 
-    let rules = compile(rulesets)?;
-    let meta = collect_meta(&rules, rulesets)?;
-    let bytes = rules
+    let mut b = compile_bundle(rulesets, hash, stopwords)?;
+    b.cache_warning = cache_warning;
+    let bytes = b
+        .rules
         .serialize()
         .map_err(|e| err(format!("serialize: {e}")))?;
     if let Err(e) = write_atomic(&dir, &file, &bytes) {
         let msg = format!("cache not written: {e}");
-        cache_warning = Some(match cache_warning {
+        b.cache_warning = Some(match b.cache_warning.take() {
             Some(w) => format!("{w}; {msg}"),
             None => msg,
         });
     }
+    Ok(b)
+}
+
+/// Compile without reading or writing any cache; for callers with no usable
+/// cache directory. `cache_warning` is always set.
+pub fn compile_uncached(rulesets: &[&Ruleset]) -> Result<Bundle> {
+    let mut b = compile_bundle(rulesets, bundle_key(rulesets), merge_stopwords(rulesets)?)?;
+    b.cache_warning = Some("cache disabled: no absolute cache directory".into());
+    Ok(b)
+}
+
+fn compile_bundle(
+    rulesets: &[&Ruleset],
+    hash: String,
+    stopwords: BTreeMap<String, Vec<String>>,
+) -> Result<Bundle> {
+    let rules = compile(rulesets)?;
+    let meta = collect_meta(&rules, rulesets)?;
     Ok(Bundle {
         rules,
         meta,
         hash,
         stopwords,
         compiled: true,
-        cache_warning,
+        cache_warning: None,
     })
 }
 
