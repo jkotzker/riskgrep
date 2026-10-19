@@ -8,3 +8,5 @@ pub mod paths;
 pub mod post;
 pub mod ruleset;
 pub mod score;
+#[doc(hidden)]
+pub mod synth;

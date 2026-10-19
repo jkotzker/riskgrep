@@ -1,0 +1,5 @@
+id = "biometric_embeddings"
+version = "0.1.0"
+licence = "MIT OR Apache-2.0"
+description = "Embedding and voiceprint files: numpy, safetensors, and printed float arrays"
+categories = ["biometric"]

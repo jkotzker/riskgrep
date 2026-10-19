@@ -35,8 +35,9 @@ fn load_dir_reads_files() {
 }
 
 #[test]
-fn builtin_rulesets_empty_for_now() {
-    assert!(builtin_rulesets().is_empty());
+fn builtin_rulesets_embed_shipped_rulesets() {
+    let ids: Vec<String> = builtin_rulesets().into_iter().map(|r| r.id).collect();
+    assert_eq!(ids, ["biometric_embeddings"]);
 }
 
 #[test]
