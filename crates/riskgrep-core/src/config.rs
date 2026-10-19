@@ -74,7 +74,9 @@ pub struct Config {
     /// Set by the `--no-cache` override; the cache is on otherwise.
     pub no_cache: bool,
     /// The integration this configuration was loaded for (set by [`load`]);
-    /// decides whether a repository baseline is trusted.
+    /// decides whether a repository baseline is trusted. `Config::default()`
+    /// is `Mode::Cli`, which trusts repository baselines, so Claude Code
+    /// callers must build their config with `config::load(Mode::ClaudeCode, …)`.
     pub mode: Mode,
 }
 

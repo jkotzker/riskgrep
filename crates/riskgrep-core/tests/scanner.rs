@@ -1,7 +1,7 @@
 //! The `RiskGrep` facade. Secrets are generated at run time and never
 //! printed; assertions use statuses, scores, rule ids, and counts.
 
-use riskgrep_core::config::Config;
+use riskgrep_core::config::{Config, Mode};
 use riskgrep_core::model::{Category, Report, TargetReport, TargetStatus};
 use riskgrep_core::scanner::{RiskGrep, AFTER_READ};
 use riskgrep_core::synth;
@@ -165,7 +165,48 @@ fn walk_limit_partial() {
         .filter(|t| t.status == TargetStatus::Scanned)
         .count();
     assert_eq!(files, 3);
+    let scanned: Vec<String> = r
+        .targets
+        .iter()
+        .filter(|t| t.status == TargetStatus::Scanned)
+        .map(|t| t.target.clone())
+        .collect();
+    let base = d.path().display().to_string();
+    assert_eq!(
+        scanned,
+        (0..3)
+            .map(|i| format!("{base}/f{i}.txt"))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(r.summary.partial, 1);
+}
+
+#[test]
+fn walk_skips_fifo_and_completes() {
+    let d = tempfile::tempdir().unwrap();
+    fs::write(d.path().join("a.txt"), "a\n").unwrap();
+    fs::write(d.path().join("z.txt"), "z\n").unwrap();
+    let p = d.path().join("m_pipe");
+    let c = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+    // SAFETY: valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let t0 = Instant::now();
+    let r = scanner().scan_paths(&[d.path().to_path_buf()]);
+    assert!(t0.elapsed() < Duration::from_secs(1));
+    let statuses: Vec<(String, TargetStatus)> = r
+        .targets
+        .iter()
+        .map(|t| (t.target.clone(), t.status.clone()))
+        .collect();
+    let base = d.path().display().to_string();
+    assert_eq!(
+        statuses,
+        vec![
+            (format!("{base}/a.txt"), TargetStatus::Scanned),
+            (format!("{base}/m_pipe"), skipped("not a regular file")),
+            (format!("{base}/z.txt"), TargetStatus::Scanned),
+        ]
+    );
 }
 
 #[test]
@@ -242,6 +283,18 @@ fn missing_sidecar_falls_back_to_full_load() {
 }
 
 static HOOK_TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// Path whose read time the hook records, and the recorded time.
+static TIME_TARGET: Mutex<Option<(PathBuf, Option<SystemTime>)>> = Mutex::new(None);
+
+/// The one `AFTER_READ` hook of this test binary.
+fn test_hook(p: &Path) {
+    if let Some((path, at)) = TIME_TARGET.lock().unwrap().as_mut() {
+        if path == p {
+            *at = Some(SystemTime::now());
+        }
+    }
+    append_hook(p);
+}
 
 fn append_hook(p: &Path) {
     let mut t = HOOK_TARGET.lock().unwrap();
@@ -262,13 +315,49 @@ fn modified_during_scan_not_cached() {
     age(&f);
     let real = fs::canonicalize(&f).unwrap();
     *HOOK_TARGET.lock().unwrap() = Some(real);
-    let _ = AFTER_READ.set(append_hook);
+    let _ = AFTER_READ.set(test_hook);
     let first = scanner().scan_paths(std::slice::from_ref(&f));
     assert_eq!(only(&first).status, TargetStatus::Scanned);
     assert_eq!(only(&first).scores.get(&secret()).copied(), Some(0.0));
     // The file now holds a key; a later scan must see it, not a stale hit.
     let second = scanner().scan_paths(std::slice::from_ref(&f));
     assert_eq!(only(&second).scores.get(&secret()).copied(), Some(95.0));
+}
+
+#[test]
+fn stat_entry_time_is_taken_before_the_read() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("timed.rs");
+    fs::write(&f, aws_line(26)).unwrap();
+    age(&f);
+    let real = fs::canonicalize(&f).unwrap();
+    *TIME_TARGET.lock().unwrap() = Some((real.clone(), None));
+    let _ = AFTER_READ.set(test_hook);
+    let r = scanner().scan_paths(std::slice::from_ref(&f));
+    assert_eq!(only(&r).scores[&secret()], 95.0);
+    let read_at = TIME_TARGET
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .1
+        .expect("hook ran");
+    let read_at_ns = read_at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64;
+    let db = rusqlite::Connection::open(shared_cache().join("evidence.sqlite")).unwrap();
+    let written: i64 = db
+        .query_row(
+            "SELECT written_at_ns FROM stat WHERE realpath = ?1",
+            [std::os::unix::ffi::OsStrExt::as_bytes(real.as_os_str())],
+            |row| row.get(0),
+        )
+        .expect("stat row written");
+    assert!(
+        written <= read_at_ns,
+        "stat write time must precede the read, not follow the scan"
+    );
 }
 
 #[test]
@@ -385,9 +474,11 @@ fn ignore_rules_suppress_before_scoring() {
     let mut g = RiskGrep::with_cache_dir(cfg, None, Some(shared_cache())).unwrap();
     let r = g.scan_paths(&[f]);
     let t = only(&r);
-    assert!(t.evidence.iter().all(|e| e.rule != "aws_access_token"));
-    assert!(t.suppressed >= 1);
-    assert!(t.scores.get(&secret()).copied().unwrap_or(0.0) < 95.0);
+    // The key line matches only `aws_access_token`; with it ignored, nothing
+    // is left to score.
+    assert!(t.evidence.is_empty());
+    assert_eq!(t.suppressed, 1);
+    assert_eq!(t.scores.get(&secret()).copied(), Some(0.0));
 }
 
 #[test]
@@ -513,4 +604,52 @@ fn repository_baseline_suppresses() {
     assert!(t.suppressed >= 1);
     assert_eq!(t.scores[&secret()], 0.0);
     assert_eq!(r.summary.suppressed, t.suppressed);
+}
+
+fn baseline_repo(seed: u64) -> (TempDir, PathBuf) {
+    let repo = tempfile::tempdir().unwrap();
+    let f = repo.path().join("creds.rs");
+    fs::write(&f, aws_line(seed)).unwrap();
+    let root = fs::canonicalize(repo.path()).unwrap();
+    let first = scanner().scan_paths(std::slice::from_ref(&f));
+    let rel = |t: &str| {
+        fs::canonicalize(t)
+            .unwrap()
+            .strip_prefix(&root)
+            .unwrap()
+            .display()
+            .to_string()
+    };
+    let b = riskgrep_core::suppress::Baseline::create(&first.targets, rel).unwrap();
+    b.save(&repo.path().join(".riskgrep-baseline.json"))
+        .unwrap();
+    (repo, f)
+}
+
+#[test]
+fn untrusted_baseline_ignored_for_claude_code_honoured_for_git() {
+    let (repo, f) = baseline_repo(27);
+    let scan = |mode: Mode| {
+        let cfg = Config {
+            mode,
+            ..Config::default()
+        };
+        let mut g = RiskGrep::with_cache_dir(cfg, Some(repo.path()), Some(shared_cache())).unwrap();
+        g.scan_paths(std::slice::from_ref(&f))
+    };
+    let claude = scan(Mode::ClaudeCode);
+    assert_eq!(only(&claude).scores[&secret()], 95.0);
+    assert_eq!(only(&claude).suppressed, 0);
+    let git = scan(Mode::Git);
+    assert!(only(&git).evidence.is_empty());
+    assert_eq!(only(&git).scores[&secret()], 0.0);
+    // Trusted in the user config: Claude Code honours it too.
+    let cfg = Config {
+        mode: Mode::ClaudeCode,
+        trusted_repos: vec![repo.path().to_path_buf()],
+        ..Config::default()
+    };
+    let mut g = RiskGrep::with_cache_dir(cfg, Some(repo.path()), Some(shared_cache())).unwrap();
+    let trusted = g.scan_paths(std::slice::from_ref(&f));
+    assert_eq!(only(&trusted).scores[&secret()], 0.0);
 }

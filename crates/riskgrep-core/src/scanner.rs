@@ -20,7 +20,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::ops::RangeInclusive;
-use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -124,8 +124,10 @@ struct Pending {
     content: Content,
     /// Evidence-cache key; `None` when the result must not be cached.
     hash: Option<[u8; 32]>,
-    /// Stat entry to record; `None` when the file changed while being read.
-    stat: Option<StatKey>,
+    /// Stat entry to record, with the time the file was examined (taken
+    /// before the read, so the racy-edit window measures from it); `None`
+    /// when the file changed while being read.
+    stat: Option<(StatKey, SystemTime)>,
 }
 
 enum Step {
@@ -516,14 +518,24 @@ impl RiskGrep {
         }
         let real = fs::canonicalize(input)?;
         // Non-blocking, so a file swapped for a FIFO after the check above
-        // cannot hang the open; reads of regular files are unaffected.
+        // cannot hang the open (reads of regular files are unaffected); no
+        // follow, so a symlink swapped in after `canonicalize` is refused.
         let file: File = OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NONBLOCK)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
             .open(&real)?;
         let fmd = file.metadata()?;
+        // Taken with the stat: recorded as the stat entry's write time, so
+        // the racy-edit window is not narrowed by read or scan time.
+        let now = SystemTime::now();
         if !fmd.is_file() {
             return done(skipped("not a regular file"));
+        }
+        // The opened file must be the one checked above: a walk entry
+        // replaced by a symlink (which `canonicalize` would follow) or any
+        // other swap is not scanned.
+        if (fmd.dev(), fmd.ino()) != (md.dev(), md.ino()) {
+            return done(unscanned("file replaced during scan"));
         }
         let size = fmd.len();
         let key = StatKey::from_metadata(&real, &fmd);
@@ -542,7 +554,6 @@ impl RiskGrep {
         let ekey = format!("{}:{path_ext}", self.key);
         let rel = relative_to(self.rel_base.as_deref(), &real);
         let cache = self.cache.as_ref();
-        let now = SystemTime::now();
         let hit = |ev: Vec<Evidence>| {
             Ok(Step::Done(Raw::scanned(
                 target.to_string(),
@@ -564,6 +575,11 @@ impl RiskGrep {
         if let Some(hook) = AFTER_READ.get() {
             hook(&real);
         }
+        // A file that changed while being read still gets its evidence
+        // cached: that row is content-addressed (keyed by the hash of the
+        // bytes actually scanned), so it is correct for that content. Only
+        // the stat row, which would tie the pre-read identity to this
+        // content, is withheld.
         let stable = fs::metadata(&real)
             .map(|m| StatKey::from_metadata(&real, &m) == key)
             .unwrap_or(false);
@@ -587,7 +603,7 @@ impl RiskGrep {
             ekey,
             content,
             hash,
-            stat: stable.then_some(key),
+            stat: stable.then_some((key, now)),
         }))
     }
 
@@ -604,8 +620,8 @@ impl RiskGrep {
         };
         if let (Some(c), Some(h)) = (self.cache.as_ref(), p.hash) {
             c.put_evidence(h, &p.ekey, &ev);
-            if let Some(k) = &p.stat {
-                c.put_stat(k, h, SystemTime::now());
+            if let Some((k, examined)) = &p.stat {
+                c.put_stat(k, h, *examined);
             }
         }
         let status = match p.content.partial {
