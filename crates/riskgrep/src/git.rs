@@ -11,11 +11,9 @@ use riskgrep_core::config::{self, Action, GitConfig, Mode, Overrides};
 use riskgrep_core::model::round1;
 use riskgrep_core::{RiskGrep, TargetReport, TargetStatus};
 use std::collections::{BTreeSet, HashMap};
-use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::RangeInclusive;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -40,6 +38,8 @@ struct Staged {
     path: Vec<u8>,
     /// The source path of a rename or copy, used to diff against it.
     from: Option<Vec<u8>>,
+    /// Newly added: every line is an added line, so no diff is needed.
+    added: bool,
 }
 
 fn git(root: &Path) -> Command {
@@ -71,6 +71,7 @@ fn parse_raw(out: &[u8]) -> Vec<Staged> {
             continue;
         }
         let status = meta.rsplit(|b| *b == b' ').next().unwrap_or_default();
+        let added = status.first() == Some(&b'A');
         let two = matches!(status.first(), Some(b'R' | b'C'));
         let Some(first) = fields.next() else { break };
         if two {
@@ -78,11 +79,13 @@ fn parse_raw(out: &[u8]) -> Vec<Staged> {
             staged.push(Staged {
                 path: second.to_vec(),
                 from: Some(first.to_vec()),
+                added,
             });
         } else {
             staged.push(Staged {
                 path: first.to_vec(),
                 from: None,
+                added,
             });
         }
     }
@@ -230,7 +233,21 @@ fn staged_files(root: &Path) -> Result<Vec<Staged>, CliError> {
     Ok(parse_raw(&git_output(c)?))
 }
 
-fn added_lines(root: &Path, f: &Staged) -> Result<Option<Vec<RangeInclusive<u32>>>, CliError> {
+/// Added line ranges for every non-added staged entry, from ONE zero-context
+/// diff. The patch is split on `diff --git ` lines (a content line always
+/// starts with `+`, `-`, space, `@`, or `\`; a path with a newline is
+/// C-quoted, so a header is one line) and sections are matched to entries by
+/// order, which is the same path order as the `--raw` listing. If the counts
+/// disagree every entry falls back to whole-file scoring (`None`).
+fn added_lines(
+    root: &Path,
+    staged: &[Staged],
+) -> Result<Vec<Option<Vec<RangeInclusive<u32>>>>, CliError> {
+    let modified: Vec<usize> = (0..staged.len()).filter(|&i| !staged[i].added).collect();
+    let mut out: Vec<Option<Vec<RangeInclusive<u32>>>> = vec![None; staged.len()];
+    if modified.is_empty() {
+        return Ok(out);
+    }
     let mut c = git(root);
     c.args([
         "diff",
@@ -240,13 +257,30 @@ fn added_lines(root: &Path, f: &Staged) -> Result<Option<Vec<RangeInclusive<u32>
         "--no-ext-diff",
         "--no-textconv",
         "--find-renames",
-        "--",
+        "--diff-filter=MRC",
     ]);
-    c.arg(OsStr::from_bytes(&f.path));
-    if let Some(from) = &f.from {
-        c.arg(OsStr::from_bytes(from));
+    let patch = git_output(c)?;
+    let sections = split_sections(&patch);
+    if sections.len() == modified.len() {
+        for (i, sec) in modified.into_iter().zip(sections) {
+            out[i] = parse_hunks(sec);
+        }
     }
-    Ok(parse_hunks(&git_output(c)?))
+    Ok(out)
+}
+
+/// The slices of `patch` starting at each `diff --git ` line.
+fn split_sections(patch: &[u8]) -> Vec<&[u8]> {
+    let mut starts = Vec::new();
+    let mut pos = 0;
+    for line in patch.split_inclusive(|b| *b == b'\n') {
+        if line.starts_with(b"diff --git ") {
+            starts.push(pos);
+        }
+        pos += line.len();
+    }
+    starts.push(patch.len());
+    starts.windows(2).map(|w| &patch[w[0]..w[1]]).collect()
 }
 
 /// Lossy path text with control characters escaped.
@@ -318,13 +352,18 @@ fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
         parse_index(&git_output(c)?)
     };
 
+    let ranges = if full_files {
+        vec![None; staged.len()]
+    } else {
+        added_lines(&root, &staged)?
+    };
     let mut rg = RiskGrep::new(cfg, Some(&root))?;
     let mut batch = Batch::spawn(&root)?;
     let mut messages: Vec<String> = Vec::new();
     let mut offended = false;
 
     let result = (|| -> Result<(), CliError> {
-        for f in &staged {
+        for (f, only) in staged.iter().zip(&ranges) {
             let shown = display(&f.path);
             let name = String::from_utf8_lossy(&f.path).into_owned();
             let Some((mode, id)) = index.get(&f.path) else {
@@ -338,21 +377,20 @@ fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
             }
             let bytes = match batch.read(id)? {
                 Blob::Bytes(b) => b,
-                Blob::Missing | Blob::TooLarge => {
+                miss @ (Blob::Missing | Blob::TooLarge) => {
                     if blocks(git_cfg.on_error) {
-                        let why = "staged blob unavailable or too large";
-                        messages.push(unscanned_line(&shown, "not scanned", why));
+                        let why = if matches!(miss, Blob::Missing) {
+                            "staged blob missing".to_string()
+                        } else {
+                            format!("staged blob larger than {BLOB_MAX} bytes")
+                        };
+                        messages.push(unscanned_line(&shown, "not scanned", &why));
                     }
                     continue;
                 }
             };
             let blob_id = hex_to_bytes(id)
                 .ok_or_else(|| CliError(format!("invalid object id for `{shown}`")))?;
-            let only = if full_files {
-                None
-            } else {
-                added_lines(&root, f)?
-            };
             let t = rg.scan_blob(&name, &blob_id, &bytes, only.as_deref());
             match &t.status {
                 TargetStatus::Unscanned { reason } if blocks(git_cfg.on_error) => {

@@ -406,3 +406,131 @@ fn pre_commit_yaml_declares_hook() {
         assert!(t.contains(needle), "missing `{needle}`");
     }
 }
+
+fn commit_all(r: &Repo, msg: &str) {
+    r.git(&["commit", "-q", "--no-verify", "-m", msg]);
+}
+
+#[test]
+fn many_modified_files_use_bounded_git_processes() {
+    let r = Repo::new();
+    for i in 0..200 {
+        r.write(format!("f{i}.txt"), format!("a\nb\n{i}\n"));
+    }
+    r.git(&["add", "."]);
+    commit_all(&r, "base");
+    for i in 0..200 {
+        r.write(format!("f{i}.txt"), format!("a\nB\n{i}\n"));
+    }
+    r.git(&["add", "."]);
+    // A wrapper that logs each git invocation, then runs the real git.
+    let real = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let bin = r._tmp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let log = r._tmp.path().join("calls.log");
+    let wrapper = bin.join("git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\necho x >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            real.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    // Warm the rules bundle (compiled on the first scan) with a trivial run so
+    // the timed run measures per-file overhead.
+    let warm = Repo::new();
+    warm.write("w.txt", "x\n");
+    warm.stage("w.txt");
+    warm.pre_commit().assert().code(0);
+    let start = std::time::Instant::now();
+    r.pre_commit().env("PATH", path).assert().code(0).stderr("");
+    assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+    let calls = fs::read_to_string(&log).unwrap().lines().count();
+    assert!(calls <= 8, "{calls} git processes");
+}
+
+#[test]
+fn rename_with_edit_of_secret_line_blocks() {
+    let r = Repo::new();
+    r.write("old.txt", keyed_text(&key(20)));
+    r.stage("old.txt");
+    commit_all(&r, "old");
+    r.git(&["mv", "old.txt", "new.txt"]);
+    r.write("new.txt", keyed_text(&key(21)));
+    r.stage("new.txt");
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "riskgrep: new.txt: secret 95.0 (aws_access_token, line 7)",
+        ));
+}
+
+#[test]
+fn modified_binary_npy_is_scored_whole() {
+    let r = Repo::new();
+    r.write("voiceprints.npy", synth::npy("<f4", &[10, 192]));
+    r.stage("voiceprints.npy");
+    commit_all(&r, "old");
+    r.write("voiceprints.npy", synth::npy("<f4", &[11, 192]));
+    r.stage("voiceprints.npy");
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "riskgrep: voiceprints.npy: biometric 79.0",
+        ));
+}
+
+#[test]
+fn missing_blob_follows_on_error() {
+    let r = Repo::new();
+    let bogus = "1234567890123456789012345678901234567890";
+    let mut c = Command::new("git");
+    isolate(&mut c, &r.root);
+    assert!(c
+        .args([
+            "update-index",
+            "--add",
+            "--info-only",
+            "--cacheinfo",
+            &format!("100644,{bogus},gone.txt"),
+        ])
+        .status()
+        .unwrap()
+        .success());
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "riskgrep: gone.txt: not scanned (staged blob missing)",
+        ));
+    r.write(".riskgrep.toml", "[git]\non_error = \"allow\"\n");
+    r.pre_commit().assert().code(0);
+}
+
+#[test]
+fn too_large_blob_follows_on_error() {
+    let r = Repo::new();
+    let f = fs::File::create(r.root.join("huge.bin")).unwrap();
+    f.set_len((128 << 20) + 1).unwrap();
+    drop(f);
+    r.stage("huge.bin");
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "riskgrep: huge.bin: not scanned (staged blob larger than 134217728 bytes)",
+        ));
+}
