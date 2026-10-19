@@ -3,6 +3,7 @@
 
 use crate::model::Category;
 use crate::score::Tiers;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use yara_x::MetaValue;
 
@@ -19,7 +20,8 @@ impl std::error::Error for MetaError {}
 
 /// A post-processor and its arguments. Regexes are stored as source text and
 /// compiled by the scan engine.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "post", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PostSpec {
     Span {
         regex: String,
@@ -49,7 +51,8 @@ pub enum PostSpec {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuleMeta {
     pub category: Category,
     pub weight: f64,

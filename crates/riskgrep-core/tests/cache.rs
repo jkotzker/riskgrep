@@ -199,3 +199,20 @@ fn refuses_foreign_directory() {
     // A root-owned directory is refused (or cannot be created into).
     assert!(Cache::open(Path::new("/private/var/root")).is_none());
 }
+
+#[test]
+fn first_error_disables_the_handle() {
+    let d = tempfile::tempdir().unwrap();
+    let c = open(d.path());
+    let k = key("/a", OLD_NS);
+    c.put_stat(&k, [7; 32], later(1000));
+    assert_eq!(c.content_hash_for(&k, later(1001)), Some([7; 32]));
+    let other = rusqlite::Connection::open(d.path().join("evidence.sqlite")).unwrap();
+    other.execute_batch("DROP TABLE evidence;").unwrap();
+    drop(other);
+    assert!(!c.is_disabled());
+    assert_eq!(c.evidence([7; 32], "b1"), None);
+    assert!(c.is_disabled());
+    // The stat table is intact, but the handle no longer reads it.
+    assert_eq!(c.content_hash_for(&k, later(1001)), None);
+}

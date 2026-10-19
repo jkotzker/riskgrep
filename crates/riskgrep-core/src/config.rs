@@ -73,6 +73,9 @@ pub struct Config {
     pub trusted_repos: Vec<PathBuf>,
     /// Set by the `--no-cache` override; the cache is on otherwise.
     pub no_cache: bool,
+    /// The integration this configuration was loaded for (set by [`load`]);
+    /// decides whether a repository baseline is trusted.
+    pub mode: Mode,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -132,6 +135,7 @@ impl Default for Config {
             },
             trusted_repos: Vec::new(),
             no_cache: false,
+            mode: Mode::Cli,
         }
     }
 }
@@ -361,7 +365,10 @@ pub fn load(
     repo_root: Option<&Path>,
     cli_overrides: Overrides,
 ) -> Result<Config, ConfigError> {
-    let mut cfg = Config::default();
+    let mut cfg = Config {
+        mode,
+        ..Config::default()
+    };
     let mut spec = IgnoreSpec::default();
     if let Some(layer) = user_config_path()
         .map(|p| read_layer(&p))

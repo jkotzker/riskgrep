@@ -89,3 +89,47 @@ fn categories_are_independent() {
     near(m[&Category("secret".into())], 10.0);
     near(m[&Category("pii".into())], 80.0);
 }
+
+#[test]
+fn tiers_round_trip_through_text_and_json() {
+    let t: Tiers = "1:20,2:50.5,100:-90".parse().unwrap();
+    assert_eq!(t.to_string().parse::<Tiers>().unwrap(), t);
+    let json = serde_json::to_string(&t).unwrap();
+    assert_eq!(json, "\"1:20,2:50.5,100:-90\"");
+    assert_eq!(serde_json::from_str::<Tiers>(&json).unwrap(), t);
+    assert!(serde_json::from_str::<Tiers>("\"2:1,1:1\"").is_err());
+}
+
+#[test]
+fn score_target_uses_meta_weights_and_tiers() {
+    use riskgrep_core::meta::RuleMeta;
+    use riskgrep_core::model::Evidence;
+    use std::collections::HashMap;
+    let ev = |rule: &str, count: u32| Evidence {
+        rule: rule.into(),
+        category: Category("secret".into()),
+        weight: 99.0,
+        count,
+        locations: vec![],
+        shape: vec![],
+        fingerprints: vec![],
+    };
+    let m = |w: f64, tiers: Option<&str>| RuleMeta {
+        category: Category("secret".into()),
+        weight: w,
+        tiers: tiers.map(|t| t.parse().unwrap()),
+        family: None,
+        family_cap: None,
+        post: vec![],
+    };
+    let meta = HashMap::from([
+        ("ns:a".to_string(), m(50.0, None)),
+        ("ns:b".to_string(), m(0.0, Some("1:10,3:20"))),
+    ]);
+    let s = score_target(&[ev("a", 1), ev("b", 3)], &meta);
+    let got = s[&Category("secret".into())];
+    assert!((got - 60.0).abs() < 1e-9, "{got}");
+    // Unknown rule: its own weight.
+    let s = score_target(&[ev("zzz", 1)], &meta);
+    assert!((s[&Category("secret".into())] - 99.0).abs() < 1e-9);
+}

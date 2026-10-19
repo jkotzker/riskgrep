@@ -286,3 +286,11 @@ fn weight_override_errors() {
     assert!(c.apply_weight_overrides(&mut m).is_err());
     assert_eq!(m["secrets-core:aws"].weight, 5.0);
 }
+
+#[test]
+fn load_records_mode() {
+    let _e = env(None, None);
+    for mode in [Mode::Cli, Mode::Git, Mode::ClaudeCode] {
+        assert_eq!(load(mode, None, Overrides::default()).unwrap().mode, mode);
+    }
+}

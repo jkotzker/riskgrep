@@ -113,19 +113,22 @@ fn collect_meta(rules: &yara_x::Rules, rulesets: &[&Ruleset]) -> Result<HashMap<
 
 type Cached = (yara_x::Rules, HashMap<String, RuleMeta>);
 
-/// Read a cached bundle. `Ok(None)` means no cache entry exists; `Err` carries
-/// a warning explaining why an existing entry was not used.
-fn read_cached(
+/// Check that `cache_dir` and `dir` are directories owned by the current user
+/// (tightening a loose mode) and that `file`, if present, is a private
+/// regular file owned by the current user. `Ok(false)` means something does
+/// not exist; `Err` carries a warning explaining why an entry must not be used.
+fn check_private(
     cache_dir: &Path,
     dir: &Path,
     file: &Path,
-    rulesets: &[&Ruleset],
-) -> std::result::Result<Option<Cached>, String> {
+    what: &str,
+) -> std::result::Result<bool, String> {
+    // SAFETY: geteuid has no preconditions and cannot fail.
     let euid = unsafe { libc::geteuid() };
     for d in [cache_dir, dir] {
         let md = match fs::symlink_metadata(d) {
             Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(format!("cache directory {}: {e}", d.display())),
         };
         if !md.is_dir() || md.uid() != euid {
@@ -140,14 +143,28 @@ fn read_cached(
     }
     let md = match fs::symlink_metadata(file) {
         Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("cached bundle {}: {e}", file.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("{what} {}: {e}", file.display())),
     };
     if !md.file_type().is_file() || md.uid() != euid || md.mode() & 0o077 != 0 {
         return Err(format!(
-            "cached bundle {} is not a private regular file owned by the current user; not used",
+            "{what} {} is not a private regular file owned by the current user; not used",
             file.display()
         ));
+    }
+    Ok(true)
+}
+
+/// Read a cached bundle. `Ok(None)` means no cache entry exists; `Err` carries
+/// a warning explaining why an existing entry was not used.
+fn read_cached(
+    cache_dir: &Path,
+    dir: &Path,
+    file: &Path,
+    rulesets: &[&Ruleset],
+) -> std::result::Result<Option<Cached>, String> {
+    if !check_private(cache_dir, dir, file, "cached bundle")? {
+        return Ok(None);
     }
     let bytes = fs::read(file).map_err(|e| format!("cached bundle {}: {e}", file.display()))?;
     let rules = yara_x::Rules::deserialize(&bytes)
@@ -155,6 +172,48 @@ fn read_cached(
     let meta = collect_meta(&rules, rulesets)
         .map_err(|e| format!("cached bundle {} is invalid: {e}", file.display()))?;
     Ok(Some((rules, meta)))
+}
+
+fn sidecar_path(dir: &Path, key: &str) -> std::path::PathBuf {
+    dir.join(format!("{key}.meta.json"))
+}
+
+/// The rule metadata stored beside the bundle `key`, so scoring cached
+/// evidence needs no compiled rules. `None` when the sidecar is missing,
+/// fails the privacy checks, or does not parse; the caller then loads the
+/// full bundle (which rewrites the sidecar).
+pub fn load_meta_sidecar(cache_dir: &Path, key: &str) -> Option<HashMap<String, RuleMeta>> {
+    let dir = cache_dir.join("bundles");
+    let file = sidecar_path(&dir, key);
+    if !matches!(
+        check_private(cache_dir, &dir, &file, "rule metadata"),
+        Ok(true)
+    ) {
+        return None;
+    }
+    let bytes = fs::read(&file).ok()?;
+    let meta: BTreeMap<String, RuleMeta> = serde_json::from_slice(&bytes).ok()?;
+    let valid = |m: &RuleMeta| {
+        (-100.0..=100.0).contains(&m.weight)
+            && m.family_cap.is_none_or(|c| (0.0..=100.0).contains(&c))
+    };
+    if meta.is_empty() || !meta.iter().all(|(k, m)| k.contains(':') && valid(m)) {
+        return None;
+    }
+    Some(meta.into_iter().collect())
+}
+
+fn write_sidecar(dir: &Path, key: &str, meta: &HashMap<String, RuleMeta>) -> Result<()> {
+    let sorted: BTreeMap<&String, &RuleMeta> = meta.iter().collect();
+    let json = serde_json::to_vec(&sorted).map_err(|e| err(format!("rule metadata: {e}")))?;
+    write_atomic(dir, &sidecar_path(dir, key), &json)
+}
+
+fn add_warning(b: &mut Bundle, msg: String) {
+    b.cache_warning = Some(match b.cache_warning.take() {
+        Some(w) => format!("{w}; {msg}"),
+        None => msg,
+    });
 }
 
 pub fn load_or_compile(rulesets: &[&Ruleset], cache_dir: &Path) -> Result<Bundle> {
@@ -166,14 +225,20 @@ pub fn load_or_compile(rulesets: &[&Ruleset], cache_dir: &Path) -> Result<Bundle
     let mut cache_warning = None;
     match read_cached(cache_dir, &dir, &file, rulesets) {
         Ok(Some((rules, meta))) => {
-            return Ok(Bundle {
+            let mut b = Bundle {
                 rules,
                 meta,
                 hash,
                 stopwords,
                 compiled: false,
                 cache_warning: None,
-            })
+            };
+            if load_meta_sidecar(cache_dir, &b.hash).is_none() {
+                if let Err(e) = write_sidecar(&dir, &b.hash, &b.meta) {
+                    add_warning(&mut b, format!("rule metadata not written: {e}"));
+                }
+            }
+            return Ok(b);
         }
         Ok(None) => {}
         Err(w) => cache_warning = Some(w),
@@ -186,11 +251,9 @@ pub fn load_or_compile(rulesets: &[&Ruleset], cache_dir: &Path) -> Result<Bundle
         .serialize()
         .map_err(|e| err(format!("serialize: {e}")))?;
     if let Err(e) = write_atomic(&dir, &file, &bytes) {
-        let msg = format!("cache not written: {e}");
-        b.cache_warning = Some(match b.cache_warning.take() {
-            Some(w) => format!("{w}; {msg}"),
-            None => msg,
-        });
+        add_warning(&mut b, format!("cache not written: {e}"));
+    } else if let Err(e) = write_sidecar(&dir, &b.hash, &b.meta) {
+        add_warning(&mut b, format!("rule metadata not written: {e}"));
     }
     Ok(b)
 }
@@ -226,7 +289,9 @@ fn write_atomic(dir: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
     let io = |e: std::io::Error| err(format!("{}: {e}", file.display()));
     ensure_private_dir(dir).map_err(io)?;
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = file.with_extension(format!("yxb.tmp-{}-{n}", std::process::id()));
+    let mut tmp = file.as_os_str().to_owned();
+    tmp.push(format!(".tmp-{}-{n}", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp);
     let mut f = OpenOptions::new()
         .write(true)
         .create_new(true)

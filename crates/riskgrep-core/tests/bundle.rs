@@ -202,3 +202,31 @@ fn compile_uncached_sets_warning() {
         Some("cache disabled: no absolute cache directory")
     );
 }
+
+#[test]
+fn meta_sidecar_written_private_and_read_back() {
+    let d = tempfile::tempdir().unwrap();
+    let c = tempfile::tempdir().unwrap();
+    let rs = write_ruleset(d.path(), "t1", RULE);
+    let b = load_or_compile(&[&rs], c.path()).unwrap();
+    let side = c
+        .path()
+        .join("bundles")
+        .join(format!("{}.meta.json", b.hash));
+    assert_eq!(
+        fs::metadata(&side).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let m = riskgrep_core::bundle::load_meta_sidecar(c.path(), &b.hash).unwrap();
+    assert_eq!(m, b.meta);
+    // A loose mode or a corrupt sidecar is not used.
+    fs::set_permissions(&side, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(riskgrep_core::bundle::load_meta_sidecar(c.path(), &b.hash).is_none());
+    fs::set_permissions(&side, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&side, b"{not json").unwrap();
+    assert!(riskgrep_core::bundle::load_meta_sidecar(c.path(), &b.hash).is_none());
+    // A cached load with a bad sidecar rewrites it.
+    let b2 = load_or_compile(&[&rs], c.path()).unwrap();
+    assert!(!b2.compiled);
+    assert!(riskgrep_core::bundle::load_meta_sidecar(c.path(), &b.hash).is_some());
+}

@@ -4,11 +4,13 @@
 //! the BLAKE3 of its content; `evidence` maps (content hash, rules bundle) to
 //! the evidence produced by scanning it. Rows hold rule ids, offsets,
 //! structural facts, and digests only, never matched bytes. Every failure
-//! degrades to a cache miss or a swallowed write with one stderr line.
+//! degrades to a cache miss or a swallowed write with one stderr line, after
+//! which the handle stops using the database for the rest of its life.
 
 use crate::model::Evidence;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::fs::{Metadata, OpenOptions, Permissions};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -56,10 +58,8 @@ struct CachedEvidence {
 
 pub struct Cache {
     conn: Connection,
-}
-
-fn warn(what: &str, reason: impl std::fmt::Display) {
-    eprintln!("riskgrep: cache {what}: {reason}");
+    /// Set by the first read or write error; every later call is a no-op.
+    failed: Cell<bool>,
 }
 
 fn hex(b: &[u8; 32]) -> String {
@@ -117,7 +117,22 @@ impl Cache {
             .map_err(|e| format!("database file mode: {e}"))?;
         let conn = Connection::open(&file).map_err(|e| format!("open: {e}"))?;
         Self::init(&conn).map_err(|e| format!("schema: {e}"))?;
-        Ok(Cache { conn })
+        Ok(Cache {
+            conn,
+            failed: Cell::new(false),
+        })
+    }
+
+    /// Report the first error (one stderr line) and stop using the cache.
+    fn warn(&self, what: &str, reason: impl std::fmt::Display) {
+        if !self.failed.replace(true) {
+            eprintln!("riskgrep: cache {what}: {reason}; cache bypassed for the rest of this run");
+        }
+    }
+
+    /// True once an error has disabled this handle.
+    pub fn is_disabled(&self) -> bool {
+        self.failed.get()
     }
 
     fn init(conn: &Connection) -> rusqlite::Result<()> {
@@ -160,6 +175,9 @@ impl Cache {
     /// The content hash recorded for `key`, if the file is unchanged and the
     /// entry is not racy (written within 2 s of the file's mtime).
     pub fn content_hash_for(&self, key: &StatKey, _now: SystemTime) -> Option<[u8; 32]> {
+        if self.failed.get() {
+            return None;
+        }
         let (mtime, ctime) = (
             i64::try_from(key.mtime_ns).ok()?,
             i64::try_from(key.ctime_ns).ok()?,
@@ -184,7 +202,7 @@ impl Cache {
             Ok(Some(r)) => r,
             Ok(None) => return None,
             Err(e) => {
-                warn("read", e);
+                self.warn("read", e);
                 return None;
             }
         };
@@ -195,6 +213,9 @@ impl Cache {
     }
 
     pub fn put_stat(&self, key: &StatKey, hash: [u8; 32], now: SystemTime) {
+        if self.failed.get() {
+            return;
+        }
         let (Ok(mtime), Ok(ctime), Ok(written)) = (
             i64::try_from(key.mtime_ns),
             i64::try_from(key.ctime_ns),
@@ -216,13 +237,16 @@ impl Cache {
                 written
             ],
         ) {
-            warn("write", e);
+            self.warn("write", e);
         }
     }
 
     /// Cached evidence for (`hash`, `bundle`); `None` on a miss or an
     /// unreadable row.
     pub fn evidence(&self, hash: [u8; 32], bundle: &str) -> Option<Vec<Evidence>> {
+        if self.failed.get() {
+            return None;
+        }
         let json: String = match self
             .conn
             .query_row(
@@ -235,14 +259,14 @@ impl Cache {
             Ok(Some(j)) => j,
             Ok(None) => return None,
             Err(e) => {
-                warn("read", e);
+                self.warn("read", e);
                 return None;
             }
         };
         let rows: Vec<CachedEvidence> = match serde_json::from_str(&json) {
             Ok(r) => r,
             Err(_) => {
-                warn("read", "stored evidence is unreadable");
+                self.warn("read", "stored evidence is unreadable");
                 return None;
             }
         };
@@ -259,12 +283,15 @@ impl Cache {
             })
             .collect::<Option<Vec<_>>>()
             .or_else(|| {
-                warn("read", "stored fingerprints are unreadable");
+                self.warn("read", "stored fingerprints are unreadable");
                 None
             })
     }
 
     pub fn put_evidence(&self, hash: [u8; 32], bundle: &str, ev: &[Evidence]) {
+        if self.failed.get() {
+            return;
+        }
         let rows: Vec<CachedEvidence> = ev
             .iter()
             .map(|e| CachedEvidence {
@@ -275,7 +302,7 @@ impl Cache {
         let json = match serde_json::to_string(&rows) {
             Ok(j) => j,
             Err(_) => {
-                warn("write", "evidence could not be encoded");
+                self.warn("write", "evidence could not be encoded");
                 return;
             }
         };
@@ -283,7 +310,7 @@ impl Cache {
             "INSERT OR REPLACE INTO evidence(hash, bundle, json) VALUES (?1,?2,?3)",
             params![&hash[..], bundle, json],
         ) {
-            warn("write", e);
+            self.warn("write", e);
         }
     }
 }

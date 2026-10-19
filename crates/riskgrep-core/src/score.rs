@@ -1,8 +1,10 @@
 //! Noisy-or scorer. Per category: positive weights combine as
 //! `1 - prod(1 - p)`, families are capped, negative weights dampen.
 
-use crate::model::Category;
-use std::collections::BTreeMap;
+use crate::meta::RuleMeta;
+use crate::model::{Category, Evidence};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
 
@@ -50,6 +52,32 @@ impl FromStr for Tiers {
             out.push((t, w));
         }
         Ok(Tiers(out))
+    }
+}
+
+impl fmt::Display for Tiers {
+    /// The `threshold:weight,...` form [`FromStr`] reads.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, (t, w)) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{t}:{w}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for Tiers {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Tiers {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -129,4 +157,42 @@ pub fn score(contribs: &[Contribution]) -> BTreeMap<Category, f64> {
             (cat.clone(), 100.0 * (1.0 - miss) * a.damp)
         })
         .collect()
+}
+
+/// Scores of one target's evidence. `meta` is keyed `namespace:rule`; the
+/// weight, tiers, and family come from it (so weight overrides apply), and
+/// evidence whose rule has no metadata scores with its own weight alone.
+/// Bare rule ids are assumed unique across `meta`'s namespaces.
+pub fn score_target(
+    evidence: &[Evidence],
+    meta: &HashMap<String, RuleMeta>,
+) -> BTreeMap<Category, f64> {
+    let by_rule: HashMap<&str, &RuleMeta> = meta
+        .iter()
+        .filter_map(|(k, m)| k.split_once(':').map(|(_, rule)| (rule, m)))
+        .collect();
+    let contribs: Vec<Contribution> = evidence
+        .iter()
+        .map(|e| match by_rule.get(e.rule.as_str()) {
+            Some(m) => Contribution {
+                rule: e.rule.clone(),
+                category: e.category.clone(),
+                weight: m.weight,
+                count: e.count,
+                tiers: m.tiers.clone(),
+                family: m.family.clone(),
+                family_cap: m.family_cap,
+            },
+            None => Contribution {
+                rule: e.rule.clone(),
+                category: e.category.clone(),
+                weight: e.weight,
+                count: e.count,
+                tiers: None,
+                family: None,
+                family_cap: None,
+            },
+        })
+        .collect();
+    score(&contribs)
 }

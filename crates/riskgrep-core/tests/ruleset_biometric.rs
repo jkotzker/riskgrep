@@ -6,7 +6,7 @@ use riskgrep_core::engine::Engine;
 use riskgrep_core::meta::RuleMeta;
 use riskgrep_core::model::{Category, Evidence, ShapeFacts};
 use riskgrep_core::ruleset::builtin_rulesets;
-use riskgrep_core::score::{score, Contribution};
+use riskgrep_core::score::score_target;
 use riskgrep_core::synth::{self, FloatStyle};
 use std::collections::{BTreeMap, HashMap};
 
@@ -35,24 +35,8 @@ fn scan(f: &Fixture, path: &str, content: &[u8]) -> Vec<Evidence> {
     f.engine.scan_content(&mut sc, path, content).unwrap()
 }
 
-/// Test-local scorer; the production version lives with the CLI.
 fn score_of(evidence: &[Evidence], f: &Fixture) -> BTreeMap<Category, f64> {
-    let contribs: Vec<Contribution> = evidence
-        .iter()
-        .map(|e| {
-            let m = &f.meta[&format!("biometric_embeddings:{}", e.rule)];
-            Contribution {
-                rule: e.rule.clone(),
-                category: e.category.clone(),
-                weight: e.weight,
-                count: e.count,
-                tiers: m.tiers.clone(),
-                family: m.family.clone(),
-                family_cap: m.family_cap,
-            }
-        })
-        .collect();
-    score(&contribs)
+    score_target(evidence, &f.meta)
 }
 
 fn biometric(f: &Fixture, path: &str, content: &[u8]) -> Option<f64> {

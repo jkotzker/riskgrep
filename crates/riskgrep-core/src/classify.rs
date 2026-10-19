@@ -148,26 +148,51 @@ pub fn classify(name: &str, head: &[u8]) -> FileClass {
     }
 }
 
-fn read_range(file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
-    let mut buf = vec![0u8; usize::try_from(len).map_err(io::Error::other)?];
-    file.read_exact_at(&mut buf, offset)?;
-    Ok(buf)
+/// Something bytes can be read from at explicit offsets: an open file or an
+/// in-memory buffer (a git blob, raw text).
+trait Source {
+    fn range(&self, offset: u64, len: u64) -> io::Result<Vec<u8>>;
+}
+
+impl Source for File {
+    fn range(&self, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+        let mut buf = vec![0u8; usize::try_from(len).map_err(io::Error::other)?];
+        self.read_exact_at(&mut buf, offset)?;
+        Ok(buf)
+    }
+}
+
+impl Source for [u8] {
+    fn range(&self, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+        let start = usize::try_from(offset).map_err(io::Error::other)?;
+        let len = usize::try_from(len).map_err(io::Error::other)?;
+        start
+            .checked_add(len)
+            .and_then(|end| self.get(start..end))
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
+    }
 }
 
 /// Read the first `want` bytes (bounded by `size`), noting what was skipped
 /// when `want` is below the file size and `note_skip` is set.
-fn read_prefix(file: &File, size: u64, want: u64, note_skip: bool) -> io::Result<Content> {
+fn read_prefix<S: Source + ?Sized>(
+    src: &S,
+    size: u64,
+    want: u64,
+    note_skip: bool,
+) -> io::Result<Content> {
     let n = want.min(size);
     let partial = (note_skip && n < size).then(|| format!("bytes {n}..{size} not read"));
     Ok(Content {
-        bytes: read_range(file, 0, n)?,
+        bytes: src.range(0, n)?,
         partial,
     })
 }
 
 /// Length of an npy header section (magic, version, length field, header text).
-fn npy_header_end(file: &File, size: u64, cap: u64) -> io::Result<u64> {
-    let prefix = read_range(file, 0, size.min(12))?;
+fn npy_header_end<S: Source + ?Sized>(src: &S, size: u64, cap: u64) -> io::Result<u64> {
+    let prefix = src.range(0, size.min(12))?;
     let end = match prefix.get(6) {
         Some(1) if prefix.len() >= 10 => 10 + u64::from(u16::from_le_bytes([prefix[8], prefix[9]])),
         Some(2 | 3) if prefix.len() >= 12 => {
@@ -188,31 +213,45 @@ pub fn read_for_scan(
     class: &FileClass,
     limits: &Limits,
 ) -> io::Result<Content> {
+    read_from(file, size, class, limits)
+}
+
+/// [`read_for_scan`] over an in-memory buffer, under the same limits.
+pub fn slice_for_scan(bytes: &[u8], class: &FileClass, limits: &Limits) -> io::Result<Content> {
+    read_from(bytes, bytes.len() as u64, class, limits)
+}
+
+fn read_from<S: Source + ?Sized>(
+    src: &S,
+    size: u64,
+    class: &FileClass,
+    limits: &Limits,
+) -> io::Result<Content> {
     match class {
         FileClass::Text => {
             if size <= limits.text_max {
-                return read_prefix(file, size, size, false);
+                return read_prefix(src, size, size, false);
             }
             let s = limits.sample.min(size / 2);
-            let mut bytes = read_range(file, 0, s)?;
+            let mut bytes = src.range(0, s)?;
             bytes.push(b'\n');
-            bytes.extend(read_range(file, size - s, s)?);
+            bytes.extend(src.range(size - s, s)?);
             Ok(Content {
                 bytes,
                 partial: Some(format!("bytes {s}..{} not read", size - s)),
             })
         }
         FileClass::KnownBinary(Known::Npy) => {
-            let end = npy_header_end(file, size, limits.text_max)?;
-            read_prefix(file, size, end, false)
+            let end = npy_header_end(src, size, limits.text_max)?;
+            read_prefix(src, size, end, false)
         }
         FileClass::KnownBinary(Known::Safetensors) => {
-            let head = read_range(file, 0, size.min(8))?;
+            let head = src.range(0, size.min(8))?;
             let total = le_u64(&head).map_or(8, |n| n.saturating_add(8)).min(size);
-            read_prefix(file, size.min(total), SAFETENSORS_CAP, true)
+            read_prefix(src, size.min(total), SAFETENSORS_CAP, true)
         }
         FileClass::KnownBinary(Known::Npz | Known::KeyStore) => {
-            read_prefix(file, size, limits.text_max, true)
+            read_prefix(src, size, limits.text_max, true)
         }
         FileClass::Archive(_) | FileClass::Image(_) | FileClass::UnknownBinary => Ok(Content {
             bytes: Vec::new(),
