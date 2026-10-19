@@ -1,0 +1,9 @@
+[package]
+name = "riskgrep-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+yara-x = { version = "=1.21.0", default-features = false, features = ["constant-folding", "exact-atoms", "fast-regexp", "math-module", "string-module", "native-code-serialization"] }
