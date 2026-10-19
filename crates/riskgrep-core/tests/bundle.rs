@@ -121,3 +121,71 @@ fn cache_dir_private() {
         0o700
     );
 }
+
+#[test]
+fn unwritable_cache_is_bypassed_with_warning() {
+    let d = tempfile::tempdir().unwrap();
+    let c = tempfile::tempdir().unwrap();
+    let rs = write_ruleset(d.path(), "t1", RULE);
+    let not_a_dir = c.path().join("file");
+    fs::write(&not_a_dir, b"x").unwrap();
+    let b = load_or_compile(&[&rs], &not_a_dir).unwrap();
+    assert!(b.compiled);
+    assert!(b.cache_warning.is_some());
+}
+
+#[test]
+fn loose_mode_bundle_not_used() {
+    let d = tempfile::tempdir().unwrap();
+    let c = tempfile::tempdir().unwrap();
+    let rs = write_ruleset(d.path(), "t1", RULE);
+    let b1 = load_or_compile(&[&rs], c.path()).unwrap();
+    assert!(b1.cache_warning.is_none());
+    let file = c.path().join("bundles").join(format!("{}.yxb", b1.hash));
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    let b2 = load_or_compile(&[&rs], c.path()).unwrap();
+    assert!(b2.compiled);
+    assert!(b2.cache_warning.is_some());
+}
+
+#[test]
+fn symlinked_bundle_not_used() {
+    let d = tempfile::tempdir().unwrap();
+    let c = tempfile::tempdir().unwrap();
+    let rs = write_ruleset(d.path(), "t1", RULE);
+    let b1 = load_or_compile(&[&rs], c.path()).unwrap();
+    let file = c.path().join("bundles").join(format!("{}.yxb", b1.hash));
+    let real = c.path().join("bundles").join("real");
+    fs::rename(&file, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &file).unwrap();
+    let b2 = load_or_compile(&[&rs], c.path()).unwrap();
+    assert!(b2.compiled);
+    assert!(b2.cache_warning.is_some());
+}
+
+#[test]
+fn corrupt_bundle_sets_warning() {
+    let d = tempfile::tempdir().unwrap();
+    let c = tempfile::tempdir().unwrap();
+    let rs = write_ruleset(d.path(), "t1", RULE);
+    let b1 = load_or_compile(&[&rs], c.path()).unwrap();
+    let file = c.path().join("bundles").join(format!("{}.yxb", b1.hash));
+    fs::write(&file, b"garbage").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    let b2 = load_or_compile(&[&rs], c.path()).unwrap();
+    assert!(b2.compiled && b2.cache_warning.is_some());
+}
+
+#[test]
+fn concurrent_compiles_same_key() {
+    let d = tempfile::tempdir().unwrap();
+    let c = tempfile::tempdir().unwrap();
+    let rs = write_ruleset(d.path(), "t1", RULE);
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| {
+                load_or_compile(&[&rs], c.path()).unwrap();
+            });
+        }
+    });
+}

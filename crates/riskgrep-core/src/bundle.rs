@@ -6,8 +6,9 @@ use crate::ruleset::{Error, Result, Ruleset};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const YARA_X_VERSION: &str = "1.21.0";
 
@@ -20,6 +21,8 @@ pub struct Bundle {
     pub stopwords: BTreeMap<String, Vec<String>>,
     /// True when this load compiled from source rather than reading the cache.
     pub compiled: bool,
+    /// Set when the cache was bypassed, found invalid, or could not be written.
+    pub cache_warning: Option<String>,
 }
 
 /// Hex BLAKE3 over the yara-x version, platform, and every ruleset's id,
@@ -108,24 +111,70 @@ fn collect_meta(rules: &yara_x::Rules, rulesets: &[&Ruleset]) -> Result<HashMap<
     Ok(out)
 }
 
+/// Read a cached bundle. `Ok(None)` means no cache entry exists; `Err` carries
+/// a warning explaining why an existing entry was not used.
+fn read_cached(
+    cache_dir: &Path,
+    dir: &Path,
+    file: &Path,
+    rulesets: &[&Ruleset],
+) -> std::result::Result<Option<(yara_x::Rules, HashMap<String, RuleMeta>)>, String> {
+    let euid = unsafe { libc::geteuid() };
+    for d in [cache_dir, dir] {
+        let md = match fs::symlink_metadata(d) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("cache directory {}: {e}", d.display())),
+        };
+        if !md.is_dir() || md.uid() != euid {
+            return Err(format!(
+                "cache directory {} is not a directory owned by the current user",
+                d.display()
+            ));
+        }
+        if md.mode() & 0o077 != 0 {
+            ensure_private_dir(d).map_err(|e| format!("cache directory {}: {e}", d.display()))?;
+        }
+    }
+    let md = match fs::symlink_metadata(file) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cached bundle {}: {e}", file.display())),
+    };
+    if !md.file_type().is_file() || md.uid() != euid || md.mode() & 0o077 != 0 {
+        return Err(format!(
+            "cached bundle {} is not a private regular file owned by the current user; not used",
+            file.display()
+        ));
+    }
+    let bytes = fs::read(file).map_err(|e| format!("cached bundle {}: {e}", file.display()))?;
+    let rules = yara_x::Rules::deserialize(&bytes)
+        .map_err(|e| format!("cached bundle {} is invalid: {e}", file.display()))?;
+    let meta = collect_meta(&rules, rulesets)
+        .map_err(|e| format!("cached bundle {} is invalid: {e}", file.display()))?;
+    Ok(Some((rules, meta)))
+}
+
 pub fn load_or_compile(rulesets: &[&Ruleset], cache_dir: &Path) -> Result<Bundle> {
     let hash = bundle_key(rulesets);
     let stopwords = merge_stopwords(rulesets)?;
     let dir = cache_dir.join("bundles");
     let file = dir.join(format!("{hash}.yxb"));
 
-    if let Ok(bytes) = fs::read(&file) {
-        if let Ok(rules) = yara_x::Rules::deserialize(&bytes) {
-            if let Ok(meta) = collect_meta(&rules, rulesets) {
-                return Ok(Bundle {
-                    rules,
-                    meta,
-                    hash,
-                    stopwords,
-                    compiled: false,
-                });
-            }
+    let mut cache_warning = None;
+    match read_cached(cache_dir, &dir, &file, rulesets) {
+        Ok(Some((rules, meta))) => {
+            return Ok(Bundle {
+                rules,
+                meta,
+                hash,
+                stopwords,
+                compiled: false,
+                cache_warning: None,
+            })
         }
+        Ok(None) => {}
+        Err(w) => cache_warning = Some(w),
     }
 
     let rules = compile(rulesets)?;
@@ -133,24 +182,33 @@ pub fn load_or_compile(rulesets: &[&Ruleset], cache_dir: &Path) -> Result<Bundle
     let bytes = rules
         .serialize()
         .map_err(|e| err(format!("serialize: {e}")))?;
-    write_atomic(&dir, &file, &bytes)?;
+    if let Err(e) = write_atomic(&dir, &file, &bytes) {
+        let msg = format!("cache not written: {e}");
+        cache_warning = Some(match cache_warning {
+            Some(w) => format!("{w}; {msg}"),
+            None => msg,
+        });
+    }
     Ok(Bundle {
         rules,
         meta,
         hash,
         stopwords,
         compiled: true,
+        cache_warning,
     })
 }
+
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn write_atomic(dir: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
     let io = |e: std::io::Error| err(format!("{}: {e}", file.display()));
     ensure_private_dir(dir).map_err(io)?;
-    let tmp = file.with_extension(format!("yxb.tmp-{}", std::process::id()));
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = file.with_extension(format!("yxb.tmp-{}-{n}", std::process::id()));
     let mut f = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&tmp)
         .map_err(io)?;
