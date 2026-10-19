@@ -27,6 +27,11 @@ pub enum Command {
     Scan(ScanArgs),
     /// Record the current findings so later scans treat them as known
     Baseline(BaselineArgs),
+    /// Git integration: pre-commit check and hook installation
+    Git {
+        #[command(subcommand)]
+        command: GitCommand,
+    },
     /// Inspect, compile, and test rulesets
     Rules {
         #[command(subcommand)]
@@ -88,6 +93,29 @@ pub struct BaselineArgs {
     /// repository root, else the current directory)
     #[arg(long, value_name = "FILE")]
     pub out: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GitCommand {
+    /// Exit 1 when the staged changes score at or above a `[git] block_at`
+    /// threshold
+    PreCommit(PreCommitArgs),
+    /// Write .git/hooks/pre-commit (honouring core.hooksPath)
+    InstallHook(HookArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct PreCommitArgs {
+    /// Score whole staged files instead of only the added lines
+    #[arg(long)]
+    pub full_files: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct HookArgs {
+    /// Replace an existing hook
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Subcommand, Debug)]

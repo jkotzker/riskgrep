@@ -1,6 +1,7 @@
 //! `riskgrep`: scan files for sensitive data and score them per category.
 
 mod cli;
+mod git;
 mod rules;
 mod scan;
 mod spec;
@@ -58,6 +59,7 @@ fn run(args: cli::Cli) -> Result<i32, CliError> {
     match args.command {
         cli::Command::Scan(a) => scan::scan(a),
         cli::Command::Baseline(a) => scan::baseline(a),
+        cli::Command::Git { command } => git::run(command),
         cli::Command::Rules { command } => rules::run(command),
     }
 }

@@ -1,0 +1,7 @@
+- id: riskgrep
+  name: RiskGrep
+  description: Block commits whose staged changes score above the configured sensitive-data thresholds.
+  entry: riskgrep git pre-commit
+  language: system
+  pass_filenames: false
+  stages: [pre-commit]
