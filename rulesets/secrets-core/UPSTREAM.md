@@ -29,6 +29,8 @@ cargo xtask convert-gitleaks --config xtask/upstream/gitleaks.toml --tag v8.30.1
 - Allowlist regexes that target the secret become one `allow_regex` alternation (rule and global regexes).
 - Allowlist paths become `not path matches` conditions; the global ones are the private rule `gitleaks_global_path_allowlist`.
 - A rule `path` becomes a `path matches` condition; a rule with only a path yields one evidence item.
+- A regex that would match its own rule text has its last literal letter or digit wrapped in a one-character class (`abc` becomes `ab[c]`), in both `$re` and `span_regex`. It matches the same secrets, and the shipped ruleset does not report itself.
+  Rewritten: `aws-amazon-bedrock-api-key-short-lived`.
 
 ## Weights
 
@@ -43,14 +45,14 @@ A rule is "fixed provider prefix" when every match of its secret starts with a l
 
 | Rule | What |
 |---|---|
-| `atlassian-api-token` | secret group: gitleaks takes the first non-empty of 2 groups; the span uses group 1, which can be empty or absent, so those matches are dropped |
-| `curl-auth-header` | secret group: gitleaks takes the first non-empty of 8 groups; the span uses group 1, which can be empty or absent, so those matches are dropped |
+| `atlassian-api-token` | secret group: gitleaks takes the first non-empty of 2 group(s), else the whole match; the span uses group 1, which can be empty or absent, so those matches are dropped |
+| `curl-auth-header` | secret group: gitleaks takes the first non-empty of 8 group(s), else the whole match; the span uses group 1, which can be empty or absent, so those matches are dropped |
 | `generic-api-key` | allowlist 1: 1 regexes with regexTarget = "match" |
 | `generic-api-key` | allowlist 2: 2 regexes with regexTarget = "line" |
 | `generic-api-key` | allowlist 3: condition AND over 4 paths, 3 regexes (target line), 0 stopwords |
-| `jwt-base64` | secret group: gitleaks takes the first non-empty of 34 groups; the span uses group 1, which can be empty or absent, so those matches are dropped |
+| `jwt-base64` | secret group: gitleaks takes the first non-empty of 34 group(s), else the whole match; the span uses group 1, which can be empty or absent, so those matches are dropped |
 | `kubernetes-secret-yaml` | allowlist 1: 1 regexes with regexTarget = "match" |
-| `kubernetes-secret-yaml` | secret group: gitleaks takes the first non-empty of 2 groups; the span uses group 1, which can be empty or absent, so those matches are dropped |
+| `kubernetes-secret-yaml` | secret group: gitleaks takes the first non-empty of 2 group(s), else the whole match; the span uses group 1, which can be empty or absent, so those matches are dropped |
 
 ## Licence
 

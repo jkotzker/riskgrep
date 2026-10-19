@@ -114,10 +114,12 @@ pub fn classify(name: &str, head: &[u8]) -> FileClass {
     if is_safetensors(head) {
         return FileClass::KnownBinary(Known::Safetensors);
     }
-    if head.starts_with(&[0x30, 0x82])
-        && [".p12", ".pfx", ".der", ".key"]
-            .iter()
-            .any(|ext| ends_with_ignore_case(name, ext))
+    let has_ext = |exts: &[&str]| exts.iter().any(|ext| ends_with_ignore_case(name, ext));
+    // DER SEQUENCE: `30 82` (two-byte length) for PKCS #12 and most keys;
+    // `30 77` / `30 81` (short or one-byte length) for SEC1 EC private keys.
+    if (head.starts_with(&[0x30, 0x82]) && has_ext(&[".p12", ".pfx", ".der", ".key"]))
+        || ((head.starts_with(&[0x30, 0x77]) || head.starts_with(&[0x30, 0x81]))
+            && has_ext(&[".der", ".key"]))
     {
         return FileClass::KnownBinary(Known::KeyStore);
     }

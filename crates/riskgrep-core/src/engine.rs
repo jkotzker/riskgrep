@@ -5,9 +5,11 @@ use crate::bundle::Bundle;
 use crate::lines::LineIndex;
 use crate::model::{Evidence, Location, ShapeFacts};
 use crate::post::{self, Post, PostResult};
+use regex::bytes::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::ops::Range;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanError {
@@ -37,10 +39,16 @@ impl fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
+type Chain = Vec<Box<dyn Post>>;
+
 pub struct Engine {
     bundle: Bundle,
-    /// Keyed by `namespace:identifier`, in the rule's declared order.
-    posts: HashMap<String, Vec<Box<dyn Post>>>,
+    /// Post-processor chains keyed by `namespace:identifier`, in the rule's
+    /// declared order, built on the rule's first match (or by
+    /// [`Engine::validate_all`]). An `Err` names the rule and meta key.
+    chains: HashMap<String, OnceLock<Result<Chain, String>>>,
+    /// Compiled regexes by source text, shared between rules.
+    regexes: Mutex<HashMap<String, Regex>>,
 }
 
 fn is_anchor(pattern_id: &str) -> bool {
@@ -71,20 +79,66 @@ fn dedupe(ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
 }
 
 impl Engine {
-    /// Compile every post-processor once. A bad regex is reported with the
-    /// rule key and the meta key that held it.
+    /// Cheap: post-processors are compiled per rule on its first match, so
+    /// start-up cost does not grow with the number of rules. Use
+    /// [`Engine::validate_all`] to compile and check every rule up front.
     pub fn new(bundle: Bundle) -> Result<Engine, EngineError> {
-        let mut posts = HashMap::new();
-        for (key, meta) in &bundle.meta {
-            let mut chain = Vec::new();
-            for spec in &meta.post {
-                let p = post::build(spec, &bundle.stopwords)
-                    .map_err(|(k, e)| EngineError(format!("rule {key}: `{k}`: {e}")))?;
-                chain.push(p);
-            }
-            posts.insert(key.clone(), chain);
+        let chains = bundle
+            .meta
+            .keys()
+            .map(|k| (k.clone(), OnceLock::new()))
+            .collect();
+        Ok(Engine {
+            bundle,
+            chains,
+            regexes: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Build every rule's post-processor chain now. The first failure (in
+    /// rule key order) names the rule and the meta key that held the bad
+    /// value.
+    pub fn validate_all(&self) -> Result<(), EngineError> {
+        let mut keys: Vec<&String> = self.chains.keys().collect();
+        keys.sort();
+        for key in keys {
+            self.chain(key).map_err(EngineError)?;
         }
-        Ok(Engine { bundle, posts })
+        Ok(())
+    }
+
+    /// Number of distinct regexes compiled so far.
+    pub fn compiled_regexes(&self) -> usize {
+        self.regexes.lock().map_or(0, |m| m.len())
+    }
+
+    fn regex(&self, src: &str) -> Result<Regex, regex::Error> {
+        let mut cache = self.regexes.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(re) = cache.get(src) {
+            return Ok(re.clone());
+        }
+        let re = post::compile_regex(src)?;
+        cache.insert(src.to_string(), re.clone());
+        Ok(re)
+    }
+
+    fn chain(&self, key: &str) -> Result<&[Box<dyn Post>], String> {
+        let (Some(meta), Some(cell)) = (self.bundle.meta.get(key), self.chains.get(key)) else {
+            return Err(format!("rule {key}: no metadata"));
+        };
+        let built = cell.get_or_init(|| {
+            meta.post
+                .iter()
+                .map(|spec| {
+                    post::build(spec, &self.bundle.stopwords, &|s| self.regex(s))
+                        .map_err(|(k, e)| format!("rule {key}: `{k}`: {e}"))
+                })
+                .collect()
+        });
+        match built {
+            Ok(chain) => Ok(chain),
+            Err(e) => Err(e.clone()),
+        }
     }
 
     pub fn rules(&self) -> &yara_x::Rules {
@@ -115,10 +169,8 @@ impl Engine {
         let mut lines: Option<LineIndex> = None;
         for rule in results.matching_rules() {
             let key = format!("{}:{}", rule.namespace(), rule.identifier());
-            let (Some(meta), Some(chain)) = (self.bundle.meta.get(&key), self.posts.get(&key))
-            else {
-                return Err(ScanError::Yara(format!("rule {key}: no metadata")));
-            };
+            let chain = self.chain(&key).map_err(ScanError::Yara)?;
+            let meta = &self.bundle.meta[&key];
             let mut has_anchor = false;
             let mut ranges = Vec::new();
             // A range-producing processor replaces the pattern matches: the

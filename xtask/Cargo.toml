@@ -14,6 +14,7 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+riskgrep-core = { path = "../crates/riskgrep-core" }
 regex = "1.13"
 regex-syntax = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -21,5 +22,4 @@ sha2 = "0.10"
 toml = "1.1.8"
 
 [dev-dependencies]
-riskgrep-core = { path = "../crates/riskgrep-core" }
 tempfile = "3.27.0"

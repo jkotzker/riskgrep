@@ -126,6 +126,52 @@ pub fn go_to_rust(re: &str) -> String {
     out
 }
 
+/// Wraps the last literal ASCII letter or digit outside any class, escape,
+/// group flag, or repetition count in a one-character class (`abc` becomes
+/// `ab[c]`). The regex matches the same text, but no longer matches its own
+/// source. `None` when there is no such character.
+pub fn defang(re: &str) -> Option<String> {
+    let c: Vec<char> = re.chars().collect();
+    let mut last = None;
+    let mut i = 0;
+    let mut scratch = String::new();
+    while i < c.len() {
+        match c[i] {
+            '\\' => {
+                // `\xNN`, `\x{..}`, `\pL`, `\p{..}`: skip the whole escape.
+                let skip = match c.get(i + 1) {
+                    Some('x' | 'p' | 'P') if c.get(i + 2) == Some(&'{') => (i + 2..c.len())
+                        .find(|&j| c[j] == '}')
+                        .map_or(c.len(), |j| j + 1),
+                    Some('x') => i + 4,
+                    Some('p' | 'P') => i + 3,
+                    _ => i + 2,
+                };
+                i = skip;
+            }
+            '[' => i = copy_class(&c, i, &mut scratch),
+            '(' if c.get(i + 1) == Some(&'?') => {
+                i = (i + 2..c.len())
+                    .find(|&j| matches!(c[j], ')' | ':' | '>'))
+                    .map_or(c.len(), |j| j + 1);
+            }
+            '{' => i = repetition_end(&c, i).map_or(i + 1, |e| e + 1),
+            ch if ch.is_ascii_alphanumeric() => {
+                last = Some(i);
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    let at = last?;
+    let mut out: String = c[..at].iter().collect();
+    out.push('[');
+    out.push(c[at]);
+    out.push(']');
+    out.extend(&c[at + 1..]);
+    Some(out)
+}
+
 /// Copies a character class starting at `c[start] == '['`; returns the index
 /// after its closing `]`.
 fn copy_class(c: &[char], start: usize, out: &mut String) -> usize {
@@ -325,12 +371,9 @@ fn translate_allowlists<'a>(
 
 // --- rule analysis -----------------------------------------------------------
 
-/// Compiles with the settings of the core's post-processors.
+/// Compiles as the core's post-processors do.
 fn check_regex(owner: &str, what: &str, src: &str) -> Result<regex::bytes::Regex, String> {
-    regex::bytes::RegexBuilder::new(src)
-        .unicode(false)
-        .size_limit(1 << 28)
-        .build()
+    riskgrep_core::post::compile_regex(src)
         .map_err(|e| format!("{owner}: {what} does not compile: {e}"))
 }
 
@@ -606,6 +649,7 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
 
     let mut idents = BTreeSet::new();
     let mut classes: Vec<(Class, String)> = Vec::new();
+    let mut defanged: Vec<String> = Vec::new();
     for r in &cfg.rules {
         let ident = identifier(&r.id)?;
         if ident == GLOBAL_PATH_RULE || !idents.insert(ident.clone()) {
@@ -637,12 +681,13 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
             let group1_nonempty = find_capture(&parsed, 1)
                 .is_some_and(|g| g.properties().minimum_len().is_some_and(|n| n > 0))
                 && always_participates(&parsed, 1);
-            if r.secret_group.is_none() && explicit > 1 && !group1_nonempty {
+            if r.secret_group.is_none() && explicit >= 1 && !group1_nonempty {
                 skipped.push((
                     r.id.clone(),
                     format!(
-                        "secret group: gitleaks takes the first non-empty of {explicit} groups; \
-                         the span uses group 1, which can be empty or absent, so those matches are dropped"
+                        "secret group: gitleaks takes the first non-empty of {explicit} group(s), \
+                         else the whole match; the span uses group 1, which can be empty or absent, \
+                         so those matches are dropped"
                     ),
                 ));
             }
@@ -666,68 +711,31 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
         };
         classes.push((class, r.id.clone()));
 
-        // meta
-        let mut meta: Vec<String> = vec![
-            "category = \"secret\"".into(),
-            format!("weight = {}", class.weight()),
-        ];
-        if let Some((_, fam, cap)) = FAMILIES.iter().find(|(id, _, _)| *id == r.id) {
-            meta.push(format!("family = {}", yara_str(fam)));
-            meta.push(format!("family_cap = {cap}"));
-        }
-        if let Some(re) = &r.regex {
-            let mut post = vec!["span"];
-            let entropy = r.entropy.filter(|e| *e != 0.0);
-            if entropy.is_some() {
-                post.push("entropy");
-            }
+        // Post-processor arguments that do not depend on the emitted regex.
+        let entropy = r.entropy.filter(|e| *e != 0.0);
+        let list = if !allow.stopwords.is_empty() {
             let words: Vec<String> = allow
                 .stopwords
                 .iter()
                 .chain(&global.stopwords)
                 .cloned()
                 .collect();
-            let list = if !allow.stopwords.is_empty() {
-                stopwords.push((list_name.clone(), stopword_file(&words)));
-                Some(list_name.clone())
-            } else if !global.stopwords.is_empty() {
-                Some(GLOBAL_STOPWORDS.to_string())
-            } else {
-                None
-            };
-            if list.is_some() {
-                post.push("stopwords");
-            }
-            let allow_res: Vec<String> = allow
-                .secret_regexes
-                .iter()
-                .chain(&global.secret_regexes)
-                .cloned()
-                .collect();
-            if !allow_res.is_empty() {
-                post.push("allow_regex");
-            }
-            meta.push(format!("post = {}", yara_str(&post.join(","))));
-            meta.push(format!("span_regex = {}", yara_str(re)));
-            meta.push(format!("secret_group = {group}"));
-            if let Some(e) = entropy {
-                meta.push(format!("min_entropy = {}", number(e)));
-            }
-            if let Some(l) = list {
-                meta.push(format!("stopwords = {}", yara_str(&l)));
-            }
-            if !allow_res.is_empty() {
-                let alt = alternation(&allow_res);
-                check_regex(&r.id, "combined allowlist regex", &alt)?;
-                meta.push(format!("allow_regex = {}", yara_str(&alt)));
-            }
-        }
-
-        // strings
-        let mut strings: Vec<String> = Vec::new();
-        if let Some(re) = &r.regex {
-            let y = yara_regex(&lazy_to_greedy(re)).map_err(|e| format!("{}: {e}", r.id))?;
-            strings.push(format!("$re = {y}"));
+            stopwords.push((list_name.clone(), stopword_file(&words)));
+            Some(list_name.clone())
+        } else if !global.stopwords.is_empty() {
+            Some(GLOBAL_STOPWORDS.to_string())
+        } else {
+            None
+        };
+        let allow_res: Vec<String> = allow
+            .secret_regexes
+            .iter()
+            .chain(&global.secret_regexes)
+            .cloned()
+            .collect();
+        let alt = alternation(&allow_res);
+        if !allow_res.is_empty() {
+            check_regex(&r.id, "combined allowlist regex", &alt)?;
         }
         let mut kws = BTreeSet::new();
         let keywords: Vec<&String> = r
@@ -735,46 +743,110 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
             .iter()
             .filter(|k| !k.is_empty() && kws.insert(k.to_ascii_lowercase()))
             .collect();
-        for (j, k) in keywords.iter().enumerate() {
-            strings.push(format!("$kw{j} = {} nocase", yara_str(k)));
-        }
-
-        // condition
-        let mut cond: Vec<String> = Vec::new();
-        if let Some(p) = &r.path {
-            cond.push(format!("path matches {}", yara_regex(p)?));
-        }
-        if !keywords.is_empty() {
-            cond.push("any of ($kw*)".into());
-        }
-        if r.regex.is_some() {
-            cond.push("$re".into());
-        }
         if r.regex.is_none() && r.path.is_none() {
             return Err(format!("{}: rule has neither regex nor path", r.id));
         }
-        for p in &allow.paths {
-            cond.push(format!("not path matches {}", yara_regex(p)?));
-        }
-        if global_paths {
-            cond.push(format!("not {GLOBAL_PATH_RULE}"));
-        }
 
-        writeln!(yar, "\n// {}: {} ({})", r.id, class.label(), class.weight()).unwrap();
-        writeln!(yar, "rule {ident} {{\n  meta:").unwrap();
-        for m in &meta {
-            writeln!(yar, "    {m}").unwrap();
-        }
-        if !strings.is_empty() {
-            writeln!(yar, "  strings:").unwrap();
-            for s in &strings {
-                writeln!(yar, "    {s}").unwrap();
+        let render = |emitted: Option<&str>| -> Result<String, String> {
+            let mut meta: Vec<String> = vec![
+                "category = \"secret\"".into(),
+                format!("weight = {}", class.weight()),
+            ];
+            if let Some((_, fam, cap)) = FAMILIES.iter().find(|(id, _, _)| *id == r.id) {
+                meta.push(format!("family = {}", yara_str(fam)));
+                meta.push(format!("family_cap = {cap}"));
             }
+            let mut strings: Vec<String> = Vec::new();
+            if let Some(re) = emitted {
+                let mut post = vec!["span"];
+                if entropy.is_some() {
+                    post.push("entropy");
+                }
+                if list.is_some() {
+                    post.push("stopwords");
+                }
+                if !allow_res.is_empty() {
+                    post.push("allow_regex");
+                }
+                meta.push(format!("post = {}", yara_str(&post.join(","))));
+                meta.push(format!("span_regex = {}", yara_str(re)));
+                meta.push(format!("secret_group = {group}"));
+                if let Some(e) = entropy {
+                    meta.push(format!("min_entropy = {}", number(e)));
+                }
+                if let Some(l) = &list {
+                    meta.push(format!("stopwords = {}", yara_str(l)));
+                }
+                if !allow_res.is_empty() {
+                    meta.push(format!("allow_regex = {}", yara_str(&alt)));
+                }
+                let y = yara_regex(&lazy_to_greedy(re)).map_err(|e| format!("{}: {e}", r.id))?;
+                strings.push(format!("$re = {y}"));
+            }
+            for (j, k) in keywords.iter().enumerate() {
+                strings.push(format!("$kw{j} = {} nocase", yara_str(k)));
+            }
+
+            let mut cond: Vec<String> = Vec::new();
+            if let Some(p) = &r.path {
+                cond.push(format!("path matches {}", yara_regex(p)?));
+            }
+            if !keywords.is_empty() {
+                cond.push("any of ($kw*)".into());
+            }
+            if emitted.is_some() {
+                cond.push("$re".into());
+            }
+            for p in &allow.paths {
+                cond.push(format!("not path matches {}", yara_regex(p)?));
+            }
+            if global_paths {
+                cond.push(format!("not {GLOBAL_PATH_RULE}"));
+            }
+
+            let mut b = String::new();
+            writeln!(b, "\n// {}: {} ({})", r.id, class.label(), class.weight()).unwrap();
+            writeln!(b, "rule {ident} {{\n  meta:").unwrap();
+            for m in &meta {
+                writeln!(b, "    {m}").unwrap();
+            }
+            if !strings.is_empty() {
+                writeln!(b, "  strings:").unwrap();
+                for s in &strings {
+                    writeln!(b, "    {s}").unwrap();
+                }
+            }
+            writeln!(b, "  condition:\n    {}\n}}", cond.join(" and\n    ")).unwrap();
+            Ok(b)
+        };
+
+        // A regex that matches its own rule text (a literal token such as
+        // `aws-amazon-bedrock-api-key-short-lived`) would make the shipped
+        // ruleset a finding; wrap literal characters until it cannot.
+        let mut emitted = r.regex.clone();
+        let mut block = render(emitted.as_deref())?;
+        let mut tries = 0;
+        while let Some(re) = &emitted {
+            if !check_regex(&r.id, "regex", re)?.is_match(block.as_bytes()) {
+                break;
+            }
+            tries += 1;
+            let next = defang(re).filter(|_| tries <= 4).ok_or_else(|| {
+                format!(
+                    "{}: regex matches its own rule source and cannot be rewritten",
+                    r.id
+                )
+            })?;
+            emitted = Some(next);
+            block = render(emitted.as_deref())?;
         }
-        writeln!(yar, "  condition:\n    {}\n}}", cond.join(" and\n    ")).unwrap();
+        if emitted != r.regex {
+            defanged.push(r.id.clone());
+        }
+        yar.push_str(&block);
     }
 
-    let upstream = upstream_md(tag, &sha, &cfg, &classes, &skipped);
+    let upstream = upstream_md(tag, &sha, &cfg, &classes, &defanged, &skipped);
     Ok(Generated {
         yar,
         stopwords,
@@ -787,6 +859,7 @@ fn upstream_md(
     sha: &str,
     cfg: &Config,
     classes: &[(Class, String)],
+    defanged: &[String],
     skipped: &[(String, String)],
 ) -> String {
     let mut s = String::new();
@@ -822,9 +895,16 @@ fn upstream_md(
          - Allowlist stopwords become `stopwords/secrets_core_<rule>.txt` (rule and global stopwords) or `stopwords/secrets_core_global.txt` (global only).\n\
          - Allowlist regexes that target the secret become one `allow_regex` alternation (rule and global regexes).\n\
          - Allowlist paths become `not path matches` conditions; the global ones are the private rule `{GLOBAL_PATH_RULE}`.\n\
-         - A rule `path` becomes a `path matches` condition; a rule with only a path yields one evidence item.\n"
+         - A rule `path` becomes a `path matches` condition; a rule with only a path yields one evidence item.\n\
+         - A regex that would match its own rule text has its last literal letter or digit wrapped in a one-character class (`abc` becomes `ab[c]`), in both `$re` and `span_regex`. It matches the same secrets, and the shipped ruleset does not report itself."
     )
     .unwrap();
+    if defanged.is_empty() {
+        writeln!(s, "  No rule needed this.\n").unwrap();
+    } else {
+        let ids: Vec<String> = defanged.iter().map(|d| format!("`{d}`")).collect();
+        writeln!(s, "  Rewritten: {}.\n", ids.join(", ")).unwrap();
+    }
 
     writeln!(s, "## Weights\n").unwrap();
     for class in [

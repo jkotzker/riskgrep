@@ -68,6 +68,8 @@ fn converted_ruleset_compiles() {
     let bundle = load_or_compile(&[&rs], cache.path()).unwrap();
     let public = bundle.rules.iter().filter(|r| !r.is_private()).count();
     assert_eq!(public, rule_count(&pinned_config()));
+    let engine = riskgrep_core::engine::Engine::new(bundle).unwrap();
+    engine.validate_all().unwrap();
 }
 
 #[test]
@@ -130,4 +132,43 @@ fn go_literal_brace_is_escaped() {
     use xtask::go_to_rust;
     assert_eq!(go_to_rust(r"^\$(?:\d+|{\d+})$"), r"^\$(?:\d+|\{\d+})$");
     assert_eq!(go_to_rust(r"a{2,3}[{]\{x"), r"a{2,3}[{]\{x");
+}
+
+#[test]
+fn defang_wraps_the_last_literal_character() {
+    use xtask::defang;
+    assert_eq!(defang("key-abc29t").as_deref(), Some("key-abc29[t]"));
+    assert_eq!(defang(r"a\x60{2}").as_deref(), Some(r"[a]\x60{2}"));
+    assert_eq!(defang(r"ab[cd]\d{3}").as_deref(), Some(r"a[b][cd]\d{3}"));
+    assert_eq!(
+        defang(r"(?i)ab(?P<n>[x])").as_deref(),
+        Some(r"(?i)a[b](?P<n>[x])")
+    );
+    assert_eq!(defang(r"[a-z]+\w{4}"), None);
+}
+
+#[test]
+fn no_generated_regex_matches_its_own_rule() {
+    let d = convert_to_temp();
+    let yar = fs::read_to_string(d.path().join("gitleaks.yar")).unwrap();
+    for block in yar.split("\nrule ").skip(1) {
+        let Some(line) = block
+            .lines()
+            .find(|l| l.trim_start().starts_with("span_regex = "))
+        else {
+            continue;
+        };
+        // Undo the YARA string escaping of the meta value.
+        let quoted = line.trim_start().trim_start_matches("span_regex = ");
+        let src = quoted[1..quoted.len() - 1]
+            .replace("\\\\", "\u{0}")
+            .replace("\\\"", "\"")
+            .replace('\u{0}', "\\");
+        let re = riskgrep_core::post::compile_regex(&src).unwrap();
+        let name = block.split_whitespace().next().unwrap();
+        assert!(
+            !re.is_match(block.as_bytes()),
+            "{name} matches its own source"
+        );
+    }
 }

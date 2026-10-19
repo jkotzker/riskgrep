@@ -465,13 +465,13 @@ rule aws_amazon_bedrock_api_key_short_lived {
     category = "secret"
     weight = 95
     post = "span,entropy,stopwords,allow_regex"
-    span_regex = "bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t"
+    span_regex = "bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29[t]"
     secret_group = 0
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
-    $re = /bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t/
+    $re = /bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29[t]/
     $kw0 = "bedrock-api-key-" nocase
   condition:
     any of ($kw*) and

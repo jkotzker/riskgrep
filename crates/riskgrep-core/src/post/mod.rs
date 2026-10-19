@@ -51,12 +51,15 @@ pub fn compile_regex(src: &str) -> Result<Regex, regex::Error> {
         .build()
 }
 
-/// Build the processor for one spec. The error names the offending key.
+/// Build the processor for one spec, compiling its regexes with `regex`
+/// (which may share compiled regexes between rules). The error names the
+/// offending key.
 pub fn build(
     spec: &PostSpec,
     stopwords: &BTreeMap<String, Vec<String>>,
+    regex: &dyn Fn(&str) -> Result<Regex, regex::Error>,
 ) -> Result<Box<dyn Post>, (&'static str, String)> {
-    let re = |key: &'static str, src: &str| compile_regex(src).map_err(|e| (key, e.to_string()));
+    let re = |key: &'static str, src: &str| regex(src).map_err(|e| (key, e.to_string()));
     Ok(match spec {
         PostSpec::Span { regex, group } => Box::new(Span::new(re("span_regex", regex)?, *group)),
         PostSpec::Entropy { min } => Box::new(Entropy { min: *min }),

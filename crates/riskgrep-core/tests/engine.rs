@@ -8,7 +8,18 @@ fn engine_with(stopwords: &[(&str, &str)], src: &str) -> Engine {
     try_engine(stopwords, src).unwrap()
 }
 
+/// An engine whose post-processors have all been compiled and checked.
 fn try_engine(
+    stopwords: &[(&str, &str)],
+    src: &str,
+) -> Result<Engine, riskgrep_core::engine::EngineError> {
+    let e = unvalidated(stopwords, src)?;
+    e.validate_all()?;
+    Ok(e)
+}
+
+/// An engine as built for scanning: post-processors compile on first use.
+fn unvalidated(
     stopwords: &[(&str, &str)],
     src: &str,
 ) -> Result<Engine, riskgrep_core::engine::EngineError> {
@@ -192,6 +203,38 @@ fn bad_regex_names_rule_and_key() {
     let msg = err.to_string();
     assert!(msg.contains("t:bad"), "{msg}");
     assert!(msg.contains("allow_regex"), "{msg}");
+}
+
+const BAD_REGEX: &str = r#"rule bad { meta: category = "secrets" weight = 1
+    post = "allow_regex" allow_regex = "(unclosed"
+    strings: $re = /abc/ condition: $re }"#;
+
+#[test]
+fn bad_regex_compiles_lazily_and_fails_the_scan() {
+    let e = unvalidated(&[], BAD_REGEX).expect("Engine::new compiles no regex");
+    let mut sc = yara_x::Scanner::new(e.rules());
+    // The rule does not match: its chain is never built.
+    assert!(e.scan_content(&mut sc, "f", b"xyz").unwrap().is_empty());
+    match e.scan_content(&mut sc, "f", b"abc") {
+        Err(ScanError::Yara(msg)) => {
+            assert!(msg.contains("t:bad"), "{msg}");
+            assert!(msg.contains("allow_regex"), "{msg}");
+        }
+        other => panic!("expected a yara error, got {other:?}"),
+    }
+}
+
+#[test]
+fn identical_regexes_compile_once() {
+    let rule = |n: u32| {
+        format!(
+            r#"rule r{n} {{ meta: category = "secrets" weight = 1
+            post = "span,allow_regex" span_regex = "a(b)c" secret_group = 1
+            allow_regex = "^x$" strings: $re = /abc/ condition: $re }}"#
+        )
+    };
+    let e = try_engine(&[], &format!("{}\n{}\n{}", rule(1), rule(2), rule(3))).unwrap();
+    assert_eq!(e.compiled_regexes(), 2);
 }
 
 #[test]

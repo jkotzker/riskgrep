@@ -5,9 +5,8 @@
 use regex::bytes::{Regex, RegexBuilder};
 use riskgrep_core::bundle::{compile_uncached, Bundle};
 use riskgrep_core::engine::Engine;
-use riskgrep_core::meta::{PostSpec, RuleMeta};
+use riskgrep_core::meta::RuleMeta;
 use riskgrep_core::model::{Category, Evidence};
-use riskgrep_core::post::compile_regex;
 use riskgrep_core::ruleset::{builtin_rulesets, Ruleset};
 use riskgrep_core::score::{score, Contribution};
 use riskgrep_core::synth;
@@ -36,10 +35,9 @@ fn fixture() -> &'static Fixture {
         let rs = secrets_ruleset();
         let bundle: Bundle = compile_uncached(&[&rs]).unwrap();
         let meta = bundle.meta.clone();
-        Fixture {
-            engine: Engine::new(bundle).unwrap(),
-            meta,
-        }
+        let engine = Engine::new(bundle).unwrap();
+        engine.validate_all().unwrap();
+        Fixture { engine, meta }
     })
 }
 
@@ -197,11 +195,66 @@ fn p12_file() {
     assert_score(&ev, 90.0);
 }
 
+/// `prefix` followed by random bytes.
+fn der_with(prefix: &[u8], seed: u64) -> Vec<u8> {
+    let mut body = vec![0u8; 300];
+    synth::Rng::new(seed).fill(&mut body);
+    let mut out = prefix.to_vec();
+    out.extend_from_slice(&body);
+    out
+}
+
 #[test]
 fn der_key_file() {
-    let ev = scan("keys/server.der", &der_blob(4));
+    // PKCS#1 / PKCS#8 (`SEQUENCE { INTEGER 0, ...`) and SEC1 EC keys
+    // (`SEQUENCE { INTEGER 1, ...` with a one- or two-byte length form).
+    for (n, prefix) in [
+        &[0x30, 0x82, 0x01, 0x2c, 0x02, 0x01, 0x00][..],
+        &[0x30, 0x77, 0x02, 0x01, 0x01],
+        &[0x30, 0x81, 0x87, 0x02, 0x01, 0x01],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ev = scan("keys/server.der", &der_with(prefix, 4));
+        assert_eq!(rule_ids(&ev), vec!["der_key_file"], "prefix {n}");
+        assert_score(&ev, 90.0);
+        let ev = scan("keys/server.key", &der_with(prefix, 5));
+        assert_eq!(rule_ids(&ev), vec!["der_key_file"], "prefix {n}");
+    }
+}
+
+#[test]
+fn ec_key_file_end_to_end() {
+    use riskgrep_core::classify::{classify, read_for_scan, FileClass, Known, Limits};
+    use std::io::Write;
+    let mut f = tempfile::Builder::new().suffix(".key").tempfile().unwrap();
+    f.write_all(&der_with(&[0x30, 0x77, 0x02, 0x01, 0x01], 9))
+        .unwrap();
+    f.flush().unwrap();
+    let file = std::fs::File::open(f.path()).unwrap();
+    let size = file.metadata().unwrap().len();
+    let limits = Limits::default();
+    let mut head = vec![0u8; (limits.sniff as u64).min(size) as usize];
+    std::os::unix::fs::FileExt::read_exact_at(&file, &mut head, 0).unwrap();
+    let name = f.path().to_string_lossy().into_owned();
+    let class = classify(&name, &head);
+    assert_eq!(class, FileClass::KnownBinary(Known::KeyStore));
+    let content = read_for_scan(&file, size, &class, &limits).unwrap();
+    assert_eq!(content.bytes.len() as u64, size);
+    let ev = scan(&name, &content.bytes);
     assert_eq!(rule_ids(&ev), vec!["der_key_file"]);
     assert_score(&ev, 90.0);
+}
+
+#[test]
+fn der_certificate_is_not_a_key() {
+    // X.509: `SEQUENCE { SEQUENCE (tbsCertificate) ...`.
+    let cert = der_with(&[0x30, 0x82, 0x03, 0x1c, 0x30, 0x82, 0x02, 0x04], 6);
+    for path in ["certs/server.der", "certs/server.key"] {
+        let ev = scan(path, &cert);
+        assert!(ev.is_empty(), "{path}: rules {:?}", rule_ids(&ev));
+    }
 }
 
 #[test]
@@ -584,6 +637,10 @@ fn agreement_with_reference() {
         agree >= 0.99,
         "agreement {agree:.4} < 0.99; disagreeing rules: {disagree:?}"
     );
+    // Only the documented gap (generic-api-key's match-target allowlist, see
+    // UPSTREAM.md) may differ, so one dead or always-firing rule fails.
+    let expected: BTreeSet<String> = ["generic_api_key".to_string()].into();
+    assert_eq!(disagree, expected, "disagreeing rules");
 }
 
 // ---------------------------------------------------------------------------
@@ -609,53 +666,42 @@ fn release_timings() {
     let bytes = bundle.rules.serialize().unwrap();
 
     let mut load = Vec::new();
+    // Engine::new and the first scan of a fresh engine (post-processors
+    // compile on a rule's first match), on the full two-ruleset bundle.
+    let text64 = synth::source_text(64 << 10, 1);
     let mut engine_new = Vec::new();
+    let mut first_scan = Vec::new();
     for _ in 0..20 {
         let t = Instant::now();
         let rules = yara_x::Rules::deserialize(&bytes).unwrap();
         load.push(t.elapsed());
         drop(rules);
-        let b = compile_uncached(&[&secrets_ruleset()]).unwrap();
+        let b = compile_uncached(&rs).unwrap();
         let t = Instant::now();
         let e = Engine::new(b).unwrap();
         engine_new.push(t.elapsed());
-        drop(e);
-    }
-    // Where Engine::new spends its time: compiling post-processor regexes.
-    let (mut span, mut allow) = (Vec::new(), BTreeSet::new());
-    let mut allow_total = 0;
-    for m in bundle.meta.values() {
-        for p in &m.post {
-            match p {
-                PostSpec::Span { regex, .. } => span.push(regex.clone()),
-                PostSpec::AllowRegex { regex } => {
-                    allow_total += 1;
-                    allow.insert(regex.clone());
-                }
-                _ => {}
-            }
-        }
-    }
-    let time_compile = |v: &mut dyn Iterator<Item = &String>| {
+        let mut sc = yara_x::Scanner::new(e.rules());
         let t = Instant::now();
-        for r in v {
-            std::hint::black_box(compile_regex(r).unwrap());
-        }
-        t.elapsed()
-    };
-    let span_t = time_compile(&mut span.iter());
-    let allow_t = time_compile(&mut allow.iter());
+        std::hint::black_box(
+            e.scan_content(&mut sc, "src/a.rs", text64.as_bytes())
+                .unwrap(),
+        );
+        first_scan.push(t.elapsed());
+    }
     let engine = Engine::new(bundle).unwrap();
+    let t = Instant::now();
+    engine.validate_all().unwrap();
+    let validate = t.elapsed();
     let mut sc = yara_x::Scanner::new(engine.rules());
     let mut report = format!(
         "compile secrets_core + biometric: {compile:?}; serialized {} bytes; \
-         deserialize p95 {:?}; Engine::new (secrets_core) p95 {:?}; \
-         compiling {} span regexes {span_t:?}, {} distinct of {allow_total} allow regexes {allow_t:?}",
+         deserialize p95 {:?}; Engine::new p95 {:?}; first scan of 64 KiB (fresh engine) p95 {:?}; \
+         validate_all {validate:?} ({} distinct regexes)",
         bytes.len(),
         p95(load),
         p95(engine_new),
-        span.len(),
-        allow.len()
+        p95(first_scan),
+        engine.compiled_regexes()
     );
     for size in [64 << 10, 1 << 20] {
         let text = synth::source_text(size, 1);
@@ -672,4 +718,46 @@ fn release_timings() {
         report.push_str(&format!("; scan {size} B p95 {:?}", p95(runs)));
     }
     eprintln!("{report}");
+}
+
+/// Files under `dir`, recursively, sorted.
+fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            out.extend(files_under(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn shipped_rule_sources_do_not_trip_the_rules() {
+    let repo = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let all = builtin_rulesets();
+    let refs: Vec<&Ruleset> = all.iter().collect();
+    let engine = Engine::new(compile_uncached(&refs).unwrap()).unwrap();
+    engine.validate_all().unwrap();
+    let mut sc = yara_x::Scanner::new(engine.rules());
+    let mut files = files_under(&repo.join("rulesets"));
+    files.push(repo.join("xtask/upstream/gitleaks.toml"));
+    assert!(files.len() > 10, "found {} files", files.len());
+    let mut hits = Vec::new();
+    for f in &files {
+        let rel = f.strip_prefix(repo).unwrap().to_string_lossy().into_owned();
+        let content = std::fs::read(f).unwrap();
+        for e in engine.scan_content(&mut sc, &rel, &content).unwrap() {
+            if e.category.0 == "secret" {
+                hits.push(format!("{rel}: {}", e.rule));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "secret evidence in shipped files: {hits:?}"
+    );
 }

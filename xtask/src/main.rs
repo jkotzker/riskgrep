@@ -22,8 +22,26 @@ fn convert(args: &[String]) -> Result<(), String> {
         return Err(USAGE.into());
     };
     let bytes = std::fs::read(&config).map_err(|e| format!("{config}: {e}"))?;
-    xtask::convert_gitleaks(&bytes, &tag, &PathBuf::from(&out))?;
+    let out_dir = PathBuf::from(&out);
+    xtask::convert_gitleaks(&bytes, &tag, &out_dir)?;
     eprintln!("wrote {out}/gitleaks.yar, {out}/UPSTREAM.md, {out}/stopwords/");
+    validate(&out_dir)
+}
+
+/// Compiles the ruleset in `dir` and every rule's post-processors, when the
+/// directory has a manifest.
+fn validate(dir: &std::path::Path) -> Result<(), String> {
+    use riskgrep_core::{bundle::compile_uncached, engine::Engine, ruleset::Ruleset};
+    if !dir.join("ruleset.toml").exists() {
+        eprintln!("no ruleset.toml in {}: not validated", dir.display());
+        return Ok(());
+    }
+    let rs = Ruleset::load_dir(dir).map_err(|e| e.to_string())?;
+    let bundle = compile_uncached(&[&rs]).map_err(|e| e.to_string())?;
+    let rules = bundle.meta.len();
+    let engine = Engine::new(bundle).map_err(|e| e.to_string())?;
+    engine.validate_all().map_err(|e| e.to_string())?;
+    eprintln!("validated {rules} rules in {}", dir.display());
     Ok(())
 }
 

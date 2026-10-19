@@ -89,6 +89,28 @@ fn key_stores() {
     }
     // wrong extension: not a key store (NUL bytes make it unknown binary)
     assert_eq!(classify("a.bin", &h), FileClass::UnknownBinary);
+    // SEC1 EC private keys: one-byte (`30 77`) and long-form (`30 81 ..`)
+    // lengths, recognised for .der/.key only.
+    for prefix in [
+        vec![0x30, 0x77, 0x02, 0x01, 0x01],
+        vec![0x30, 0x81, 0x87, 0x02, 0x01, 0x01],
+    ] {
+        let h = pad(prefix, 32);
+        for name in ["a.der", "a.key", "A.KEY"] {
+            assert_eq!(
+                classify(name, &h),
+                FileClass::KnownBinary(Known::KeyStore),
+                "{name}"
+            );
+        }
+        for name in ["a.p12", "a.pfx", "a.bin"] {
+            assert_ne!(
+                classify(name, &h),
+                FileClass::KnownBinary(Known::KeyStore),
+                "{name}"
+            );
+        }
+    }
     // PEM .key stays text
     let pem = pad(b"-----BEGIN PRIVATE KEY-----\n".to_vec(), 64);
     assert_eq!(classify("a.key", &pem), FileClass::Text);
