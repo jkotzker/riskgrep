@@ -4,9 +4,9 @@
 //! redirection target that names an existing regular file is a target. The
 //! answer is marked `unresolved` whenever the command could read something the
 //! parse cannot name: a word built from an expansion, a substitution whose
-//! output becomes an argument, an interpreter or executor running code, a
-//! change of directory, a directory argument, a parse failure, or the time
-//! budget running out.
+//! output becomes an argument, an interpreter or executor running code, an
+//! option this module does not know, a change of directory, a directory
+//! argument, a parse failure, or a spent time or walk budget.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -25,7 +25,8 @@ pub struct BashTargets {
 /// Time [`bash_targets`] may spend before it stops and reports unresolved.
 pub const DEFAULT_BUDGET: Duration = Duration::from_millis(500);
 
-/// Glob matches one command may yield before the walk stops (unresolved).
+/// Directory entries glob expansion may visit for one command before it
+/// stops (unresolved).
 const WALK_LIMIT: usize = 10_000;
 /// Nesting of `sh -c` payloads, executors and substitution bodies analysed
 /// recursively.
@@ -33,12 +34,14 @@ const MAX_DEPTH: usize = 16;
 /// Commands longer than this are not parsed: the first this-many bytes get
 /// the whitespace-split catch-all and the result is unresolved.
 const MAX_COMMAND_BYTES: usize = 64 * 1024;
-/// Stack of the thread the analysis runs on.
-const ANALYSIS_STACK_BYTES: usize = 64 << 20;
-/// Estimated nesting (see [`nesting_estimate`]) beyond which a command is not
-/// parsed. brush-parser recurses once per level; on a 64 MiB stack 2,000
-/// nested `if` statements parsed in a debug build and 4,000 in a release
-/// build (measured 2026-10-19), so 256 leaves a wide margin.
+/// Stack of the thread the analysis runs on. It is reserved, not committed:
+/// pages are touched only as deep as a parse actually recurses. The ignored
+/// test `stress::worst_case_nesting_at_twice_the_cap` parses the worst
+/// nesting shapes at twice [`MAX_COMMAND_BYTES`] on this stack.
+const ANALYSIS_STACK_BYTES: usize = 1 << 30;
+/// Estimated nesting (see [`nesting_estimate`]) above which a command is
+/// reported unresolved without parsing. A shortcut for obviously
+/// pathological input; the stack above is what makes deep input safe.
 const MAX_NESTING: usize = 256;
 /// Words a single brace expansion may produce.
 const MAX_BRACE_WORDS: usize = 1_000;
@@ -52,18 +55,25 @@ pub fn bash_targets(command: &str, cwd: &Path) -> BashTargets {
 }
 
 /// Like [`bash_targets`], but stops and reports unresolved once `budget` has
-/// elapsed. A single parse cannot be interrupted; it is bounded by the
-/// command-size and nesting limits instead.
+/// elapsed. A single parse cannot be interrupted; it is bounded by
+/// [`MAX_COMMAND_BYTES`] instead.
 pub fn bash_targets_within(command: &str, cwd: &Path, budget: Duration) -> BashTargets {
+    run_isolated(command, cwd, budget, true)
+}
+
+/// Runs the analysis on a thread with [`ANALYSIS_STACK_BYTES`] of stack.
+/// `shortcut` enables the nesting estimate (disabled only by the stress
+/// test, which must reach the parser).
+fn run_isolated(command: &str, cwd: &Path, budget: Duration, shortcut: bool) -> BashTargets {
     let deadline = Instant::now() + budget;
     let owned_command = command.to_string();
     let owned_cwd = cwd.to_path_buf();
-    // A deep parse recurses; a dedicated thread gives it a known stack.
     let worker = std::thread::Builder::new()
         .name("riskgrep-bash".to_string())
         .stack_size(ANALYSIS_STACK_BYTES)
         .spawn(move || {
             let mut st = State::new(&owned_cwd, deadline);
+            st.shortcut = shortcut;
             analyze(&owned_command, 0, &mut st);
             st.finish()
         });
@@ -168,11 +178,14 @@ enum Probe {
 struct State<'a> {
     cwd: &'a Path,
     deadline: Instant,
+    /// Apply the size and nesting shortcuts before parsing.
+    shortcut: bool,
     files: Vec<PathBuf>,
     seen: HashSet<PathBuf>,
     probed: HashMap<PathBuf, Probe>,
     unresolved: bool,
-    glob_budget: usize,
+    /// Directory entries glob expansion may still visit.
+    walk_budget: usize,
 }
 
 impl<'a> State<'a> {
@@ -180,11 +193,12 @@ impl<'a> State<'a> {
         State {
             cwd,
             deadline,
+            shortcut: true,
             files: Vec::new(),
             seen: HashSet::new(),
             probed: HashMap::new(),
             unresolved: false,
-            glob_budget: WALK_LIMIT,
+            walk_budget: WALK_LIMIT,
         }
     }
 
@@ -227,7 +241,9 @@ fn analyze(src: &str, depth: usize, st: &mut State) {
         st.unresolved = true;
         return;
     }
-    let ir = if src.len() > MAX_COMMAND_BYTES || nesting_estimate(src) > MAX_NESTING {
+    let refused =
+        st.shortcut && (src.len() > MAX_COMMAND_BYTES || nesting_estimate(src) > MAX_NESTING);
+    let ir = if refused {
         None
     } else {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| front::parse(src))).unwrap_or(None)
@@ -248,19 +264,15 @@ fn analyze(src: &str, depth: usize, st: &mut State) {
     }
 }
 
-/// An upper estimate of how deeply `src` nests, ignoring quoting. Brackets
-/// count one level; `if`, `while`, `until`, `for`, `select` and `case` count
-/// two (the construct and its `then`/`do` body). Used only to refuse input
-/// that could exhaust the parser's stack.
+/// A rough estimate of how deeply `src` nests, ignoring quoting and
+/// comments. Brackets count one level; `if`, `while`, `until`, `for`,
+/// `select` and `case` count two (the construct and its `then`/`do` body).
+/// Linear: it returns as soon as the estimate passes [`MAX_NESTING`].
 fn nesting_estimate(src: &str) -> usize {
     let mut stack: Vec<(u8, usize)> = Vec::new();
-    let (mut depth, mut max) = (0usize, 0usize);
-    let mut push = |stack: &mut Vec<(u8, usize)>, depth: &mut usize, kind: u8, weight: usize| {
-        stack.push((kind, weight));
-        *depth += weight;
-        max = max.max(*depth);
-    };
+    let mut depth = 0usize;
     let pop = |stack: &mut Vec<(u8, usize)>, depth: &mut usize, kind: u8| {
+        // The stack never holds more than MAX_NESTING + 1 entries.
         if let Some(pos) = stack.iter().rposition(|(k, _)| *k == kind) {
             for (_, weight) in stack.drain(pos..) {
                 *depth -= weight;
@@ -271,49 +283,480 @@ fn nesting_estimate(src: &str) -> usize {
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        if b.is_ascii_alphabetic() || b == b'_' {
+        let opened = if b.is_ascii_alphabetic() || b == b'_' {
             let start = i;
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
             match &src[start..i] {
-                "if" => push(&mut stack, &mut depth, b'i', 2),
-                "while" | "until" | "for" | "select" => push(&mut stack, &mut depth, b'l', 2),
-                "case" => push(&mut stack, &mut depth, b'c', 2),
-                "fi" => pop(&mut stack, &mut depth, b'i'),
-                "done" => pop(&mut stack, &mut depth, b'l'),
-                "esac" => pop(&mut stack, &mut depth, b'c'),
-                _ => {}
+                "if" => Some((b'i', 2)),
+                "while" | "until" | "for" | "select" => Some((b'l', 2)),
+                "case" => Some((b'c', 2)),
+                "fi" => {
+                    pop(&mut stack, &mut depth, b'i');
+                    None
+                }
+                "done" => {
+                    pop(&mut stack, &mut depth, b'l');
+                    None
+                }
+                "esac" => {
+                    pop(&mut stack, &mut depth, b'c');
+                    None
+                }
+                _ => None,
             }
-            continue;
+        } else {
+            i += 1;
+            match b {
+                b'(' | b'[' => Some((b'(', 1)),
+                b'{' => Some((b'{', 1)),
+                b')' | b']' => {
+                    pop(&mut stack, &mut depth, b'(');
+                    None
+                }
+                b'}' => {
+                    pop(&mut stack, &mut depth, b'{');
+                    None
+                }
+                _ => None,
+            }
+        };
+        if let Some((kind, weight)) = opened {
+            stack.push((kind, weight));
+            depth += weight;
+            if depth > MAX_NESTING {
+                return depth;
+            }
         }
-        match b {
-            b'(' | b'[' => push(&mut stack, &mut depth, b'(', 1),
-            b'{' => push(&mut stack, &mut depth, b'{', 1),
-            b')' | b']' => pop(&mut stack, &mut depth, b'('),
-            b'}' => pop(&mut stack, &mut depth, b'{'),
-            _ => {}
-        }
-        i += 1;
     }
-    max
+    depth.min(MAX_NESTING)
 }
+
+// ---------------------------------------------------------------------------
+// Command classification.
 
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash"];
 const INTERPRETERS: &[&str] = &[
     "node", "nodejs", "ruby", "perl", "php", "deno", "bun", "npx", "tsx", "ts-node",
-];
-const WRAPPERS: &[&str] = &[
-    "sudo", "doas", "env", "nohup", "nice", "time", "command", "exec", "builtin", "stdbuf",
-    "timeout",
 ];
 /// Commands that change the directory later relative paths resolve against,
 /// or read and run a file in the current shell.
 const CONTEXT_CHANGERS: &[&str] = &["cd", "pushd", "popd", "source", "."];
 /// `git` subcommands that print repository content not named as a path.
 const GIT_READERS: &[&str] = &[
-    "show", "cat-file", "archive", "grep", "blame", "diff", "log", "stash",
+    "show",
+    "cat-file",
+    "archive",
+    "grep",
+    "blame",
+    "annotate",
+    "diff",
+    "log",
+    "whatchanged",
+    "stash",
+    "format-patch",
+    "bundle",
 ];
+
+/// The options a command accepts.
+struct OptSpec {
+    /// Short options without a value.
+    short_flags: &'static str,
+    /// Short options with a value, attached (`-uroot`) or the next word.
+    short_values: &'static str,
+    /// Short options whose value, if any, must be attached (`xargs -i{}`).
+    short_optional: &'static str,
+    /// Long options without a value, or with an optional `=value`.
+    long_flags: &'static [&'static str],
+    /// Long options with a value (`--name=value` or `--name value`).
+    long_values: &'static [&'static str],
+    /// `-NUM` is accepted (`nice -5`, `grep -3`).
+    numeric: bool,
+}
+
+const NO_OPTIONS: OptSpec = OptSpec {
+    short_flags: "",
+    short_values: "",
+    short_optional: "",
+    long_flags: &[],
+    long_values: &[],
+    numeric: false,
+};
+
+const ENV_OPTS: OptSpec = OptSpec {
+    short_flags: "i0v",
+    short_values: "uCSP",
+    long_flags: &[
+        "--ignore-environment",
+        "--null",
+        "--debug",
+        "--default-signal",
+        "--ignore-signal",
+        "--block-signal",
+        "--list-signal-handling",
+    ],
+    long_values: &["--unset", "--chdir", "--split-string"],
+    ..NO_OPTIONS
+};
+const SUDO_OPTS: OptSpec = OptSpec {
+    short_flags: "AbBEeHiKklNnPSsVv",
+    short_values: "ugCDhprtTUR",
+    long_flags: &[
+        "--askpass",
+        "--background",
+        "--bell",
+        "--preserve-env",
+        "--edit",
+        "--set-home",
+        "--login",
+        "--remove-timestamp",
+        "--reset-timestamp",
+        "--list",
+        "--non-interactive",
+        "--preserve-groups",
+        "--stdin",
+        "--shell",
+        "--validate",
+    ],
+    long_values: &[
+        "--user",
+        "--group",
+        "--close-from",
+        "--chdir",
+        "--host",
+        "--prompt",
+        "--role",
+        "--type",
+        "--command-timeout",
+        "--other-user",
+        "--chroot",
+    ],
+    ..NO_OPTIONS
+};
+const DOAS_OPTS: OptSpec = OptSpec {
+    short_flags: "nsL",
+    short_values: "uaC",
+    ..NO_OPTIONS
+};
+const NICE_OPTS: OptSpec = OptSpec {
+    short_values: "n",
+    long_values: &["--adjustment"],
+    numeric: true,
+    ..NO_OPTIONS
+};
+const TIMEOUT_OPTS: OptSpec = OptSpec {
+    short_flags: "v",
+    short_values: "sk",
+    long_flags: &["--preserve-status", "--foreground", "--verbose"],
+    long_values: &["--signal", "--kill-after"],
+    ..NO_OPTIONS
+};
+const EXEC_OPTS: OptSpec = OptSpec {
+    short_flags: "cl",
+    short_values: "a",
+    ..NO_OPTIONS
+};
+const COMMAND_OPTS: OptSpec = OptSpec {
+    short_flags: "pvV",
+    ..NO_OPTIONS
+};
+const STDBUF_OPTS: OptSpec = OptSpec {
+    short_values: "ioe",
+    long_values: &["--input", "--output", "--error"],
+    ..NO_OPTIONS
+};
+const TIME_OPTS: OptSpec = OptSpec {
+    short_flags: "apvq",
+    short_values: "of",
+    long_flags: &["--append", "--verbose", "--portability", "--quiet"],
+    long_values: &["--output", "--format"],
+    ..NO_OPTIONS
+};
+const CAFFEINATE_OPTS: OptSpec = OptSpec {
+    short_flags: "dimsu",
+    short_values: "tw",
+    ..NO_OPTIONS
+};
+const XARGS_OPTS: OptSpec = OptSpec {
+    short_flags: "0rtpxo",
+    short_values: "adEILnPsJR",
+    short_optional: "iel",
+    long_flags: &[
+        "--null",
+        "--no-run-if-empty",
+        "--verbose",
+        "--interactive",
+        "--exit",
+        "--open-tty",
+        "--show-limits",
+        "--replace",
+        "--eof",
+        "--max-lines",
+    ],
+    long_values: &[
+        "--arg-file",
+        "--delimiter",
+        "--max-args",
+        "--max-procs",
+        "--max-chars",
+        "--process-slot-var",
+    ],
+    ..NO_OPTIONS
+};
+const GREP_OPTS: OptSpec = OptSpec {
+    // GNU grep and macOS (BSD) grep. BSD `-J`/`-M`/`-X`/`-Z` decompress
+    // in-process (it links libbz2, liblzma and libz); neither grep runs
+    // another program on the files it searches.
+    short_flags: "EFGPiyvwxcLloqsbHhnTZzaIrRUuVJMXO",
+    short_values: "efmABCdD",
+    long_flags: &[
+        "--extended-regexp",
+        "--fixed-strings",
+        "--basic-regexp",
+        "--perl-regexp",
+        "--ignore-case",
+        "--no-ignore-case",
+        "--invert-match",
+        "--word-regexp",
+        "--line-regexp",
+        "--count",
+        "--color",
+        "--colour",
+        "--files-without-match",
+        "--files-with-matches",
+        "--only-matching",
+        "--quiet",
+        "--silent",
+        "--no-messages",
+        "--byte-offset",
+        "--with-filename",
+        "--no-filename",
+        "--line-number",
+        "--initial-tab",
+        "--null",
+        "--null-data",
+        "--text",
+        "--recursive",
+        "--dereference-recursive",
+        "--line-buffered",
+        "--binary",
+        "--decompress",
+        "--bz2decompress",
+        "--xz",
+        "--lzma",
+        "--mmap",
+    ],
+    long_values: &[
+        "--regexp",
+        "--file",
+        "--max-count",
+        "--after-context",
+        "--before-context",
+        "--context",
+        "--directories",
+        "--devices",
+        "--label",
+        "--include",
+        "--exclude",
+        "--exclude-dir",
+        "--exclude-from",
+        "--binary-files",
+    ],
+    numeric: true,
+    ..NO_OPTIONS
+};
+const RG_OPTS: OptSpec = OptSpec {
+    short_flags: "abcFHhiIlLnNopqsSuUvwxzP0V.",
+    short_values: "efgtTmABCjMErd",
+    long_flags: &[
+        "--hidden",
+        "--no-ignore",
+        "--files",
+        "--count",
+        "--count-matches",
+        "--files-with-matches",
+        "--files-without-match",
+        "--ignore-case",
+        "--smart-case",
+        "--case-sensitive",
+        "--fixed-strings",
+        "--word-regexp",
+        "--line-regexp",
+        "--invert-match",
+        "--line-number",
+        "--no-line-number",
+        "--heading",
+        "--no-heading",
+        "--with-filename",
+        "--no-filename",
+        "--only-matching",
+        "--json",
+        "--vimgrep",
+        "--pcre2",
+        "--multiline",
+        "--follow",
+        "--null",
+        "--text",
+        "--unrestricted",
+        "--quiet",
+        "--color",
+        "--column",
+        "--no-column",
+        "--stats",
+        "--trim",
+        "--search-zip",
+        "--no-messages",
+        "--byte-offset",
+        "--passthru",
+    ],
+    long_values: &[
+        "--regexp",
+        "--file",
+        "--glob",
+        "--iglob",
+        "--type",
+        "--type-not",
+        "--max-count",
+        "--context",
+        "--after-context",
+        "--before-context",
+        "--threads",
+        "--replace",
+        "--max-columns",
+        "--encoding",
+        "--sort",
+        "--sortr",
+        "--max-depth",
+        "--max-filesize",
+        "--type-add",
+        "--colors",
+        "--path-separator",
+        "--pre",
+        "--pre-glob",
+        "--ignore-file",
+        "--engine",
+    ],
+    numeric: false,
+    ..NO_OPTIONS
+};
+
+/// Wrapper commands that run the command named after their options.
+fn wrapper_spec(name: &str) -> Option<&'static OptSpec> {
+    Some(match name {
+        "env" => &ENV_OPTS,
+        "sudo" => &SUDO_OPTS,
+        "doas" => &DOAS_OPTS,
+        "nice" => &NICE_OPTS,
+        "timeout" => &TIMEOUT_OPTS,
+        "exec" => &EXEC_OPTS,
+        "command" => &COMMAND_OPTS,
+        "builtin" | "nohup" => &NO_OPTIONS,
+        "stdbuf" => &STDBUF_OPTS,
+        "time" => &TIME_OPTS,
+        "caffeinate" => &CAFFEINATE_OPTS,
+        "xargs" => &XARGS_OPTS,
+        _ => return None,
+    })
+}
+
+/// Options found by [`parse_options`].
+struct Parsed {
+    /// `(key, value)`, keys spelled `-x` or `--name`.
+    opts: Vec<(String, Option<String>)>,
+    /// Indices of operands (with `permute`; otherwise empty).
+    operands: Vec<usize>,
+    /// Index of the first word after the options (without `permute`).
+    next: usize,
+}
+
+/// Parses leading options of `words` against `spec`. Without `permute` it
+/// stops at the first operand; with it, options may follow operands (GNU
+/// style) and operands are collected. `None` when a word is not literal or
+/// an option is not in `spec`.
+fn parse_options(words: &[Word], spec: &OptSpec, permute: bool) -> Option<Parsed> {
+    let mut parsed = Parsed {
+        opts: Vec::new(),
+        operands: Vec::new(),
+        next: words.len(),
+    };
+    let mut i = 0;
+    let mut options_done = false;
+    while i < words.len() {
+        let arg = literal(words.get(i))?;
+        let is_option = !options_done && arg.starts_with('-') && arg != "-";
+        if !is_option {
+            if !permute {
+                parsed.next = i;
+                return Some(parsed);
+            }
+            parsed.operands.push(i);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if arg == "--" {
+            if !permute {
+                parsed.next = i;
+                return Some(parsed);
+            }
+            options_done = true;
+            continue;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, attached) = match long.split_once('=') {
+                Some((n, v)) => (format!("--{n}"), Some(v.to_string())),
+                None => (arg.clone(), None),
+            };
+            if spec.long_values.contains(&name.as_str()) {
+                let value = match attached {
+                    Some(v) => v,
+                    None => {
+                        let v = literal(words.get(i))?;
+                        i += 1;
+                        v
+                    }
+                };
+                parsed.opts.push((name, Some(value)));
+            } else if spec.long_flags.contains(&name.as_str()) {
+                parsed.opts.push((name, attached));
+            } else {
+                return None;
+            }
+            continue;
+        }
+        let cluster = &arg[1..];
+        if spec.numeric && cluster.bytes().all(|b| b.is_ascii_digit()) {
+            parsed.opts.push((arg.clone(), None));
+            continue;
+        }
+        for (k, ch) in cluster.char_indices() {
+            let rest = &cluster[k + ch.len_utf8()..];
+            let key = format!("-{ch}");
+            if spec.short_values.contains(ch) {
+                let value = if rest.is_empty() {
+                    let v = literal(words.get(i))?;
+                    i += 1;
+                    v
+                } else {
+                    rest.to_string()
+                };
+                parsed.opts.push((key, Some(value)));
+                break;
+            } else if spec.short_optional.contains(ch) {
+                parsed
+                    .opts
+                    .push((key, (!rest.is_empty()).then(|| rest.to_string())));
+                break;
+            } else if spec.short_flags.contains(ch) {
+                parsed.opts.push((key, None));
+            } else {
+                return None;
+            }
+        }
+    }
+    Some(parsed)
+}
 
 /// Commands whose first operand is a pattern, filter or script rather than
 /// a path, so `jq . f` or `grep . f` is not a directory argument.
@@ -356,6 +799,9 @@ fn handle_simple(cmd: &Simple, depth: usize, st: &mut State) {
         None
     };
     for (i, word) in cmd.words.iter().enumerate() {
+        if st.out_of_time() {
+            return;
+        }
         // Neither the command name (`. file`) nor a pattern operand is a
         // directory argument.
         let not_a_path = cmd.is_command && i == 0 || pattern_at == Some(i);
@@ -416,7 +862,8 @@ fn skip_options(words: &[Word], takes_value: impl Fn(&str) -> bool) -> usize {
 }
 
 /// Classifies one command line: recurses into commands it runs, and marks
-/// the result unresolved for interpreters, executors and context changers.
+/// the result unresolved for interpreters, executors, context changers and
+/// options it does not know.
 fn classify(words: &[Word], depth: usize, st: &mut State) {
     if depth > MAX_DEPTH {
         st.unresolved = true;
@@ -424,52 +871,79 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
     }
     let mut i = 0;
     let mut privileged = false;
-    // Skip wrappers such as `sudo -u root` or `env X=1`.
-    while let Some(name) = literal(words.get(i)) {
+    // Wrappers: `sudo -u root`, `env -i X=1`, `timeout -s KILL 5`, ...
+    loop {
+        let Some(name) = literal(words.get(i)) else {
+            return;
+        };
         let name = base_name(&name).to_string();
-        if !WRAPPERS.contains(&name.as_str()) {
+        let Some(spec) = wrapper_spec(&name) else {
             break;
-        }
-        privileged |= name == "sudo" || name == "doas";
-        i += 1;
-        while let Some(arg) = literal(words.get(i)) {
-            // `env -S STRING` splits STRING into the command line it runs.
-            let split = if name == "env" && (arg == "-S" || arg == "--split-string") {
-                Some((literal(words.get(i + 1)), i + 2))
-            } else if name == "env" {
-                arg.strip_prefix("--split-string=")
-                    .map(|v| (Some(v.to_string()), i + 1))
-            } else {
-                None
-            };
-            if let Some((value, rest_at)) = split {
-                let Some(value) = value else {
+        };
+        let Some(parsed) = parse_options(&words[i + 1..], spec, false) else {
+            // An option not in the table: the command word is unknown.
+            st.unresolved = true;
+            return;
+        };
+        let mut next = i + 1 + parsed.next;
+        match name.as_str() {
+            "env" => {
+                for (key, value) in &parsed.opts {
+                    match key.as_str() {
+                        "-S" | "--split-string" => {
+                            // The string is split into the command line run.
+                            let Some(value) = value else {
+                                st.unresolved = true;
+                                return;
+                            };
+                            let tail = join_literals(&words[next..], st);
+                            analyze(&format!("{value} {tail}"), depth + 1, st);
+                            return;
+                        }
+                        "-C" | "--chdir" | "-P" => st.unresolved = true,
+                        _ => {}
+                    }
+                }
+                while literal(words.get(next)).is_some_and(|w| w == "-" || w.contains('=')) {
+                    next += 1;
+                }
+            }
+            "sudo" | "doas" => {
+                privileged = true;
+                let runs_other = parsed.opts.iter().any(|(k, _)| {
+                    matches!(
+                        k.as_str(),
+                        "-e" | "-i"
+                            | "-s"
+                            | "-l"
+                            | "-D"
+                            | "-R"
+                            | "--edit"
+                            | "--login"
+                            | "--shell"
+                            | "--list"
+                            | "--chdir"
+                            | "--chroot"
+                    )
+                });
+                if runs_other {
                     st.unresolved = true;
-                    return;
-                };
-                let rest = join_literals(words.get(rest_at..).unwrap_or(&[]), st);
-                analyze(&format!("{value} {rest}"), depth + 1, st);
+                }
+            }
+            "timeout" => {
+                if literal(words.get(next)).is_some() {
+                    next += 1; // the duration
+                }
+            }
+            "xargs" => {
+                // Runs the command on words read from its input.
+                st.unresolved = true;
+                classify(&words[next..], depth + 1, st);
                 return;
             }
-            let takes_value = matches!(
-                (name.as_str(), arg.as_str()),
-                (
-                    "sudo" | "doas",
-                    "-u" | "-g" | "-C" | "-D" | "-h" | "-p" | "-r" | "-t" | "-U"
-                ) | ("nice", "-n")
-                    | ("env", "-u" | "-C")
-            );
-            if arg.starts_with('-') && arg != "-" {
-                i += if takes_value { 2 } else { 1 };
-            } else if name == "env" && arg.contains('=') {
-                i += 1;
-            } else {
-                break;
-            }
+            _ => {}
         }
-        if name == "timeout" && literal(words.get(i)).is_some() {
-            i += 1; // the duration
-        }
+        i = next;
     }
     let Some(name) = literal(words.get(i)) else {
         return;
@@ -503,33 +977,14 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
             let line = join_literals(&rest[at..], st);
             analyze(&line, depth + 1, st);
         }
-        "xargs" | "parallel" => {
+        "parallel" => {
             st.unresolved = true;
-            let at = skip_options(rest, |o| {
-                matches!(
-                    o,
-                    "-a" | "-d"
-                        | "-E"
-                        | "-I"
-                        | "-L"
-                        | "-n"
-                        | "-P"
-                        | "-s"
-                        | "-j"
-                        | "--arg-file"
-                        | "--delimiter"
-                        | "--max-args"
-                        | "--max-procs"
-                        | "--max-lines"
-                        | "--jobs"
-                )
-            });
+            let at = skip_options(rest, |o| matches!(o, "-j" | "--jobs" | "-a" | "--arg-file"));
             classify(&rest[at..], depth + 1, st);
         }
         "su" => {
             st.unresolved = true;
-            let mut j = 0;
-            while j < rest.len() {
+            for j in 0..rest.len() {
                 let arg = literal(rest.get(j)).unwrap_or_default();
                 let payload = match arg.as_str() {
                     "-c" | "--command" => literal(rest.get(j + 1)),
@@ -538,7 +993,6 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
                 if let Some(payload) = payload {
                     analyze(&payload, depth + 1, st);
                 }
-                j += 1;
             }
         }
         "find" => find_exec(rest, depth, st),
@@ -550,16 +1004,35 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
                 st.unresolved = true;
             }
         }
-        // These search the working directory when given no path.
-        "rg" | "ag" | "ack" | "ugrep" => {
-            if search_operands(rest, RG_VALUE_SHORT).is_none_or(|s| s.paths == 0) {
-                st.unresolved = true;
+        "grep" | "egrep" | "fgrep" => {
+            // grep reads stdin without a path unless it recurses.
+            match search_operands(rest, &GREP_OPTS) {
+                Some(s) => {
+                    st.add_option_files(&s.option_files);
+                    if s.recursive && s.paths == 0 {
+                        st.unresolved = true;
+                    }
+                }
+                None => st.unresolved = true,
             }
         }
-        // grep reads stdin without a path unless it recurses.
-        "grep" | "egrep" | "fgrep" => {
-            if search_operands(rest, GREP_VALUE_SHORT).is_none_or(|s| s.recursive && s.paths == 0) {
-                st.unresolved = true;
+        "rg" => {
+            // rg searches the working directory when given no path.
+            match search_operands(rest, &RG_OPTS) {
+                Some(s) => {
+                    st.add_option_files(&s.option_files);
+                    if s.paths == 0 || s.runs_programs {
+                        st.unresolved = true;
+                    }
+                }
+                None => st.unresolved = true,
+            }
+        }
+        "ag" | "ack" | "ugrep" => {
+            // No option table: any option, or no path, is unresolved.
+            match search_operands(rest, &NO_OPTIONS) {
+                Some(s) if s.paths > 0 => {}
+                _ => st.unresolved = true,
             }
         }
         n if n.starts_with("python")
@@ -572,84 +1045,56 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
     }
 }
 
-/// Short options that take a value, per search tool.
-const GREP_VALUE_SHORT: &[char] = &['e', 'f', 'm', 'A', 'B', 'C', 'd', 'D'];
-const RG_VALUE_SHORT: &[char] = &[
-    'e', 'f', 'g', 't', 'T', 'm', 'A', 'B', 'C', 'j', 'M', 'E', 'r',
-];
-/// Long options that take a separate value (rg and grep).
-const SEARCH_VALUE_LONG: &[&str] = &[
-    "--regexp",
-    "--file",
-    "--glob",
-    "--iglob",
-    "--type",
-    "--type-not",
-    "--max-count",
-    "--context",
-    "--after-context",
-    "--before-context",
-    "--threads",
-    "--replace",
-    "--max-columns",
-    "--encoding",
-    "--sort",
-    "--sortr",
-    "--directories",
-    "--devices",
-];
-
 struct SearchOperands {
-    /// Path operands given (positionals other than the pattern).
+    /// Path operands given (operands other than the pattern).
     paths: usize,
-    /// `-r`, `-R` or `--recursive` was given.
+    /// Files named by option values that the command reads: `-f`/`--file`
+    /// pattern files and rg `--pre` programs.
+    option_files: Vec<String>,
+    /// rg `--pre`, `--pre-glob`, `-z`/`--search-zip`: other programs run
+    /// on the searched files.
+    runs_programs: bool,
+    /// `-r`, `-R`, `--recursive`, `-d recurse` or `--directories=recurse`.
     recursive: bool,
 }
 
 /// Counts the path operands of a grep-like command; `None` when a word is
-/// not literal.
-fn search_operands(args: &[Word], value_short: &[char]) -> Option<SearchOperands> {
+/// not literal or an option is not in `spec`.
+fn search_operands(args: &[Word], spec: &OptSpec) -> Option<SearchOperands> {
+    let parsed = parse_options(args, spec, true)?;
     let mut pattern_given = false;
     let mut recursive = false;
-    let mut positionals = 0usize;
-    let mut options_done = false;
-    let mut j = 0;
-    while j < args.len() {
-        let arg = literal(args.get(j))?;
-        j += 1;
-        if options_done || !arg.starts_with('-') || arg == "-" {
-            positionals += 1;
-            continue;
-        }
-        if arg == "--" {
-            options_done = true;
-        } else if let Some(long) = arg.strip_prefix("--") {
-            let name = long.split('=').next().unwrap_or(long);
-            recursive |= matches!(name, "recursive" | "dereference-recursive");
-            pattern_given |= matches!(name, "regexp" | "file");
-            if !long.contains('=') && SEARCH_VALUE_LONG.contains(&arg.as_str()) {
-                j += 1;
+    let mut option_files = Vec::new();
+    let mut runs_programs = false;
+    for (key, value) in &parsed.opts {
+        match key.as_str() {
+            "-e" | "--regexp" => pattern_given = true,
+            "-f" | "--file" => {
+                pattern_given = true;
+                option_files.extend(value.clone());
             }
-        } else {
-            // A cluster such as `-rn`, `-e PATTERN` or `-ePATTERN`.
-            for (k, ch) in arg[1..].char_indices() {
-                if value_short.contains(&ch) {
-                    pattern_given |= ch == 'e' || ch == 'f';
-                    if k + ch.len_utf8() == arg.len() - 1 {
-                        j += 1; // the value is the next word
-                    }
-                    break;
-                }
-                recursive |= ch == 'r' || ch == 'R';
+            "--pre" => {
+                runs_programs = true;
+                option_files.extend(value.clone());
             }
+            "--pre-glob" | "-z" | "--search-zip" => runs_programs = true,
+            "-r" | "-R" | "--recursive" | "--dereference-recursive" => recursive = true,
+            "-d" | "--directories" => recursive |= value.as_deref() == Some("recurse"),
+            _ => {}
         }
     }
+    let operands = parsed.operands.len();
     let paths = if pattern_given {
-        positionals
+        operands
     } else {
-        positionals.saturating_sub(1)
+        operands.saturating_sub(1)
     };
-    Some(SearchOperands { paths, recursive })
+    Some(SearchOperands {
+        paths,
+        option_files,
+        runs_programs,
+        recursive,
+    })
 }
 
 /// `find ... -exec CMD ;` runs CMD on files it finds: unresolved, and any
@@ -710,6 +1155,9 @@ fn shell_invocation(args: &[Word], depth: usize, st: &mut State) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Words to files.
+
 impl State<'_> {
     /// Adds the files a word names. With `dirs_unresolve`, a word naming a
     /// directory marks the result unresolved (directories are not walked).
@@ -719,17 +1167,33 @@ impl State<'_> {
             return;
         };
         for cand in cands {
-            match &cand.pattern {
-                Some(pattern) => self.add_glob(pattern, &cand.text),
-                None => {
-                    self.add_literal(&cand.text, dirs_unresolve);
-                    if cand.text.starts_with('-') || (is_dd && cand.text.starts_with("if=")) {
-                        if let Some((_, value)) = cand.text.split_once('=') {
-                            self.add_literal(value, dirs_unresolve);
-                        }
-                    }
+            if self.out_of_time() {
+                return;
+            }
+            if let Some(pattern) = &cand.pattern {
+                self.add_glob(pattern, &cand.text);
+                continue;
+            }
+            let text = cand.text.as_str();
+            self.add_literal(text, dirs_unresolve);
+            if text.starts_with('-') || (is_dd && text.starts_with("if=")) {
+                // `--file=path`, `-f=path`, `if=path`.
+                if let Some((_, value)) = text.split_once('=') {
+                    self.add_literal(value, dirs_unresolve);
                 }
             }
+            if text.starts_with('-') && !text.starts_with("--") {
+                // An attached short-option value: `-fsecret.env`.
+                if let Some((at, _)) = text.char_indices().nth(2) {
+                    self.add_literal(&text[at..], dirs_unresolve);
+                }
+            }
+        }
+    }
+
+    fn add_option_files(&mut self, files: &[String]) {
+        for file in files {
+            self.add_literal(file, true);
         }
     }
 
@@ -772,44 +1236,80 @@ impl State<'_> {
         }
     }
 
+    /// Expands a glob one path component at a time, reading each directory
+    /// with `read_dir` and counting every entry visited against
+    /// [`WALK_LIMIT`] and the deadline. `**` is not walked.
     fn add_glob(&mut self, pattern: &str, text: &str) {
         if pattern.contains("**") {
-            // A recursive walk; not attempted.
             self.unresolved = true;
             return;
         }
-        let full = if pattern.starts_with('/') {
-            pattern.to_string()
-        } else {
-            let Some(cwd) = self.cwd.to_str() else {
-                self.unresolved = true;
-                return;
-            };
-            format!(
-                "{}/{}",
-                glob::Pattern::escape(cwd.trim_end_matches('/')),
-                pattern
-            )
+        let (root, relative) = match pattern.strip_prefix('/') {
+            Some(rest) => (PathBuf::from("/"), rest),
+            None => (self.cwd.to_path_buf(), pattern),
         };
+        let mut components = Vec::new();
+        for part in relative.split('/').filter(|p| !p.is_empty()) {
+            if part.contains(['*', '?', '[']) {
+                match glob::Pattern::new(part) {
+                    Ok(p) => components.push((part, Some(p))),
+                    Err(_) => {
+                        // Not a valid pattern: the shell passes it through.
+                        self.add_literal(text, true);
+                        return;
+                    }
+                }
+            } else {
+                components.push((part, None));
+            }
+        }
         let options = glob::MatchOptions {
             case_sensitive: true,
             require_literal_separator: true,
             require_literal_leading_dot: true,
         };
-        let Ok(paths) = glob::glob_with(&full, options) else {
-            // Not a valid pattern: the shell passes it through literally.
-            self.add_literal(text, true);
-            return;
-        };
-        for entry in paths {
-            if self.glob_budget == 0 || self.out_of_time() {
-                self.unresolved = true;
+        let mut current = vec![root];
+        for (index, (part, matcher)) in components.iter().enumerate() {
+            let last = index + 1 == components.len();
+            let mut next = Vec::new();
+            for base in &current {
+                let Some(matcher) = matcher else {
+                    next.push(base.join(part));
+                    continue;
+                };
+                let Ok(entries) = std::fs::read_dir(base) else {
+                    continue;
+                };
+                let mut names = Vec::new();
+                for entry in entries {
+                    if self.walk_budget == 0 || self.out_of_time() {
+                        self.unresolved = true;
+                        return;
+                    }
+                    self.walk_budget -= 1;
+                    let Ok(entry) = entry else {
+                        continue;
+                    };
+                    let name = entry.file_name();
+                    if let Some(name) = name.to_str() {
+                        if matcher.matches_with(name, options) {
+                            names.push(name.to_string());
+                        }
+                    }
+                }
+                names.sort();
+                next.extend(names.into_iter().map(|n| base.join(n)));
+            }
+            if !last {
+                next.retain(|p| p.is_dir());
+            }
+            current = next;
+        }
+        for path in current {
+            if self.out_of_time() {
                 return;
             }
-            self.glob_budget -= 1;
-            if let Ok(path) = entry {
-                self.add_path(path, true);
-            }
+            self.add_path(path, true);
         }
     }
 }
@@ -1063,24 +1563,26 @@ mod front {
         fn compound(&mut self, c: &CompoundCommand) {
             match c {
                 CompoundCommand::Arithmetic(a) => {
-                    // brush-parser 0.4.0 also reads `( ( cmd ) )` (nested
-                    // subshells, spaced) as an arithmetic command. Bash
-                    // treats only an unbroken `((` as arithmetic, so a
-                    // spaced one is analysed as the commands it holds.
-                    let value = &a.expr.value;
-                    self.arithmetic_substitutions(value);
-                    let start = a.loc.start.index;
-                    let unbroken = self.source.get(start..start + 2) == Some(&['(', '('][..]);
-                    if !unbroken {
-                        self.ir.nested.push(value.clone());
-                    } else if !value.contains(['$', '`'])
-                        && brush_parser::arithmetic::parse(value).is_err()
-                    {
-                        // `((cat x) )`: bash runs nested subshells, but
-                        // brush-parser has dropped a parenthesis, so the
-                        // structure is uncertain.
+                    self.arithmetic_substitutions(&a.expr.value);
+                    // Bash reads `((` as arithmetic only when the command
+                    // also closes with an unbroken `))`; `((cat x) )` and
+                    // `( ( cat x ) )` are nested subshells. brush-parser
+                    // 0.4.0 reports all of these as arithmetic, so the
+                    // original text decides.
+                    let (start, end) = (a.loc.start.index, a.loc.end.index);
+                    let src = &self.source;
+                    let spans = start + 4 <= end && end <= src.len();
+                    let arithmetic = spans
+                        && src[start..start + 2] == ['(', '(']
+                        && src[end - 2..end] == [')', ')'];
+                    if !arithmetic {
                         self.ir.unresolved = true;
-                        self.ir.nested.push(value.clone());
+                        let inner = if spans {
+                            src[start + 1..end - 1].iter().collect()
+                        } else {
+                            a.expr.value.clone()
+                        };
+                        self.ir.nested.push(inner);
                     }
                 }
                 CompoundCommand::ArithmeticForClause(f) => {
@@ -1429,5 +1931,57 @@ mod front {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod stress {
+    //! Proof that stack exhaustion cannot abort the process within the
+    //! command-size cap: the worst nesting shapes, parsed with the size and
+    //! nesting shortcuts disabled, at the cap and at twice the cap. Run in
+    //! release:
+    //! `cargo test --release -p riskgrep-claude --lib -- --ignored --nocapture`.
+
+    use super::{run_isolated, MAX_COMMAND_BYTES};
+    use std::time::{Duration, Instant};
+
+    /// Repeats `open` and `close` around `cat x` to fill `bytes`.
+    fn nest(open: &str, close: &str, bytes: usize) -> String {
+        let n = (bytes - 5) / (open.len() + close.len());
+        format!("{}cat x{}", open.repeat(n), close.repeat(n))
+    }
+
+    fn shapes(bytes: usize) -> Vec<(&'static str, String)> {
+        vec![
+            ("(]; nesting", nest("(];", ")", bytes)),
+            ("(#)\\n nesting", nest("(#)\n", ")", bytes)),
+            (
+                "unary ! arithmetic",
+                format!("(({}1))", "!".repeat(bytes - 5)),
+            ),
+            ("nested if", nest("if true; then ", "; fi", bytes)),
+            ("nested while", nest("while true; do ", "; done", bytes)),
+            ("$( nesting", nest("echo $(", ")", bytes)),
+            ("{ nesting", nest("{ ", "; }", bytes)),
+            ("( nesting", nest("( ", " )", bytes)),
+        ]
+    }
+
+    #[test]
+    #[ignore]
+    fn worst_case_nesting_at_twice_the_cap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for bytes in [MAX_COMMAND_BYTES, 2 * MAX_COMMAND_BYTES] {
+            for (name, command) in shapes(bytes) {
+                assert!(command.len() <= bytes);
+                let start = Instant::now();
+                let got = run_isolated(&command, tmp.path(), Duration::from_secs(600), false);
+                println!(
+                    "{bytes:>7} B  {name:<20} {:>8.1} ms  unresolved={}",
+                    start.elapsed().as_secs_f64() * 1e3,
+                    got.unresolved
+                );
+            }
+        }
     }
 }

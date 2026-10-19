@@ -186,6 +186,53 @@ fn while_nesting_5000_returns_unresolved() {
     assert!(got.unresolved);
 }
 
+/// Nesting shapes the estimate does not see (`(]` closes nothing in the
+/// estimate; `#)` is a comment to bash) reach the parser; at these debug
+/// sizes they must return rather than abort. Release-size runs are
+/// `stress::worst_case_nesting_at_twice_the_cap` in `src/bash.rs`.
+#[test]
+fn unestimated_nesting_returns() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let n = 3_000;
+    let shapes = [
+        format!("{}cat x{}", "(];".repeat(n), ")".repeat(n)),
+        format!("{}cat x{}", "(#)\n".repeat(n), ")".repeat(n)),
+        format!("(({}1))", "!".repeat(20_000)),
+        format!("{}cat x{}", "echo $(".repeat(n), ")".repeat(n)),
+    ];
+    for command in &shapes {
+        let _ = bash_targets(command, tmp.path());
+    }
+}
+
+#[test]
+fn nesting_estimate_is_linear() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let command = format!("{}{}", "{".repeat(32_000), ")".repeat(32_000));
+    let start = Instant::now();
+    let got = bash_targets(&command, tmp.path());
+    assert!(got.unresolved);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "took {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn glob_walk_counts_entries_visited_not_matches() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for i in 0..10_001 {
+        std::fs::write(tmp.path().join(format!("f{i:05}.log")), b"").expect("create file");
+    }
+    let got = bash_targets("cat *.zzz", tmp.path());
+    assert!(
+        got.unresolved,
+        "a walk over 10,001 entries with no match must stop"
+    );
+    assert!(got.files.is_empty());
+}
+
 #[test]
 fn oversized_command_scans_its_head_and_is_unresolved() {
     let tmp = tempfile::tempdir().expect("tempdir");

@@ -1433,7 +1433,7 @@
     "expect_files": [
       "nested.txt"
     ],
-    "expect_unresolved": false
+    "expect_unresolved": true
   },
   {
     "name": "arithmetic command is not a read",
@@ -1842,5 +1842,531 @@
     ],
     "expect_files": [],
     "expect_unresolved": true
+  },
+  {
+    "name": "arithmetic command then a read",
+    "command": "(( x = 1 ))\ncat y.txt",
+    "cwd_files": [
+      "y.txt",
+      "x"
+    ],
+    "expect_files": [
+      "y.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "unbroken (( subshell with input redirection",
+    "command": "((cat<id_rsa) )",
+    "cwd_files": [
+      "id_rsa"
+    ],
+    "expect_files": [
+      "id_rsa"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "unbroken (( subshell, head with redirection",
+    "command": "((head -c1<id_rsa) )",
+    "cwd_files": [
+      "id_rsa"
+    ],
+    "expect_files": [
+      "id_rsa"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "unbroken (( subshell with an expansion",
+    "command": "((cat $HOME/.ssh/id_rsa) )",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "unbroken (( subshell with a variable",
+    "command": "f=x; ((cat $f) )",
+    "cwd_files": [
+      "x"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "unbroken (( subshell running ls",
+    "command": "((ls) )",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "unbroken (( subshell running bare cat",
+    "command": "((cat) )",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "env -iS cluster with the next word",
+    "command": "env -iS 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "env -S with an attached value",
+    "command": "env -S'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "env --split-string=",
+    "command": "env --split-string='cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "env --split-string with the next word",
+    "command": "env --split-string 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "env with an unknown option",
+    "command": "env -Z cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "env -C changes directory",
+    "command": "env -C sub cat x",
+    "cwd_files": [
+      "sub/x"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sudo --user",
+    "command": "sudo --user root cat shadow.txt",
+    "cwd_files": [
+      "shadow.txt"
+    ],
+    "expect_files": [
+      "shadow.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sudo -u",
+    "command": "sudo -u root cat shadow.txt",
+    "cwd_files": [
+      "shadow.txt"
+    ],
+    "expect_files": [
+      "shadow.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sudo with an unknown option",
+    "command": "sudo -X cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "timeout -s and a duration",
+    "command": "timeout -s KILL 5 cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "timeout --signal= -k",
+    "command": "timeout --signal=KILL -k 1 5 cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "timeout --kill-after then bash -c",
+    "command": "timeout --kill-after 1 5 bash -c 'cat a.txt'",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "timeout with an unknown option",
+    "command": "timeout -Q 5 cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "exec -a",
+    "command": "exec -a name cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "nice -n",
+    "command": "nice -n 5 cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "nice -NUM",
+    "command": "nice -5 cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "stdbuf attached value",
+    "command": "stdbuf -oL cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "caffeinate",
+    "command": "caffeinate -i cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "nohup",
+    "command": "nohup cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "command",
+    "command": "command cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "xargs with known options",
+    "command": "xargs -0 -n 1 cat",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "xargs with an unknown option",
+    "command": "xargs --frobnicate cat",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "sudo running bash -c",
+    "command": "sudo -u root bash -c 'cat a.txt'",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep -eTOKEN",
+    "command": "grep -eTOKEN a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "grep -fpats",
+    "command": "grep -fpats a.txt",
+    "cwd_files": [
+      "pats",
+      "a.txt"
+    ],
+    "expect_files": [
+      "pats",
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "grep -reTOKEN with no path",
+    "command": "grep -reTOKEN",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep -rfpats with no path",
+    "command": "grep -rfpats",
+    "cwd_files": [
+      "pats"
+    ],
+    "expect_files": [
+      "pats"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep -d recurse",
+    "command": "grep -d recurse TOKEN",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep --directories=recurse",
+    "command": "grep --directories=recurse TOKEN",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep with an unknown option",
+    "command": "grep --frobnicate TOKEN a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep option after the operands",
+    "command": "grep TOKEN a.txt -n",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "rg -eTOKEN with a path",
+    "command": "rg -eTOKEN a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "rg with an unknown option",
+    "command": "rg --frobnicate TOKEN a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "attached short value names a file",
+    "command": "grep -fsecret.env a.txt",
+    "cwd_files": [
+      "secret.env",
+      "a.txt"
+    ],
+    "expect_files": [
+      "secret.env",
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "git annotate",
+    "command": "git annotate x",
+    "cwd_files": [
+      "x"
+    ],
+    "expect_files": [
+      "x"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "git whatchanged",
+    "command": "git whatchanged",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "git format-patch",
+    "command": "git format-patch -1",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "git bundle",
+    "command": "git bundle create b.bundle HEAD",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "rg --pre runs a program",
+    "command": "rg --pre ./x.sh TOKEN .",
+    "cwd_files": [
+      "x.sh",
+      "a.txt"
+    ],
+    "expect_files": [
+      "x.sh"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "rg --pre= runs a program",
+    "command": "rg --pre=./x.sh TOKEN sub",
+    "cwd_files": [
+      "x.sh",
+      "sub/a.txt"
+    ],
+    "expect_files": [
+      "x.sh"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "rg --pre-glob",
+    "command": "rg --pre-glob '*.pdf' TOKEN a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "rg -z runs decompressors",
+    "command": "rg -z TOKEN a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "rg --search-zip runs decompressors",
+    "command": "rg --search-zip TOKEN a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep -Z decompresses in-process",
+    "command": "grep -Z TOKEN a.gz",
+    "cwd_files": [
+      "a.gz"
+    ],
+    "expect_files": [
+      "a.gz"
+    ],
+    "expect_unresolved": false
   }
 ]
