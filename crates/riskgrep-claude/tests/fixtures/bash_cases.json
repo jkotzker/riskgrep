@@ -2654,5 +2654,114 @@
       "x"
     ],
     "expect_unresolved": true
+  },
+  {
+    "name": "measured: osascript inline code",
+    "command": "osascript -e 'do shell script \"cat a.txt\"'",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "measured: lua inline code",
+    "command": "lua -e 'io.open(\"a.txt\")'",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "measured: Rscript inline code",
+    "command": "Rscript -e 'readLines(\"a.txt\")'",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "measured: pwsh -Command",
+    "command": "pwsh -Command 'Get-Content a.txt'",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "measured: pwsh -File",
+    "command": "pwsh -File x.ps1",
+    "cwd_files": [
+      "x.ps1"
+    ],
+    "expect_files": [
+      "x.ps1"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "measured: at reads commands from stdin",
+    "command": "echo \"cat a.txt\" | at now",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "measured: sort --files0-from",
+    "command": "sort --files0-from=l",
+    "cwd_files": [
+      "l"
+    ],
+    "expect_files": [
+      "l"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "measured: vim -s script",
+    "command": "vim -s s.vim",
+    "cwd_files": [
+      "s.vim"
+    ],
+    "expect_files": [
+      "s.vim"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "measured: ed reads commands from stdin",
+    "command": "echo \"r a.txt\" | ed",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "measured: ed < commands",
+    "command": "ed < cmds",
+    "cwd_files": [
+      "cmds"
+    ],
+    "expect_files": [
+      "cmds"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "measured: lua script file is named",
+    "command": "lua a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
   }
 ]

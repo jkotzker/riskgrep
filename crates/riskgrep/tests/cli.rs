@@ -17,6 +17,17 @@ fn shared_home() -> &'static Path {
     HOME.get_or_init(|| tempfile::tempdir().unwrap()).path()
 }
 
+/// Mode-000 files stay readable to root, so tests that rely on them skip.
+fn running_as_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let d = tempfile::tempdir().unwrap();
+    let root = fs::metadata(d.path()).unwrap().uid() == 0;
+    if root {
+        eprintln!("skipped: running as root, mode-000 files are readable");
+    }
+    root
+}
+
 fn riskgrep_in(home: &Path, cwd: &Path) -> Command {
     let mut c = Command::cargo_bin("riskgrep").unwrap();
     c.current_dir(cwd)
@@ -80,6 +91,9 @@ fn no_threshold_exits_0_with_findings() {
 
 #[test]
 fn exit_2_unscanned_blocks() {
+    if running_as_root() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("locked.txt");
     fs::write(&file, "hello\n").unwrap();
@@ -116,6 +130,9 @@ fn exit_2_unscanned_blocks() {
 
 #[test]
 fn threshold_exceeded_wins_over_unscanned() {
+    if running_as_root() {
+        return;
+    }
     let (dir, _, _) = key_dir();
     let locked = dir.path().join("locked.txt");
     fs::write(&locked, "x\n").unwrap();

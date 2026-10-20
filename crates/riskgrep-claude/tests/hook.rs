@@ -147,6 +147,17 @@ impl Env {
     }
 }
 
+/// Mode-000 files stay readable to root, so tests that rely on them skip.
+fn running_as_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let d = tempfile::tempdir().unwrap();
+    let root = fs::metadata(d.path()).unwrap().uid() == 0;
+    if root {
+        eprintln!("skipped: running as root, mode-000 files are readable");
+    }
+    root
+}
+
 fn embedding() -> Vec<u8> {
     synth::safetensors(&[
         ("speaker_embedding", "F32", &[1, 192]),
@@ -318,6 +329,9 @@ fn grep_walk_limit_applies_on_error() {
 
 #[test]
 fn unreadable_file_asks() {
+    if running_as_root() {
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     let e = Env::new();
     let f = e.write("secret.txt", b"data\n");

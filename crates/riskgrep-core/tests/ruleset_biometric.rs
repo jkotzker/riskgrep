@@ -452,6 +452,16 @@ fn underscore_numbered_checkpoint_is_a_known_false_positive() {
     let members: Vec<Tensor> = names.iter().map(|n| t(n, "<f4", &[768])).collect();
     let score = biometric(&f, "gpt2.npz", &npz_headers(&members)).unwrap_or(0.0);
     assert!((score - 86.0).abs() < 1e-6, "scored {score}");
+    // The same names in a safetensors file: the bank (80) with the float
+    // tensor rule (25).
+    let st = synth::safetensors(&[
+        ("h0_ln_1_g", "F32", &[768]),
+        ("h0_ln_1_b", "F32", &[768]),
+        ("h0_ln_2_g", "F32", &[768]),
+        ("h0_ln_2_b", "F32", &[768]),
+    ]);
+    let score = biometric(&f, "gpt2.safetensors", &st).unwrap_or(0.0);
+    assert!((score - 85.0).abs() < 1e-6, "scored {score}");
 }
 
 #[test]

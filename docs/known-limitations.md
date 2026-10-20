@@ -39,8 +39,8 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 ### Embedding banks are found by a name and structure heuristic
 
 - **Not covered:** a bank of speaker or face vectors stored under hierarchical names (for example `model.speakers.0.vec`, or `model_p225` with an underscore), or stored alongside at least as many other float tensors as bank vectors. Conversely, a model checkpoint whose parameter names are flat and not on the exclusion lists can be mistaken for a bank.
-- **Why:** a file is treated as a bank when 3 or more tensors (or `.npz` members) share one embedding shape, have flat names, and make up more than half of the file's float tensors. Model checkpoints are excluded by their parameter names (`weight`, `bias`, `kernel`, `scale`, `gamma`, `beta`, `time_mix`, `mixer`, and others) and by layer segments (`layers`, `blocks`, `encoder`, `transformer`, `backbone`, `model`, also when followed by `_`) or dot- or slash-delimited index segments (`.0.`) in their names. Underscore-delimited numbers (`spk_3_emb`, `19_198_0001`) do not exclude a bank. A naming scheme outside those lists is not recognised. For example, a GPT-2 style checkpoint with flat names `h0_ln_1_g`, `h0_ln_1_b`, `h0_ln_2_g`, and `h0_ln_2_b`, all of shape [768], scores 86 (deny in Claude Code, blocked by the git hook); a unit test pins this.
-- **How it shows up:** a missed bank scores 25 to 30, or 70 when one tensor is flat-named; a checkpoint mistaken for a bank scores 86 to 94 (deny in Claude Code, blocked by the git hook).
+- **Why:** a file is treated as a bank when 3 or more tensors (or `.npz` members) share one embedding shape, have flat names, and make up more than half of the file's float tensors. Model checkpoints are excluded by their parameter names (`weight`, `bias`, `kernel`, `scale`, `gamma`, `beta`, `time_mix`, `mixer`, and others) and by layer segments (`layers`, `blocks`, `encoder`, `transformer`, `backbone`, `model`, also when followed by `_`) or dot- or slash-delimited index segments (`.0.`) in their names. Underscore-delimited numbers (`spk_3_emb`, `19_198_0001`) do not exclude a bank. A naming scheme outside those lists is not recognised. For example, a GPT-2 style checkpoint with flat names `h0_ln_1_g`, `h0_ln_1_b`, `h0_ln_2_g`, and `h0_ln_2_b`, all of shape [768], scores 86 as an `.npz` and 85 as a safetensors file (deny in Claude Code, blocked by the git hook); a unit test pins both.
+- **How it shows up:** a missed bank scores 25 to 30, or 70 when one tensor is flat-named; a checkpoint mistaken for a bank scores 85 to 94 (deny in Claude Code, blocked by the git hook).
 - **Planned fix:** none decided. Possible approaches are reading the checkpoint's metadata or architecture fields, and extending the exclusion lists as new layouts are found.
 
 ### Unnamed tensors with parameter-like or hierarchical names are not treated as embeddings
@@ -150,11 +150,11 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** a score of 80 (blocked by the git hook; below Claude Code's ask threshold of 90). In the evaluation's 55,876 public-repository files, 21 such files were flagged, most of the 25 secret false positives (0.45 per 1,000).
 - **Planned fix:** none decided.
 
-### Paths on gitleaks' global allowlist are never scanned for secrets
+### Paths on gitleaks' global allowlist are skipped by the converted secret rules
 
-- **Not covered:** secrets in files whose path matches gitleaks' global path allowlist: any path containing `gitleaks.toml`; `node_modules/`, `bower_components/`, `vendor/` Go module directories, and Ruby and Python library directories; lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Pipfile.lock`, `poetry.lock`, `go.sum`, `gradle.lockfile`); `gradlew` and `mvnw` wrappers; and files ending in `.bin`, `.pdf`, `.docx`, `.xlsx`, `.exe`, `.dll`, font and image extensions. The list is `gitleaks_global_path_allowlist` in `rulesets/secrets-core/gitleaks.yar` (lines 9 to 30).
+- **Not covered:** secrets in files whose path matches gitleaks' global path allowlist, which every rule converted from gitleaks skips (the hand-written key-store rules for `.p12`, `.pfx`, `.der`, and `.key` files still apply): any path containing `gitleaks.toml`; `node_modules/`, `bower_components/`, `vendor/` Go module directories, and Ruby and Python library directories; lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Pipfile.lock`, `poetry.lock`, `go.sum`, `gradle.lockfile`); `gradlew` and `mvnw` wrappers; and files ending in `.bin`, `.pdf`, `.docx`, `.xlsx`, `.exe`, `.pdb`, font and image extensions, and `dll` (upstream wrote that alternative as `.dll` with an unescaped dot, so any character before `dll` matches too). The list is `gitleaks_global_path_allowlist` in `rulesets/secrets-core/gitleaks.yar` (lines 9 to 39).
 - **Why:** it is converted unchanged from gitleaks, whose defaults assume that vendored and generated files hold no first-party secrets.
-- **How it shows up:** no evidence for a secret placed in such a path, including a real one in a file named like a lockfile or inside `node_modules/`. A path containing `gitleaks.toml` is skipped wherever it is.
+- **How it shows up:** no evidence from the converted rules for a secret placed in such a path, including a real one in a file named like a lockfile or inside `node_modules/`. A path containing `gitleaks.toml` is skipped wherever it is.
 - **Planned fix:** none decided; the exclusions could be made configurable per ruleset.
 
 ### The `true|false|null` value allowlist drops any value containing `false`
@@ -164,12 +164,12 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** a random-looking value that happens to contain `false` (case-insensitive) is not reported by the rules that carry this allowlist.
 - **Planned fix:** none decided; anchoring the three alternatives is a local change to the converter.
 
-### DER private keys in two layouts are not matched
+### DER private keys in some layouts are not matched
 
-- **Not covered:** PKCS#8 keys with a short-form length (`30 81 ?? 02 01 00`, for example many EC keys) and PKCS#8 Ed25519 keys (`30 2e 02 01 00`), in `.der` and `.key` files. The rule recognises PKCS#1 and PKCS#8 with a two-byte length, SEC1 EC keys, and the PKCS#12 header.
-- **Why:** the header pattern in `rulesets/secrets-core/keystores.yar` lists the layouts that were checked; these two were not.
+- **Not covered:** PKCS#8 keys with a short-form length (`30 81 ?? 02 01 00`), PKCS#8 Ed25519 keys (`30 2e 02 01 00`), PKCS#8 EC keys without the public key (short form, for example `30 41 02 01 00`), and X25519 keys (`30 2e`), in `.der` and `.key` files. The rule recognises PKCS#1 and PKCS#8 with a two-byte length, SEC1 EC keys, and the PKCS#12 header. The first two forms were found in review; the last two are read from the header pattern, not measured against real key files.
+- **Why:** the header pattern in `rulesets/secrets-core/keystores.yar` lists the layouts that were checked; these were not.
 - **How it shows up:** the file is a binary of unknown format and is skipped. PEM-encoded versions of the same keys are found.
-- **Planned fix:** none decided; adding the two header forms is a small rule change.
+- **Planned fix:** none decided; adding the header forms is a small rule change.
 
 ### Generic and weight-80 secrets never prompt in Claude Code by default
 
@@ -245,12 +245,16 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 ## Claude Code hook
 
-### Bash analysis is a static reading of one command line, and unlisted executors are not detected
+### Bash analysis is a static reading of one command line; indirectly named files are missed
 
-- **Not covered:** variables, functions, and aliases defined elsewhere; files a program opens at run time; anything a script or interpreter does. Commands that run or read other files but are not in the command tables are resolved as if they read nothing: the analysis does not know they are executors, so the command is not marked `unresolved` either. Measured with the release hook and `on_unresolved = "deny"`, each of these produced no decision for a file that scores above the threshold: `osascript a.txt`, `lua a.txt`, `Rscript a.txt`, `pwsh a.txt`, `tmux new -d "cat a.txt"`, `at -f a.txt now`, `sort --files0-from=a.txt`, `LESSOPEN="|cat %s" less a.txt`, the `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, `GIT_CONFIG_VALUE_0` alias mechanism, `vim -s a.txt`, `ed a.txt`, and `yq "load_str(…)"`. Other commands outside the tables behave the same way. Commands over 64 KiB, unparseable, too deeply nested, or too slow fall back to a whitespace split and are `unresolved`.
-- **Why:** the parser (brush-parser 0.4.0, pinned) sees syntax only. Classification is by command name and hand-written option tables, so an executor missing from the tables is invisible; `on_unresolved` applies only to commands the analysis recognises as possibly reading files it cannot name. Detail and the accepted costs: [`docs/decisions/shell-parser.md`](decisions/shell-parser.md).
-- **How it shows up:** no decision, so the command runs. Tightening `on_unresolved` does not close this gap; it only covers the recognised cases (an option missing from a table, a shell or interpreter name in the arguments, `-c`).
-- **Planned fix:** the tables grow with reports, but an enumerated list cannot be complete. The intended backstop is the separate output-redaction tool, which is not part of v1; until then, treat the Bash check as best-effort.
+- **Not covered:** variables, functions, and aliases defined elsewhere; files a program opens at run time; anything a script or interpreter does. A file that the command line names only indirectly is not found unless the command is recognised as an executor. Measured with the release hook, an isolated HOME, `on_unresolved = "deny"`, and a secret-scoring `a.txt`:
+  - no decision (the gap): `tmux new -d "cat a.txt"`; an alias defined through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, and `GIT_CONFIG_VALUE_0` that runs `cat a.txt`; `yq "load_str(\"a.txt\")" x.yml`.
+  - Reported by the review of the first version of this entry (not re-run by me before the change), these gave no decision, because the file is named only inside code, in a script or list file, or on standard input: `osascript -e 'do shell script "cat a.txt"'`, `lua -e`, `Rscript -e`, `pwsh -Command`, `pwsh -File x.ps1`, `echo "cat a.txt" | at now`, `sort --files0-from=l`, `vim -s s.vim`, `echo "r a.txt" | ed`, and `ed < cmds`. They are now treated as executors: the interpreters and editors `osascript`, `lua`, `luajit`, `Rscript`, `R`, `pwsh`, `powershell`, `tclsh`, `julia`, `groovy`, `at`, `batch`, `ed`, `ex`, `vi`, `vim`, `nvim`, and `view` are always `unresolved` (so `on_unresolved` applies), as is any command with a `--files0-from` option. Re-measured after the change, each of these gives a decision under `deny`.
+  - Naming the file directly is found: `LESSOPEN="|cat %s" less a.txt` gives ask, because `a.txt` is scanned; `lua a.txt`, `sort --files0-from=a.txt`, `ed a.txt`, and the other always-unresolved forms are denied by `on_unresolved = "deny"` (the named file is also scanned).
+  Other programs outside the tables behave like the first group: the analysis does not know they run or read other files, so the command is resolved as reading only its named arguments. Commands over 64 KiB, unparseable, too deeply nested, or too slow fall back to a whitespace split and are `unresolved`.
+- **Why:** the parser (brush-parser 0.4.0, pinned) sees syntax only. Classification is by command name and hand-written tables, so an executor missing from them is invisible; `on_unresolved` applies only to commands the analysis recognises. Detail and the accepted costs: [`docs/decisions/shell-parser.md`](decisions/shell-parser.md).
+- **How it shows up:** no decision, so the command runs. Tightening `on_unresolved` does not close this gap.
+- **Planned fix:** the lists grow with reports, but an enumerated list cannot be complete. The intended backstop is the separate output-redaction tool, which is not part of v1; until then, treat the Bash check as best-effort.
 
 ### Bash command details that are not resolved
 
@@ -269,7 +273,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 ### Repository detection is by walking up for `.git`
 
 - **Not covered:** repositories located through `GIT_DIR` or `GIT_WORK_TREE` (in the hook), a bare repository with a separate work tree, a repository above a symlinked `$HOME`, and a repository whose root or `.git` is owned by another user. The walk stops before the parent of `$HOME` and at `GIT_CEILING_DIRECTORIES`, and a working directory inside a `.git` directory has no repository.
-- **Why:** git is not spawned in the hook, to stay inside the time budget, and the walk is made no laxer than git's own: it applies git's ceilings, refuses `.git` interiors, and requires ownership by the effective user (the analogue of git's `safe.directory`).
+- **Why:** git is not spawned in the hook, to stay inside the time budget, and the walk applies the checks of git's own discovery that matter for trust: ceilings, no `.git` interiors, ownership of both the root and its `.git` by the effective user, and no crossing of a filesystem boundary unless `GIT_DISCOVERY_ACROSS_FILESYSTEM` is true. It does not replicate `safe.directory` entries or `core.worktree`.
 - **How it shows up:** the directory is treated as having no repository, so its `.riskgrep.toml` and baseline are not read (the stricter outcome, because an untrusted repository is never allowed to loosen the checks).
 - **Planned fix:** none decided.
 

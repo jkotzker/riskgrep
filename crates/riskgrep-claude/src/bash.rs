@@ -355,7 +355,37 @@ fn nesting_estimate(src: &str) -> usize {
 
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash"];
 const INTERPRETERS: &[&str] = &[
-    "node", "nodejs", "ruby", "perl", "php", "deno", "bun", "npx", "tsx", "ts-node",
+    "node",
+    "nodejs",
+    "ruby",
+    "perl",
+    "php",
+    "deno",
+    "bun",
+    "npx",
+    "tsx",
+    "ts-node",
+    // Interpreters whose inline code (`-e`, `-Command`) or script file can
+    // open any file, and programs that run commands from a script, a
+    // queue, or standard input.
+    "osascript",
+    "lua",
+    "luajit",
+    "Rscript",
+    "R",
+    "pwsh",
+    "powershell",
+    "tclsh",
+    "julia",
+    "groovy",
+    "at",
+    "batch",
+    "ed",
+    "ex",
+    "vi",
+    "vim",
+    "nvim",
+    "view",
 ];
 /// Commands that change the directory later relative paths resolve against,
 /// or read and run a file in the current shell.
@@ -1297,6 +1327,14 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
     };
     let name = base_name(&name).to_string();
     let rest = &words[i + 1..];
+    // `--files0-from=FILE` makes the command read the names of the files to
+    // process from FILE, which is not scanned for those names.
+    if rest
+        .iter()
+        .any(|w| literal(Some(w)).is_some_and(|t| t.starts_with("--files0-from")))
+    {
+        st.unresolved = true;
+    }
     match name.as_str() {
         n if SHELLS.contains(&n) => {
             if privileged {
