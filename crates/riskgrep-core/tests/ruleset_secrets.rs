@@ -471,6 +471,72 @@ fn ec_key_file_end_to_end() {
     assert_score(&ev, 90.0);
 }
 
+/// Scores and rules for each file, scanned as `riskgrep scan --no-cache`
+/// does (classification, reading, rules), with the default configuration.
+fn scan_files(paths: &[std::path::PathBuf]) -> Vec<(String, Option<f64>, Vec<String>)> {
+    use riskgrep_core::config::Config;
+    use riskgrep_core::RiskGrep;
+    let cfg = Config {
+        no_cache: true,
+        ..Config::default()
+    };
+    let mut rg = RiskGrep::with_cache_dir(cfg, None, None).unwrap();
+    rg.scan_paths(paths)
+        .targets
+        .into_iter()
+        .map(|t| {
+            let rules = t.evidence.iter().map(|e| e.rule.clone()).collect();
+            let secret = t.scores.get(&Category("secret".into())).copied();
+            (t.target, secret, rules)
+        })
+        .collect()
+}
+
+#[test]
+fn der_private_keys_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for (i, (_, key)) in der_private_keys().iter().enumerate() {
+        for ext in ["der", "key"] {
+            let p = dir.path().join(format!("k{i}.{ext}"));
+            std::fs::write(&p, key).unwrap();
+            paths.push(p);
+        }
+    }
+    let got = scan_files(&paths);
+    assert_eq!(got.len(), paths.len());
+    let names: HashMap<String, &str> = (0..der_private_keys().len())
+        .flat_map(|i| {
+            let n = der_private_keys()[i].0;
+            [(format!("k{i}.der"), n), (format!("k{i}.key"), n)]
+        })
+        .collect();
+    for (target, secret, rules) in &got {
+        let file = target.rsplit('/').next().unwrap();
+        let kind = names[file];
+        assert_eq!(rules, &vec!["der_key_file".to_string()], "{kind} ({file})");
+        assert_eq!(*secret, Some(90.0), "{kind} ({file})");
+    }
+}
+
+#[test]
+fn text_key_file_starting_with_a_digit_is_still_scanned_for_tokens() {
+    // `0` (0x30) followed by a printable byte reads as a DER SEQUENCE header
+    // with a short-form length; the file is read as a key store, and the
+    // text rules still run on all of it.
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("deploy.key");
+    let token = synth::fake_secret("github_pat", 12);
+    std::fs::write(&p, format!("0 token follows\nid = \"{token}\"\n")).unwrap();
+    let got = scan_files(&[p]);
+    assert!(
+        got[0].2.contains(&"github_pat".to_string()),
+        "{:?}",
+        got[0].2
+    );
+    assert_eq!(got[0].1, Some(95.0));
+}
+
 #[test]
 fn der_certificate_is_not_a_key() {
     // X.509: `SEQUENCE { SEQUENCE (tbsCertificate) ...`.

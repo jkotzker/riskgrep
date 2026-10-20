@@ -95,6 +95,34 @@ synth = "der:30818702010030"
 path = "keys/server.der"
 expect = 90
 
+[[case]]
+# PKCS#8 Ed25519 or X25519: one-byte length 0x2e.
+rule = "der_key_file"
+synth = "der:302e02010030"
+path = "keys/ed25519.der"
+expect = 90
+
+[[case]]
+# PKCS#8 Ed448: one-byte length 0x47.
+rule = "der_key_file"
+synth = "der:304702010030"
+path = "keys/ed448.key"
+expect = 90
+
+[[case]]
+# SEC1 P-224: one-byte length 0x68.
+rule = "der_key_file"
+synth = "der:306802010104"
+path = "keys/p224.key"
+expect = 90
+
+[[case]]
+# SEC1 P-256 without the public key: one-byte length 0x31.
+rule = "der_key_file"
+synth = "der:303102010104"
+path = "keys/p256.der"
+expect = 90
+
 # Hard negatives: each names the rule that must stay silent.
 
 [[case]]

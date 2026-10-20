@@ -158,11 +158,17 @@ pub fn classify(name: &str, head: &[u8]) -> FileClass {
         return FileClass::KnownBinary(Known::Safetensors);
     }
     let has_ext = |exts: &[&str]| exts.iter().any(|ext| ends_with_ignore_case(name, ext));
-    // DER SEQUENCE: `30 82` (two-byte length) for PKCS #12 and most keys;
-    // `30 77` / `30 81` (short or one-byte length) for SEC1 EC private keys.
-    if (head.starts_with(&[0x30, 0x82]) && has_ext(&[".p12", ".pfx", ".der", ".key"]))
-        || ((head.starts_with(&[0x30, 0x77]) || head.starts_with(&[0x30, 0x81]))
-            && has_ext(&[".der", ".key"]))
+    // DER SEQUENCE: `30 82` (two-byte length) for PKCS #12 files; for
+    // `.der`/`.key`, any SEQUENCE with a valid length byte (short form below
+    // 0x80, or long form 0x81 to 0x83), so every private-key layout reaches
+    // the rules (PKCS#8 Ed25519 is `30 2e`, SEC1 P-224 `30 68`), which then
+    // decide whether it is a key.
+    let der_sequence = head.first() == Some(&0x30)
+        && head
+            .get(1)
+            .is_some_and(|&l| l < 0x80 || (0x81..=0x83).contains(&l));
+    if (head.starts_with(&[0x30, 0x82]) && has_ext(&[".p12", ".pfx"]))
+        || (der_sequence && has_ext(&[".der", ".key"]))
     {
         return FileClass::KnownBinary(Known::KeyStore);
     }

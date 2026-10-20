@@ -120,11 +120,11 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** the file is skipped as a binary of unknown format (no score).
 - **Planned fix:** none decided.
 
-### Only the first 1,024 members of an `.npz` archive are inspected
+### `.npz` archives are read only as far as their array headers
 
-- **Not covered:** `.npy` members of an `.npz` archive after the first 1,024 entries of its directory.
-- **Why:** a bound on the work per archive (`NPZ_MAX_MEMBERS` in `crates/riskgrep-core/src/post/tensor.rs`).
-- **How it shows up:** an embedding or bank member past entry 1,024 is not seen, and the bank share is computed over the first 1,024 entries only, so an archive with more members can score lower than its content warrants.
+- **Not covered:** `.npy` members after the first 1,024 entries of an archive's directory, and, in archives larger than 8 MiB (8,388,608 bytes), array data beyond the first 4,096 bytes of each member, so a secret stored inside such an archive is not reported. Archives of 8 MiB or less are read whole.
+- **Why:** bounds on work and memory. The tensor rules need only member names and `.npy` headers (`NPZ_MAX_MEMBERS` and `NPZ_MEMBER_BYTES` in `crates/riskgrep-core/src/post/tensor.rs`). A larger archive is read selectively: the central directory, located from the end of the file (at most 8 MiB read), and the first 4,096 bytes of each of the first 1,024 entries named `*.npy` (at most 128 KiB read per entry), as for `.npy` and safetensors files, whose data beyond the header is not scanned either.
+- **How it shows up:** an embedding or bank member past entry 1,024 is not seen, and the bank share is computed over the first 1,024 entries only, so an archive with more members can score lower than its content warrants. Large archives score like small ones: a 9.2 MB `.npz` holding one `[12000, 192]` float32 array scores biometric 70, the same as its 77 KB `[100, 192]` form, and a 9.6 MB `.npz` with three `[192]` members before a 2,400,000-float member scores 94 (`cargo test -p riskgrep-core --test scanner npz_over_text_limit`). An archive whose directory cannot be parsed, or that needs more than those amounts, is reported `unscanned` (so `on_error` applies).
 - **Planned fix:** none decided.
 
 ### Every zip-based file triggers the `.npz` rule's cheap check
@@ -171,12 +171,12 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** a secret that happens to contain `false` (case-insensitive; also the matching forms of `true` and `null`) is not reported. In a random 32-character alphanumeric value this is rare (the five letters must occur in sequence), but a deliberately chosen value can contain the word.
 - **Planned fix:** none decided; anchoring the three alternatives is a local change to the converter.
 
-### DER private keys with a short header are skipped before the rule runs
+### Binary private keys are recognised only as DER in `.der` and `.key` files
 
-- **Not covered:** DER private keys in `.der` and `.key` files whose outer length is one byte other than `0x77`: SEC1 EC keys on P-224 (`30 68`), secp256k1 (`30 74`), and brainpoolP256r1 (`30 78`), a P-256 key without its public key (`30 31`), and PKCS#8 Ed25519, X25519 (`30 2e`), and Ed448 (`30 47`) keys. Also not covered: encrypted PKCS#8 keys (`EncryptedPrivateKeyInfo`, which starts SEQUENCE, SEQUENCE like a certificate) and key formats that are not DER (OpenSSH's binary format, JKS key stores).
-- **Why:** the `der_key_file` rule (`rulesets/secrets-core/keystores.yar`) matches any SEC1, PKCS#1, PKCS#8, or RFC 5958 version 2 header with a one-byte, `81`, or `82` length (a unit test pins each kind above, built with OpenSSL 3.5's header bytes and random key material), but a file reaches the rule only when classification reads it as a key store, and classification accepts only `30 82` (also `.p12`, `.pfx`), `30 77`, and `30 81` headers for `.der` and `.key`.
-- **How it shows up:** the file is a binary of unknown format and is skipped (`on_skipped` applies: allow by default). PEM-encoded versions of the same keys are found by `private_key`. PKCS#1 and PKCS#8 keys with a two-byte length (RSA), SEC1 P-256 (`30 77`) and P-384 (`30 81`), and PKCS#8 P-256 (`30 81`) keys are found.
-- **Planned fix:** accept any `30` header for `.der` and `.key` in classification and let the rule decide.
+- **Not covered:** encrypted PKCS#8 keys (`EncryptedPrivateKeyInfo`, which starts SEQUENCE, SEQUENCE like a certificate), binary key formats that are not DER (OpenSSH's binary format, JKS key stores), DER keys under other file names (`id_ec`, `server.pem` holding DER), and DER keys with a length of 2^24 bytes or more (`30 84`).
+- **Why:** a `.der` or `.key` file that starts with a DER SEQUENCE header (`30` and a short-form length or `81` to `83`) is read as a key store, and the `der_key_file` rule (`rulesets/secrets-core/keystores.yar`) then reports SEC1, PKCS#1, PKCS#8, and RFC 5958 version 2 private keys with a one-byte, `81`, or `82` length; other files are classified by content, and DER is binary. Measured with the release build on keys generated at run time by OpenSSL 3.5.9 (`openssl ecparam -genkey -noout -outform DER`, `openssl genpkey -outform DER`, `openssl ec -no_public`), each scanned with `riskgrep scan --no-cache --format json`: SEC1 secp256k1 (`30 74`), P-224 (`30 68`), brainpoolP256r1 (`30 78`), P-256 (`30 77`), and P-256 without the public key (`30 31`), and PKCS#8 Ed25519 and X25519 (`30 2e`), Ed448 (`30 47`), and RSA 2048 (`30 82`) all score secret 90 by `der_key_file`; `cargo test -p riskgrep-core --test ruleset_secrets der_` covers the same kinds plus PKCS#1 RSA, PKCS#8 P-256, and RFC 5958 version 2 Ed25519 with key material generated by the test.
+- **How it shows up:** an encrypted or non-DER binary key, or a DER key under another name, is a binary of unknown format and is skipped (`on_skipped` applies: allow by default). PEM-encoded keys are found by `private_key` under any name. A text `.key` file that starts with `0` (0x30) followed by an ASCII byte is also read as a key store; up to 8 MiB the same bytes are read as for a text file and every rule runs on them, so the text rules still apply (`cargo test -p riskgrep-core --test ruleset_secrets text_key_file_starting_with_a_digit_is_still_scanned_for_tokens`).
+- **Planned fix:** none decided.
 
 ### Generic and weight-80 secrets never prompt in Claude Code by default
 
@@ -224,9 +224,9 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 ### Large text files are scanned only at their ends
 
-- **Not covered:** the middle of a text file above 8 MiB. Only the first and last 1 MiB are read, and the report says `partial`.
+- **Not covered:** the middle of a text file above 8 MiB. Only the first and last 1 MiB are read, and the report says `partial`. Findings in the last MiB carry their true byte offsets but no line numbers, because the lines in the unread middle are not counted.
 - **Why:** bounds scan time and memory; both limits (`limits.text_max`, `limits.sample`) are configurable.
-- **How it shows up:** a `partial` status with the unread byte range; a secret inside that range is not found.
+- **How it shows up:** a `partial` status with the unread byte range; a secret inside that range is not found. Text output and git pre-commit messages show `line unknown` for findings in the last MiB of a text file larger than 8 MiB; JSON output keeps `line_start` and `line_end` at 0 for them (`cargo test -p riskgrep --test cli tail_line_is_unknown_in_text_and_0_in_json`, `cargo test -p riskgrep --test git tail_secret_line_is_shown_as_unknown`). For a partly read staged file the git pre-commit hook scores every finding in the sample instead of only those on added lines, so a commit that touches such a file can be blocked by a secret already present in its first or last MiB (`cargo test -p riskgrep --test git secret_appended_past_text_limit_is_blocked`).
 - **Planned fix:** none decided.
 
 ### A scan that runs past the time budget leaves the file unscanned
@@ -243,6 +243,13 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** archives are reported `unscanned` (so `on_error` applies: ask in the hook, block in the git hook); images and unknown binaries are reported `skipped` (so `on_skipped` applies: allow by default).
 - **Planned fix:** none decided.
 
+### UTF-16 text and text with a NUL byte are skipped as binary
+
+- **Not covered:** a file whose first 8 KiB contains a NUL byte and that matches no known format, including UTF-16 and UTF-32 text.
+- **Why:** classification treats a NUL byte in the sniff window as the mark of a binary file; only the known binary formats are read.
+- **How it shows up:** the file is reported `skipped: binary file of unknown format` (so `on_skipped` applies: allow by default). Measured with the release build: a 98-byte UTF-16 file and a 50-byte file starting with a NUL byte, each holding a generated AWS key, are both skipped, while the 48-byte ASCII form scores secret 95 (`riskgrep scan --format json key_ascii.txt key_utf16.txt key_nul.txt`).
+- **Planned fix:** none decided for v1.
+
 ### Standard input is always treated as text
 
 - **Not covered:** binary data piped to `riskgrep scan -` is classified as text, so a numpy or safetensors file on standard input is not recognised as one.
@@ -254,7 +261,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 - **Not covered:** files past the 10,000th in one walk (`limits.walk_files`), symlinked files and directories found during a walk, and any directory entry that cannot be read (one unreadable entry fails the whole directory). Directories themselves do not count against the limit.
 - **Why:** a bound on work and on following links out of the tree.
-- **How it shows up:** symlinks appear as skipped targets; a walk that reaches the limit reports the remainder as an error (`walk limit`).
+- **How it shows up:** symlinks appear as skipped targets. A walk that reaches the limit reports the directory `unscanned` with the reason `directory walk stopped at the limit of N files (limits.walk_files)`, so `on_error` applies: with `--on-error block` (the default when `--fail-above` is given) `riskgrep scan` exits 2 (`cargo test -p riskgrep --test cli walk_limit_follows_on_error`). Raise the limit or scan subdirectories separately.
 - **Planned fix:** none decided.
 
 ### Path rules see a path relative to the working directory
@@ -284,6 +291,47 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **Why:** deferred during review as low-impact.
 - **How it shows up:** an unresolved result or a file missing from the target list.
 - **Planned fix:** none decided.
+
+### Unresolved Bash commands get no decision by default
+
+- **Not covered:** with the default `claude_code.on_unresolved = "allow"`, a Bash command that may read files the analysis cannot name gets no decision, unless a file it does name crosses a threshold. This covers recursive searches without a named file, interpreters and scripts, git subcommands that print repository content, words built from variables other than `HOME` and `PWD`, and uses of `HOME` or `PWD` in a command line that changes them. Measured with the release `riskgrep-claude`, an isolated HOME, a user configuration holding only `time_budget_ms = 2000`, and `a.txt` (in the working directory and under `~/proj/`) holding a generated AWS key that scores secret 95; the third column repeats each command with `on_unresolved = "deny"`:
+
+| Command | Default (`allow`) | `on_unresolved = "deny"` |
+|---|---|---|
+| `cat "$PWD/a.txt"` | ask (secret 95.0) | ask (secret 95.0) |
+| `cat $PWD/a.txt`, `cat ${PWD}/a.txt` | ask | ask |
+| `cat $HOME/proj/a.txt`, `cat "${HOME}/proj/a.txt"` | ask | ask |
+| `cat ~/proj/a.txt` | ask | ask |
+| `cat "$(echo a.txt)"` | ask (`a.txt` is named in the substitution) | deny (unresolved) |
+| `HOME=/x cat $HOME/proj/a.txt` | no decision | deny (unresolved) |
+| `export HOME=/x; cat ~/proj/a.txt` | no decision | deny (unresolved) |
+| `cd h && cat $PWD/a.txt` | no decision | deny (unresolved) |
+| `cat $F` | no decision | deny (unresolved) |
+| `grep -rn aws .`, `grep -rn aws`, `rg aws` | no decision | deny (unresolved) |
+| `python3 x.py`, `node -e 1` | no decision | deny (unresolved) |
+| `git diff`, `git show HEAD:a.txt` | no decision | deny (unresolved) |
+| `bash -c "$X"` | no decision | deny (unresolved) |
+| `xargs cat < list` | no decision | deny (unresolved) |
+| `cat **/*.txt` | no decision | deny (unresolved) |
+| `source env.sh` | no decision | deny (unresolved) |
+
+- **Why:** the default keeps routine commands (`grep -rn`, `git diff`, `python3 script.py`) from prompting on every call; the check targets files a command names.
+- **How it shows up:** the command runs without a prompt. Setting `on_unresolved = "ask"` or `"deny"` under `[claude_code]` prompts or blocks on these commands instead, at the cost of prompting on routine ones. Commands that run a program outside the analysis tables are not marked unresolved at all (see "Bash analysis is a static reading of one command line"), so this setting does not cover them.
+- **Planned fix:** none decided.
+
+### `$HOME`, `$PWD`, and `~` are resolved only in plain forms
+
+- **Not covered:** `$HOME`, `${HOME}`, a leading `~` or `~/`, `$PWD`, and `${PWD}` are resolved from the hook's `HOME` and the command's working directory. Other forms (`${HOME:-x}`, `${HOME%/}`, `~user`, `~+`, `$OLDPWD`) are unresolved. A resolved form becomes unresolved when the same command line, anywhere in it, spells `HOME` or `PWD` other than as such a reference (an assignment, `export`, `unset`, `read`, a `for` variable), mentions `IFS`, changes directory (`cd`, `pushd`, `popd`), runs code in the current shell (`eval`, `source`, `.`, `trap`), has a command name that is not literal, or passes a non-literal argument to an assigning builtin; inside a command line run through `env`, `sudo`, `doas`, `su`, `runuser`, `chroot`, `unshare`, or `systemd-run`; and when the reference is unquoted and the value contains whitespace, `*`, `?`, `[`, or `\`.
+- **Why:** these values are known to the hook only while the command line cannot have changed them. A change is detected anywhere in the line, not only before the use, because loops and functions run later text first. Indirection built to evade the checks (assembling the name `HOME` from pieces) is outside the cooperative-agent threat model.
+- **How it shows up:** an unresolved result, so `on_unresolved` applies (no decision by default; see the table above).
+- **Planned fix:** none decided.
+
+### `Grep` checks mirror Claude Code 2.1.301
+
+- **Not covered:** files that Claude Code's `Grep` would search but the hook does not walk, if a later Claude Code version changes how `Grep` runs ripgrep. The hook mirrors version 2.1.301: hidden files are searched, the directories `.git`, `.svn`, `.hg`, `.bzr`, `.jj`, and `.sl` are excluded, `.gitignore` is honoured, symlinks are not followed, the `glob` field is split on whitespace and then on commas (a piece holding both `{` and `}` is kept whole), and a leading `~` or `~/` in `path` is expanded from `HOME`. Files inside the excluded directories and gitignored files are not scanned, because `Grep` does not search them either.
+- **Why:** the hook predicts which files the tool will read; it does not run the search itself.
+- **How it shows up:** after a Claude Code update that changes these defaults, a `Grep` call may read files the hook did not scan, and no decision is given for them. Exclusions that Claude Code derives from permission rules are not mirrored, so the hook may scan more files than `Grep` reads.
+- **Planned fix:** re-check the mirrored behaviour against each Claude Code release the documentation is verified against.
 
 ### Files can change between the check and the read
 
@@ -348,8 +396,15 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 ### Cached results ignore changed limits
 
 - **Not covered:** a change to scan limits (for example a lower `limits.text_max`) is not part of the evidence cache key.
-- **Why:** the key is the file content hash, the rules bundle, and the path.
+- **Why:** cached evidence is keyed by the file's content hash and the rules bundle key (next entry), not by the limits it was read with.
 - **How it shows up:** a file scanned whole earlier is reported whole from the cache after the limit is lowered. Use `--no-cache` to rescan.
+- **Planned fix:** none decided.
+
+### The cache key covers the ruleset files and versions only
+
+- **Not covered:** changes that affect scanning but are not in the cache key. The rules-bundle cache and the evidence cache are keyed by the YARA-X version, the riskgrep version, the platform, and each enabled ruleset's id and files (`ruleset.toml`, every `*.yar`, and every `stopwords/*.txt`). Other files in a ruleset directory are not part of the key, and a build of riskgrep that changes scanning behaviour without changing its version number (a development build) reuses evidence cached by the previous build.
+- **Why:** the key is computed from what the rulesets load; the binary itself is identified by its version. A stopword change invalidates cached evidence in both directions (`cargo test -p riskgrep-core --test scanner stopword_change_invalidates_cached_evidence`).
+- **How it shows up:** stale evidence after such a change. Delete the cache directory, or use `--no-cache`.
 - **Planned fix:** none decided.
 
 ### The cache is trusted when it passes ownership and mode checks
@@ -359,9 +414,30 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** forged evidence rows are believed; temporary files stay in the cache directory until removed by hand.
 - **Planned fix:** none.
 
-### No cache without a home directory
+### No cache and no user configuration without an absolute home directory
 
-- **Not covered:** caching when no absolute cache directory can be derived (no `HOME`, no absolute `XDG_CACHE_HOME`).
-- **Why:** a relative cache path would write into the working directory, so the cache is disabled with a warning.
-- **How it shows up:** every scan is uncached and compiles the rules bundle, which exceeds the hook's time budget.
+- **Not covered:** the user configuration file `~/.config/riskgrep/config.toml` without an absolute `HOME`, and caching without an absolute `HOME` (on Linux, an absolute `XDG_CACHE_HOME` still enables the cache).
+- **Why:** a relative cache or configuration path would resolve against the working directory, which an agent controls, so the compiled-rules cache and the evidence cache are both off (with a warning) and the user configuration is not read.
+- **How it shows up:** every run compiles the rules and the defaults apply. Measured: a Claude Code hook call on a 64 KB file takes 0.72 to 0.74 s on an idle machine and 0.83 to 0.84 s on a loaded one (`hyperfine --runs 10` with `env -u HOME -u XDG_CACHE_HOME`), within the 2 s hook budget.
+- **Planned fix:** none.
+
+### Relative paths in configuration resolve against the declaring file
+
+- **Not covered:** a relative path in configuration (`extra_ruleset_dirs`, `trusted_repos`) meaning the working directory. Each one resolves against the directory of the file that declares it: `~/.config/riskgrep/` for the user file and the repository root for `.riskgrep.toml` (read only when that file is applied).
+- **Why:** paths must not depend on where a command runs, and a repository the Claude Code hook does not trust must not supply a ruleset through a relative path in the user file (`cargo test -p riskgrep-core --test config -- relative_paths_resolve_against_the_declaring_config claude_mode_never_resolves_user_paths_in_an_untrusted_repo`).
+- **How it shows up:** a setup that relied on a relative path meaning the working directory no longer finds its rulesets or trusted repository; use an absolute path.
+- **Planned fix:** none; this is the intended behaviour.
+
+### `*` in `[ignore]` globs also matches `/`
+
+- **Not covered:** a narrow `[ignore]` pattern. `paths = ["src/*.txt"]` ignores `src/a/b/key.txt` as well as `src/key.txt`.
+- **Why:** the glob matcher lets `*` cross directory separators.
+- **How it shows up:** findings in deeper files are suppressed too. Measured with `riskgrep scan --format json src/key.txt src/a/b/key.txt`: both reported with one suppressed finding and secret 0. List files or use a more specific pattern when a narrower match is intended.
+- **Planned fix:** none decided.
+
+### Baselines of header and path findings follow the file's content
+
+- **Not covered:** keeping a header or path finding suppressed after the file changes. A baseline entry for a finding located by its matched bytes (a secret) stays valid wherever those bytes move within the same path. A finding decided by a tensor header (`.npy`, `.npz`, safetensors) or one with no location (path-name rules) is identified by the digest of everything riskgrep read from the file.
+- **Why:** an entry keyed by rule and path alone would suppress any later content at that path, including a different, larger embedding store.
+- **How it shows up:** any change to that content (the whole file for path-name rules on text files; the header region for tensor files) reports the finding again until the file is baselined again, while a change only to tensor data outside the header region keeps it suppressed (`cargo test -p riskgrep-core --test scanner baseline_of_`). Baselines written by earlier builds identified these findings by rule and path only (or by the format's magic number) and must be regenerated.
 - **Planned fix:** none.

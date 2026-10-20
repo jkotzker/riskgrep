@@ -113,6 +113,50 @@ fn key_stores() {
             );
         }
     }
+    // Any DER SEQUENCE header for .der/.key: short-form lengths (PKCS#8
+    // Ed25519/X25519 `30 2e`, Ed448 `30 47`, SEC1 P-256 without public key
+    // `30 31`, P-224 `30 68`, secp256k1 `30 74`, brainpoolP256r1 `30 78`) and
+    // long forms `81`, `82`, `83`. `.p12`/`.pfx` keep `30 82` only.
+    for prefix in [
+        vec![0x30, 0x2e, 0x02, 0x01, 0x00, 0x30],
+        vec![0x30, 0x31, 0x02, 0x01, 0x01, 0x04],
+        vec![0x30, 0x47, 0x02, 0x01, 0x00, 0x30],
+        vec![0x30, 0x68, 0x02, 0x01, 0x01, 0x04],
+        vec![0x30, 0x74, 0x02, 0x01, 0x01, 0x04],
+        vec![0x30, 0x78, 0x02, 0x01, 0x01, 0x04],
+        vec![0x30, 0x83, 0x01, 0x00, 0x00, 0x02, 0x01, 0x00],
+    ] {
+        let h = pad(prefix.clone(), 32);
+        for name in ["a.der", "a.key", "A.KEY"] {
+            assert_eq!(
+                classify(name, &h),
+                FileClass::KnownBinary(Known::KeyStore),
+                "{name} {:02x}",
+                prefix[1]
+            );
+        }
+        for name in ["a.p12", "a.pfx", "a.bin"] {
+            assert_ne!(
+                classify(name, &h),
+                FileClass::KnownBinary(Known::KeyStore),
+                "{name} {:02x}",
+                prefix[1]
+            );
+        }
+    }
+    // Not a DER length byte: indefinite (`80`) or a length of 4+ bytes.
+    for second in [0x80u8, 0x84, 0xff] {
+        let h = pad(vec![0x30, second, 0x02, 0x01, 0x00], 32);
+        assert_ne!(
+            classify("a.key", &h),
+            FileClass::KnownBinary(Known::KeyStore),
+            "{second:02x}"
+        );
+    }
+    assert_ne!(
+        classify("a.key", &[0x30]),
+        FileClass::KnownBinary(Known::KeyStore)
+    );
     // PEM .key stays text
     let pem = pad(b"-----BEGIN PRIVATE KEY-----\n".to_vec(), 64);
     assert_eq!(classify("a.key", &pem), FileClass::Text);

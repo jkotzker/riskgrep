@@ -6,6 +6,8 @@ Each subdirectory with a `ruleset.toml` is a ruleset, embedded into the binary a
 
 `id` (a YARA identifier; it becomes the namespace, so rules are keyed `<id>:<rule>`), `version`, `licence`, `description`, `categories`.
 
+The compiled-rules cache and the evidence cache are keyed by each enabled ruleset's id and its `ruleset.toml`, `*.yar`, and `stopwords/*.txt` files (with the YARA-X and riskgrep versions and the platform); other files in a ruleset directory do not invalidate them.
+
 Stopword lists are merged by name across the selected rulesets. Two rulesets that ship a list with the same name and different words fail the bundle compile (`stopword list ... differs between rulesets`), so give lists a ruleset-specific name (`secrets_core_*` in `secrets-core`).
 
 ## Rule metadata

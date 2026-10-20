@@ -25,13 +25,13 @@ This puts `riskgrep` and `riskgrep-claude` in `~/.cargo/bin`. Run `riskgrep rule
 riskgrep scan path/to/file.env                  # a file
 riskgrep scan src/ --format json                # a directory, as JSON
 cat notes.txt | riskgrep scan -                 # standard input
-riskgrep scan . --fail-above secret=80,biometric=75
+riskgrep scan . --fail-above secret=79.9,biometric=74.9
 riskgrep baseline .                             # record current findings as known
 riskgrep rules list                             # every rule, category, and weight
 riskgrep rules test                             # run the rulesets' own test cases
 ```
 
-`--fail-above CATEGORY=N` makes the exit status 1 when a target's score for that category is above `N`; exit status 2 means a target could not be scanned and `--on-error block` applies; 3 is a usage or configuration error. `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
+`--fail-above CATEGORY=N` makes the exit status 1 when a target's score for that category is above `N`. `--fail-above` compares strictly (a score must be above `N`), while the git hook's `block_at` and the Claude Code thresholds are inclusive (a score at the threshold counts), so `secret=79.9` matches the git hook's default block at 80: a file scoring exactly 80 exits 0 with `--fail-above secret=80` and 1 with `--fail-above secret=79.9` (measured with the release `riskgrep` on a generated generic `api_key` assignment scoring secret 80.0). Exit status 2 means a target could not be scanned and `--on-error block` applies; 3 is a usage or configuration error. `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
 
 ## Git hook
 
@@ -44,7 +44,7 @@ The hook scores the lines added by the staged changes (`--full-files` or `git.fu
 
 ## Claude Code hook
 
-`riskgrep-claude` checks `Read`, `NotebookRead`, `Grep`, and `Bash` tool calls before they run. It finds the files the call would read, scans them, and answers `ask` or `deny` when a score reaches its threshold (defaults: `biometric` ask at 50 and deny at 75, `secret` ask at 90). It never answers `allow`, and any other tool is untouched.
+`riskgrep-claude` checks `Read`, `NotebookRead`, `Grep`, and `Bash` tool calls before they run. It finds the files the call would read, scans them, and answers `ask` or `deny` when a score reaches its threshold (defaults: `biometric` ask at 50 and deny at 75, `secret` ask at 90). It never answers `allow`, and any other tool is untouched. A Bash command whose files the analysis cannot determine gets no decision by default (`claude_code.on_unresolved = "allow"`); set it to `"ask"` or `"deny"` to prompt or block on such commands (see [Known limitations](docs/known-limitations.md#unresolved-bash-commands-get-no-decision-by-default)).
 
 ```sh
 riskgrep rules compile        # warm the rules cache before the first call (any directory)
@@ -76,6 +76,13 @@ Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weigh
 Trust: the Claude Code hook reads a repository's `.riskgrep.toml` and `.riskgrep-baseline.json` only when the repository is listed in `trusted_repos` in the user config. An agent can write files in a repository, so an untrusted repository file is never allowed to loosen the checks. The command line and the git hook read the repository files without this restriction. `trusted_repos` in a repository file is ignored.
 
 The cache (compiled rules and per-file evidence, with no file content) is in `~/Library/Caches/riskgrep` on macOS and `$XDG_CACHE_HOME/riskgrep` or `~/.cache/riskgrep` on Linux.
+
+## Changes users may notice
+
+- Relative paths in configuration (`extra_ruleset_dirs`, `trusted_repos`) resolve against the directory of the file that declares them (`~/.config/riskgrep/` for the user file, the repository root for `.riskgrep.toml`), never against the working directory. Use absolute paths where a path meant the working directory.
+- The user configuration file is read only when `HOME` is an absolute path; without one, the defaults apply and the cache is off.
+- Baselines identify findings decided by a tensor header or a path-name rule by the file's content, not by rule and path. Regenerate `.riskgrep-baseline.json` with `riskgrep baseline` if it holds such findings from an earlier build.
+- Text output and git pre-commit messages show `line unknown` for findings in the last MiB of a text file larger than 8 MiB; JSON output keeps `line_start` and `line_end` at 0 for them.
 
 ## Accuracy
 
