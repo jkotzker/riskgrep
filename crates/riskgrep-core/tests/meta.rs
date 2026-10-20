@@ -55,6 +55,7 @@ name_regex = "weight$""#,
                 name_regex: Some("weight$".into()),
                 embedding_dims: None,
                 exclude_name_regex: None,
+                max_tensors: None,
             },
         ]
     );
@@ -68,7 +69,8 @@ weight = 70
 post = "npy_header, safetensors_header, float_array"
 min_dim = 64
 embedding_dims = "128, 192,256"
-exclude_name_regex = "bias$""#,
+exclude_name_regex = "bias$"
+max_tensors = 4"#,
     )
     .unwrap();
     let dims = Some(vec![128, 192, 256]);
@@ -84,6 +86,7 @@ exclude_name_regex = "bias$""#,
                 name_regex: None,
                 embedding_dims: dims,
                 exclude_name_regex: Some("bias$".into()),
+                max_tensors: Some(4),
             },
             PostSpec::FloatArray {
                 embedding_dims: vec![128, 192, 256]

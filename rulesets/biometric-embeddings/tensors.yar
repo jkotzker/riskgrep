@@ -65,6 +65,8 @@ rule npz_float_tensor {
 }
 
 // safetensors: u64 little-endian header length, then a JSON header ("{\"").
+// Model checkpoints name parameters after embeddings (`word_embeddings`,
+// `pos_embed`, `cls_token`, `time_embedding`, ...); those names do not count.
 rule safetensors_named_embedding {
   meta:
     category = "biometric"
@@ -73,25 +75,29 @@ rule safetensors_named_embedding {
     family_cap = 85
     post = "safetensors_header"
     min_dim = 1
-    name_regex = "(?i)(embedding|speaker|voice|face|xvector|ecapa)"
+    name_regex = "(?i)(embedding|speaker|voice|face|xvector|dvector|ecapa|spk_emb)"
+    exclude_name_regex = "(?i)((\\.weight|\\.bias)$|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe)"
   strings:
     $hdr = { 7B 22 }
   condition:
     $hdr at 8 and uint32(4) == 0 and uint32(0) > 1 and uint32(0) + 8 <= filesize
 }
 
-// Layer parameters (`*.weight`, `*.bias`, batch-norm statistics) are model
-// weights, not embeddings, whatever their shape.
+// Embedding-shaped tensors without an embedding name, in files with at most
+// a few tensors: a model layout has many. With `safetensors_float_tensor` it
+// scores 70 (1 - 0.4 * 0.75), an ask rather than a deny. Model parameter
+// names never count.
 rule safetensors_embedding_tensor {
   meta:
     category = "biometric"
-    weight = 70
+    weight = 60
     family = "safetensors"
     family_cap = 85
     post = "safetensors_header"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked)"
+    max_tensors = 4
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe)"
   strings:
     $hdr = { 7B 22 }
   condition:
@@ -101,7 +107,7 @@ rule safetensors_embedding_tensor {
 rule safetensors_float_tensor {
   meta:
     category = "biometric"
-    weight = 30
+    weight = 25
     family = "safetensors"
     family_cap = 85
     post = "safetensors_header"

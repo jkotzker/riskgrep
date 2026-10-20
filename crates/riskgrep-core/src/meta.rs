@@ -52,6 +52,7 @@ pub enum PostSpec {
         name_regex: Option<String>,
         embedding_dims: Option<Vec<u64>>,
         exclude_name_regex: Option<String>,
+        max_tensors: Option<u64>,
     },
     FloatArray {
         embedding_dims: Vec<u64>,
@@ -211,6 +212,7 @@ impl RuleMeta {
                 name_regex: raw.string("name_regex")?,
                 embedding_dims: raw.dims("embedding_dims")?,
                 exclude_name_regex: raw.string("exclude_name_regex")?,
+                max_tensors: raw.uint("max_tensors")?,
             },
             "float_array" => PostSpec::FloatArray {
                 embedding_dims: raw.need(raw.dims("embedding_dims")?, "embedding_dims", name)?,

@@ -1565,13 +1565,13 @@ rule generic_api_key {
     category = "secret"
     weight = 80
     post = "span,entropy,stopwords,allow_regex"
-    span_regex = "(?i)[\\w.-]{0,50}?(?:secret|passw(?:or)?d|token|credentials?|creds|auth|(?:api|access|private|secret|auth|client|encryption|signing)[_.-]?key)[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([\\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
+    span_regex = "(?i)[\\w.-]{0,50}?(?:secret|passw(?:or)?d|token|credentials?|creds|auth|(?:api|access|private|secret|auth|client|encryption|signing)[_.-]?key|(?-i:[A-Z0-9_]+_KEY))[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([\\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
     min_entropy = 3.5
     stopwords = "secrets_core_generic_api_key"
     allow_regex = "(?:^[a-zA-Z_.-]+$)|(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
-    $re = /(?i)[\w.-]{0,50}(?:secret|passw(?:or)?d|token|credentials?|creds|auth|(?:api|access|private|secret|auth|client|encryption|signing)[_.-]?key)[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([\w.=-]{10,150}|[a-z0-9][a-z0-9+\/]{11,}={0,3})(?:[\x60'"\s;]|\\[nr]|$)/
+    $re = /(?i)[\w.-]{0,50}(?:secret|passw(?:or)?d|token|credentials?|creds|auth|(?:api|access|private|secret|auth|client|encryption|signing)[_.-]?key|(?-i:[A-Z0-9_]+_KEY))[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([\w.=-]{10,150}|[a-z0-9][a-z0-9+\/]{11,}={0,3})(?:[\x60'"\s;]|\\[nr]|$)/
     $kw0 = "access" nocase
     $kw1 = "api" nocase
     $kw2 = "auth" nocase

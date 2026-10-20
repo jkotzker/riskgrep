@@ -77,7 +77,7 @@ expect = 90
 [[case]]
 # A key name that only contains a keyword (local change; see UPSTREAM.md).
 rule = "generic_api_key"
-synth = "text:key_sha256 = \"9f8e7d6c5b4a39281706f5e4d3c2b1a0\"\n"
+synth = "keyed:key_sha256"
 path = "settings.py"
 expect = "none"
 

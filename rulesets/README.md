@@ -31,7 +31,7 @@ Post-processors and their arguments:
 | `float_array` | `embedding_dims` (required): finds single bracketed arrays (`[...]`, also inside `array([...])` and JSON) holding only floats separated by commas or whitespace, whose element count is in `embedding_dims`; each innermost row of a nested array is judged on its own. Supplies its own evidence ranges, like `float_run` |
 | `npy_header` | `min_dim` (required), `embedding_dims` (optional): `.npy` float array with a dimension >= `min_dim`; with `embedding_dims`, also embedding-shaped (below) |
 | `npz_members` | `min_dim` (required), `embedding_dims` (optional): `.npz` with such a float member |
-| `safetensors_header` | `min_dim` (required), `name_regex`, `embedding_dims`, `exclude_name_regex` (optional): float tensor with such a dimension and, if given, a name matching `name_regex`, an embedding shape, and a name not matching `exclude_name_regex` |
+| `safetensors_header` | `min_dim` (required), `name_regex`, `embedding_dims`, `exclude_name_regex`, `max_tensors` (optional): float tensor with such a dimension and, if given, a name matching `name_regex`, an embedding shape, and a name not matching `exclude_name_regex`, in a file with at most `max_tensors` tensors |
 
 `embedding_dims` is a comma-separated list of widths, e.g. `"128,192,256,512"`. A tensor is embedding-shaped when its last dimension is in the list and at most two dimensions precede it (`[d]`, `[n, d]`, `[a, b, d]`).
 
@@ -63,6 +63,7 @@ Samples are generated at run time from fixed seeds, so nothing sensitive is stor
 | Spec | Content |
 |---|---|
 | `secret:KIND[:SEED]` | `riskgrep_core::synth::fake_secret`, inside a few lines of source code (tokens as `let id = "...";`; block and whole-line kinds as they are). Seed default 7 |
+| `keyed:NAME[:SEED]` | `NAME = "<value>"` on one line, with a random 32-character base62 value (the value of `secret:generic_api_key_assignment`); for key-name cases of the generic rule. Seed default 7 |
 | `npy:DTYPE:DIMS` | `.npy` file, e.g. `npy:<f4:10x192` |
 | `npz:DTYPE:DIMS` | `.npz` holding one `.npy` member, e.g. `npz:<f4:4x256` |
 | `safetensors:NAME=DTYPE@DIMS[;...]` | safetensors file, e.g. `safetensors:speaker_embedding=F32@1x192;other=F32@1x128` |

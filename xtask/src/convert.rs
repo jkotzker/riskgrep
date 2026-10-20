@@ -48,7 +48,7 @@ pub struct LocalChange {
 pub const LOCAL_CHANGES: &[LocalChange] = &[LocalChange {
     id: "generic-api-key",
     find: r"(?:access|auth|(?-i:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \t\w.-]{0,20})",
-    replace: r"(?:secret|passw(?:or)?d|token|credentials?|creds|auth|(?:api|access|private|secret|auth|client|encryption|signing)[_.-]?key)",
+    replace: r"(?:secret|passw(?:or)?d|token|credentials?|creds|auth|(?:api|access|private|secret|auth|client|encryption|signing)[_.-]?key|(?-i:[A-Z0-9_]+_KEY))",
     weight: 80,
     why: "the key name must end in a credential noun (`password`, `token`, `api_key`, ...), not merely contain a keyword (`tokenizer`, `key_sha256`, `first_key`); with that, a hit is flagged",
 }];
@@ -961,9 +961,12 @@ fn upstream_md(
     ] {
         let ids: Vec<&str> = classes
             .iter()
-            .filter(|(c, _)| *c == class)
+            .filter(|(c, id)| *c == class && !LOCAL_CHANGES.iter().any(|l| l.id == id))
             .map(|(_, id)| id.as_str())
             .collect();
+        if ids.is_empty() {
+            continue;
+        }
         writeln!(
             s,
             "- {} ({}): {} rule{}.",
@@ -973,6 +976,14 @@ fn upstream_md(
             if ids.len() == 1 { "" } else { "s" }
         )
         .unwrap();
+    }
+    let local: Vec<String> = LOCAL_CHANGES
+        .iter()
+        .filter(|l| classes.iter().any(|(_, id)| id == l.id))
+        .map(|l| format!("`{}` ({})", l.id, l.weight))
+        .collect();
+    if !local.is_empty() {
+        writeln!(s, "- local change (see below): {}.", local.join(", ")).unwrap();
     }
     writeln!(
         s,
@@ -992,7 +1003,7 @@ fn upstream_md(
     } else {
         writeln!(
             s,
-            "Applied by the converter (`LOCAL_CHANGES` in `xtask/src/convert.rs`) before translation; the weight replaces the class weight above.\n\n\
+            "Applied by the converter (`LOCAL_CHANGES` in `xtask/src/convert.rs`) before translation; the weight replaces the rule's class weight.\n\n\
              | Rule | Weight | Change | Why |\n|---|---|---|---|"
         )
         .unwrap();

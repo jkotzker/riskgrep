@@ -120,8 +120,56 @@ fn unnamed_embedding_safetensors() {
         rules,
         ["safetensors_embedding_tensor", "safetensors_float_tensor"]
     );
-    // 70 and 30 by noisy-or: 1 - 0.3 * 0.7.
-    assert_score(biometric(&f, "t.safetensors", &data), 79.0);
+    // 60 and 25 by noisy-or: 1 - 0.4 * 0.75, below the deny threshold.
+    assert_score(biometric(&f, "t.safetensors", &data), 70.0);
+}
+
+#[test]
+fn checkpoint_parameters_are_not_embeddings() {
+    let f = fixture();
+    // Model parameters with embedding-like names or shapes (timm ViT, BERT,
+    // HF ViT, OpenCLIP, diffusers), each alone in a file: only the plain
+    // float-tensor rule fires.
+    let cases: [(&str, &[u64]); 7] = [
+        ("pos_embed", &[1, 197, 768]),
+        ("cls_token", &[1, 1, 768]),
+        ("bert.embeddings.word_embeddings.weight", &[64, 768]),
+        ("vit.embeddings.position_embeddings", &[1, 197, 768]),
+        ("positional_embedding", &[77, 512]),
+        ("visual.class_embedding", &[768]),
+        ("time_embedding.linear_1.weight", &[1280, 320]),
+    ];
+    for (name, shape) in cases {
+        let data = synth::safetensors(&[(name, "F32", shape)]);
+        assert_eq!(
+            rules_of(&f, "model.safetensors", &data),
+            ["safetensors_float_tensor"],
+            "{name}"
+        );
+        assert_score(biometric(&f, "model.safetensors", &data), 25.0);
+    }
+}
+
+#[test]
+fn embedding_names_still_count() {
+    let f = fixture();
+    for name in [
+        "embedding",
+        "speaker_embedding",
+        "voiceprint",
+        "xvector",
+        "dvector",
+        "spk_emb",
+        "face_embedding",
+    ] {
+        let data = synth::safetensors(&[(name, "F32", &[1, 192])]);
+        let rules = rules_of(&f, "t.safetensors", &data);
+        assert!(
+            rules.contains(&"safetensors_named_embedding".to_string()),
+            "{name}"
+        );
+        assert_score(biometric(&f, "t.safetensors", &data), 85.0);
+    }
 }
 
 #[test]
@@ -132,7 +180,7 @@ fn layer_parameters_are_not_embeddings() {
         rules_of(&f, "w.safetensors", &data),
         ["safetensors_float_tensor"]
     );
-    assert_score(biometric(&f, "w.safetensors", &data), 30.0);
+    assert_score(biometric(&f, "w.safetensors", &data), 25.0);
 }
 
 #[test]
@@ -154,7 +202,7 @@ fn int_npy() {
 fn model_weights_safetensors() {
     let f = fixture();
     let data = synth::safetensors(&[("layer.0.weight", "F32", &[768, 768])]);
-    assert_score(biometric(&f, "w.safetensors", &data), 30.0);
+    assert_score(biometric(&f, "w.safetensors", &data), 25.0);
 }
 
 #[test]

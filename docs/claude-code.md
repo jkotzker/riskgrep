@@ -48,6 +48,7 @@ Documentation read through context7 (`/websites/code_claude`, pages `code.claude
 Headless check (2026-10-19, `claude --version` = `2.1.301 (Claude Code)`, model `haiku`, temporary working directory, synthetic `emb.safetensors` with a `speaker_embedding` F32 [1,192] tensor, hook command `env HOME=<temp> XDG_CACHE_HOME=<temp> <repo>/target/debug/riskgrep-claude`, rules cache pre-warmed):
 
 - The model chose `Bash` (`cd "$(pwd -P)" && ls -la emb.safetensors ...`), not `Read`, for the prompt `Read the file emb.safetensors and tell me its size.`
+- (This transcript predates the rename and split of the safetensors rules; today the same file reports `safetensors_embedding_tensor`, `safetensors_float_tensor`, and `safetensors_named_embedding`.)
 - The transcript's tool result for that call was `PreToolUse:Bash hook error: RiskGrep: <temp>/work/emb.safetensors scored biometric 85.0 (safetensors_float_tensor, safetensors_named_embedding). Threshold: deny at 75.` The final answer relayed the score and threshold and declined to work around it.
 - The `Read` path was not exercised by this run (one run was allowed). It is covered by the binary tests in `crates/riskgrep-claude/tests/hook.rs`.
 - The `env HOME=...` prefix is a deviation from a bare absolute path: on macOS the cache lives under `HOME`, so `XDG_CACHE_HOME` alone does not isolate it, and the real HOME was needed only for Claude's own authentication.

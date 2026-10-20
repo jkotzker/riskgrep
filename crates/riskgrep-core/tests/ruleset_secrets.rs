@@ -173,6 +173,8 @@ fn generic_needs_a_credential_named_key() {
         "db_password",
         "authToken",
         "SECRET_KEY",
+        "STRIPE_KEY",
+        "HMAC_KEY",
     ] {
         let (content, _) = embed(&format!("    {name} = \"{value}\""));
         let ev = scan("settings.py", &content);

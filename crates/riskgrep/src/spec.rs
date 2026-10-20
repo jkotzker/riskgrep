@@ -24,6 +24,22 @@ pub fn generate(spec: &str) -> Result<Vec<u8>, String> {
             }
             Ok(embed_secret(name, seed).into_bytes())
         }
+        "keyed" => {
+            let (name, seed) = split_seed(rest).map_err(|e| bad(&e))?;
+            let ok = !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'));
+            if !ok {
+                return Err(bad(
+                    "want keyed:NAME[:SEED] with NAME of letters, digits, _ . -",
+                ));
+            }
+            let line = synth::fake_secret("generic_api_key_assignment", seed);
+            let open = line.find('"').expect("quoted value") + 1;
+            let close = line.rfind('"').expect("quoted value");
+            Ok(format!("{name} = \"{}\"\n", &line[open..close]).into_bytes())
+        }
         "npy" => {
             let (dtype, dims) = rest
                 .split_once(':')
@@ -171,6 +187,8 @@ mod tests {
         for spec in [
             "secret:github_pat",
             "secret:github_pat:9",
+            "keyed:key_sha256",
+            "keyed:key_sha256:3",
             "npy:<f4:3x64",
             "npz:<f4:4x256",
             "safetensors:speaker_embedding=F32@1x192;other=F32@1x128",
@@ -211,6 +229,9 @@ mod tests {
             "csv:10",
             "der:abc",
             "safetensors:x",
+            "keyed:",
+            "keyed:bad name",
+            "keyed:x:y",
         ] {
             assert!(generate(spec).is_err(), "{spec:?}");
         }

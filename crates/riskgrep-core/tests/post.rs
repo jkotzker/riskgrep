@@ -125,6 +125,7 @@ fn safetensors_name_rule() {
         name_regex: Some(re("embedding")),
         embedding_dims: None,
         exclude_name_regex: None,
+        max_tensors: None,
     };
     let r = named.apply(&data, 0..8);
     assert_eq!(
@@ -141,6 +142,7 @@ fn safetensors_name_rule() {
         name_regex: None,
         embedding_dims: None,
         exclude_name_regex: None,
+        max_tensors: None,
     };
     let r = unnamed.apply(&layer_only, 0..8);
     assert_eq!(tensor(&r).2, Some("layer.0.weight"));
@@ -197,6 +199,7 @@ fn headers_never_panic_on_malformed_input() {
         name_regex: None,
         embedding_dims: None,
         exclude_name_regex: None,
+        max_tensors: None,
     };
     let good_npy = npy("<f4", "(10, 192)");
     let good_st = safetensors(r#"{"t":{"dtype":"F32","shape":[4,4],"data_offsets":[0,64]}}"#);
@@ -297,6 +300,7 @@ fn safetensors_embedding_shape_and_exclusions() {
         name_regex: None,
         embedding_dims: Some(DIMS.to_vec()),
         exclude_name_regex: Some(re("(?i)(weight|bias)")),
+        max_tensors: None,
     };
     let emb = safetensors(r#"{"data":{"dtype":"F32","shape":[4,256],"data_offsets":[0,4096]}}"#);
     assert_eq!(tensor(&p.apply(&emb, 0..8)).2, Some("data"));
@@ -306,6 +310,29 @@ fn safetensors_embedding_shape_and_exclusions() {
     assert_eq!(p.apply(&layers, 0..8), PostResult::Drop);
     let wide = safetensors(r#"{"x":{"dtype":"F32","shape":[256,257],"data_offsets":[0,9]}}"#);
     assert_eq!(p.apply(&wide, 0..8), PostResult::Drop);
+}
+
+#[test]
+fn safetensors_max_tensors() {
+    let p = SafetensorsHeader {
+        min_dim: 64,
+        name_regex: None,
+        embedding_dims: Some(DIMS.to_vec()),
+        exclude_name_regex: None,
+        max_tensors: Some(2),
+    };
+    let t = |n: usize| {
+        let items: Vec<String> = (0..n)
+            .map(|i| format!(r#""t{i}":{{"dtype":"F32","shape":[1,256],"data_offsets":[0,9]}}"#))
+            .collect();
+        safetensors(&format!(
+            r#"{{"__metadata__":{{"a":"b"}},{}}}"#,
+            items.join(",")
+        ))
+    };
+    assert!(kept(&p.apply(&t(2), 0..8)));
+    // A model layout (many tensors) is not an embedding file.
+    assert_eq!(p.apply(&t(3), 0..8), PostResult::Drop);
 }
 
 /// `n` floats joined by `sep`, wrapped in `open`/`close`.

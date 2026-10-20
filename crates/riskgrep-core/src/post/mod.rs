@@ -92,6 +92,7 @@ pub fn build(
             name_regex,
             embedding_dims,
             exclude_name_regex,
+            max_tensors,
         } => Box::new(SafetensorsHeader {
             min_dim: *min_dim,
             name_regex: match name_regex {
@@ -103,6 +104,7 @@ pub fn build(
                 Some(s) => Some(re("exclude_name_regex", s)?),
                 None => None,
             },
+            max_tensors: *max_tensors,
         }),
         PostSpec::FloatArray { embedding_dims } => Box::new(FloatArray {
             embedding_dims: embedding_dims.clone(),

@@ -39,17 +39,24 @@ path = "model.safetensors"
 expect = 85
 
 [[case]]
-# Embedding-shaped without an embedding name: 70 and 30 combine to 79.
+# Embedding-shaped without an embedding name: 60 and 25 combine to 70.
 rule = "safetensors_embedding_tensor"
 synth = "safetensors:data=F32@4x512"
 path = "t.safetensors"
-expect = 79
+expect = 70
 
 [[case]]
 rule = "safetensors_float_tensor"
 synth = "safetensors:layer.0.weight=F32@768x768"
 path = "w.safetensors"
-expect = 30
+expect = 25
+
+[[case]]
+# A checkpoint parameter named like an embedding is not one.
+rule = "safetensors_named_embedding"
+synth = "safetensors:bert.embeddings.word_embeddings.weight=F32@64x768"
+path = "model.safetensors"
+expect = "none"
 
 [[case]]
 # Layer parameters are excluded from the embedding-shape rule.

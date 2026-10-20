@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 const USAGE: &str =
     "usage: cargo xtask convert-gitleaks --config <gitleaks.toml> --tag <release tag> --out <dir>
-       cargo xtask eval [--skip-oss]";
+       cargo xtask eval [--skip-oss] [--write-baseline]";
 
 fn convert(args: &[String]) -> Result<(), String> {
     let (mut config, mut tag, mut out) = (None, None, None);

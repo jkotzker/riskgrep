@@ -5,8 +5,9 @@
 //! repositories with the release `riskgrep` binary, then reports recall and
 //! false positives per 1,000 files at the default thresholds. Fails when the
 //! release bar is not met or a metric is worse than `eval/baseline-metrics.json`.
-//! A passing run rewrites the baseline; `--write-baseline` rewrites it from a
-//! failing run too (the exit status still reports the failure).
+//! Only `--write-baseline` rewrites the baseline (from any run; the exit
+//! status still reports a failure); otherwise the run prints the changes it
+//! would make.
 //! Output carries rule ids, paths, lines, and scores only, never file content.
 
 use riskgrep_core::config::Config;
@@ -31,16 +32,25 @@ pub enum Group {
     Biometric,
     /// Ordinary content that must not be flagged.
     Negative,
+    /// Not gated: credentials outside the generic rule's key names.
+    ProbeSecret,
+    /// Not gated: embeddings outside `embedding_dims` or with more leading
+    /// dimensions.
+    ProbeBiometric,
 }
 
 impl Group {
     /// The category a positive sample must be flagged in.
     pub fn category(self) -> Option<&'static str> {
         match self {
-            Group::Provider | Group::Generic => Some(SECRET),
-            Group::Biometric => Some(BIOMETRIC),
+            Group::Provider | Group::Generic | Group::ProbeSecret => Some(SECRET),
+            Group::Biometric | Group::ProbeBiometric => Some(BIOMETRIC),
             Group::Negative => None,
         }
+    }
+
+    pub fn is_probe(self) -> bool {
+        matches!(self, Group::ProbeSecret | Group::ProbeBiometric)
     }
 }
 
@@ -77,6 +87,16 @@ pub const PROVIDER_KINDS: &[&str] = &[
 /// Key-store file formats (binary), scored by `keystores.yar`.
 pub const KEYSTORE_KINDS: &[&str] = &["pkcs12", "der_key"];
 
+/// Probe sets (reported, not gated).
+pub const PROBE_KINDS: &[&str] = &[
+    "probe_npy_offlist_width",
+    "probe_npy_3_leading_dims",
+    "probe_safetensors_offlist_width",
+    "probe_floats_offlist_width",
+    "probe_generic_env_key",
+    "probe_generic_other_key",
+];
+
 /// Generated hard-negative families.
 pub const NEGATIVE_KINDS: &[&str] = &[
     "sensor_csv",
@@ -89,6 +109,7 @@ pub const NEGATIVE_KINDS: &[&str] = &[
     "base64_blob",
     "source",
     "prices_logs",
+    "model_checkpoint",
 ];
 
 pub const BIOMETRIC_KINDS: &[&str] = &[
@@ -118,7 +139,9 @@ pub fn corpus() -> Vec<Sample> {
     provider_secrets(&mut out);
     generic_secrets(&mut out);
     biometric(&mut out);
+    probes(&mut out);
     negatives(&mut out);
+    checkpoints(&mut out);
     existing_negatives(&mut out);
     out
 }
@@ -346,6 +369,264 @@ fn biometric(out: &mut Vec<Sample>) {
             };
             out.push(sample(Group::Biometric, kind, name, text));
         }
+    }
+}
+
+/// Widths outside `embedding_dims`.
+const OFF_LIST_DIMS: &[u64] = &[100, 300, 1000];
+
+fn probes(out: &mut Vec<Sample>) {
+    let dtypes = ["<f4", "<f8", "<f2"];
+    for i in 0..10 {
+        let w = OFF_LIST_DIMS[i % 3];
+        let shape = if i % 2 == 0 {
+            vec![i as u64 / 2 + 1, w]
+        } else {
+            vec![w]
+        };
+        let bytes = synth::npy(dtypes[(i / 3) % 3], &shape);
+        out.push(sample(
+            Group::ProbeBiometric,
+            "probe_npy_offlist_width",
+            format!("vec_{i}.npy"),
+            bytes,
+        ));
+    }
+    for i in 0..10 {
+        let d = EMBED_DIMS[i % EMBED_DIMS.len()];
+        let bytes = synth::npy("<f4", &[2, 2, 2, d]);
+        out.push(sample(
+            Group::ProbeBiometric,
+            "probe_npy_3_leading_dims",
+            format!("vec_{i}.npy"),
+            bytes,
+        ));
+    }
+    for i in 0..10 {
+        let w = OFF_LIST_DIMS[i % 3];
+        let rows = (i / 3) as u64 + 1;
+        let bytes = synth::safetensors(&[("data", "F32", &[rows, w])]);
+        out.push(sample(
+            Group::ProbeBiometric,
+            "probe_safetensors_offlist_width",
+            format!("t_{i}.safetensors"),
+            bytes,
+        ));
+    }
+    for i in 0..10 {
+        let n = OFF_LIST_DIMS[i % 3] as usize;
+        let floats = synth::printed_floats(n, FloatStyle::PythonList);
+        out.push(sample(
+            Group::ProbeBiometric,
+            "probe_floats_offlist_width",
+            format!("vec_{i}.py"),
+            format!("vec_{i} = {floats}\n"),
+        ));
+    }
+    let env = [
+        "STRIPE_KEY",
+        "MAILGUN_KEY",
+        "SENDGRID_KEY",
+        "TWILIO_KEY",
+        "ALGOLIA_KEY",
+        "PUSHER_KEY",
+        "MAPBOX_KEY",
+        "SENTRY_KEY",
+        "GOOGLE_MAPS_KEY",
+        "DATADOG_KEY",
+    ];
+    for (i, name) in env.iter().enumerate() {
+        let line = synth::fake_secret("generic_api_key_assignment", 9100 + i as u64);
+        let text = format!("APP_ENV=production\n{name}={}\n", quoted(&line));
+        out.push(sample(
+            Group::ProbeSecret,
+            "probe_generic_env_key",
+            ".env".into(),
+            text,
+        ));
+    }
+    let other = ["consumer_key", "app_key", "master_key", "HMAC_KEY"];
+    for i in 0..12 {
+        let line = synth::fake_secret("generic_api_key_assignment", 9200 + i as u64);
+        let text = format!(
+            "DEBUG = False\n{} = \"{}\"\n",
+            other[i % other.len()],
+            quoted(&line)
+        );
+        out.push(sample(
+            Group::ProbeSecret,
+            "probe_generic_other_key",
+            "settings.py".into(),
+            text,
+        ));
+    }
+}
+
+/// A safetensors header with offsets but no tensor data, as a checkpoint's
+/// first bytes are; the scanner reads headers only.
+fn safetensors_header_only(tensors: &[(String, &str, Vec<u64>)]) -> Vec<u8> {
+    let mut header = serde_json::Map::new();
+    let mut offset = 0u64;
+    for (name, dtype, shape) in tensors {
+        let size = match *dtype {
+            "F32" => 4,
+            _ => 2,
+        };
+        let bytes = shape.iter().product::<u64>() * size;
+        header.insert(
+            name.clone(),
+            serde_json::json!({"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + bytes]}),
+        );
+        offset += bytes;
+    }
+    let json = serde_json::to_vec(&header).expect("header json");
+    let mut out = (json.len() as u64).to_le_bytes().to_vec();
+    out.extend_from_slice(&json);
+    out
+}
+
+/// Header-only model checkpoints: parameters with embedding-like names or
+/// shapes, alone, and in real-world layouts.
+fn checkpoints(out: &mut Vec<Sample>) {
+    let t = |n: &str, d: &'static str, s: &[u64]| (n.to_string(), d, s.to_vec());
+    let singles = [
+        t("pos_embed", "F32", &[1, 197, 768]),
+        t("cls_token", "F32", &[1, 1, 768]),
+        t(
+            "bert.embeddings.word_embeddings.weight",
+            "F32",
+            &[30522, 768],
+        ),
+        t("vit.embeddings.position_embeddings", "F32", &[1, 197, 768]),
+        t("positional_embedding", "F32", &[77, 512]),
+        t("visual.class_embedding", "F32", &[768]),
+        t("time_embedding.linear_1.weight", "F16", &[1280, 320]),
+    ];
+    for (i, one) in singles.into_iter().enumerate() {
+        let bytes = safetensors_header_only(&[one]);
+        out.push(sample(
+            Group::Negative,
+            "model_checkpoint",
+            format!("param_{i}.safetensors"),
+            bytes,
+        ));
+    }
+    let mut bert = vec![
+        t("embeddings.word_embeddings.weight", "F32", &[30522, 768]),
+        t("embeddings.position_embeddings.weight", "F32", &[512, 768]),
+        t("embeddings.token_type_embeddings.weight", "F32", &[2, 768]),
+        t("embeddings.LayerNorm.weight", "F32", &[768]),
+        t("embeddings.LayerNorm.bias", "F32", &[768]),
+    ];
+    for l in 0..12 {
+        for (p, s) in [
+            ("attention.self.query", &[768u64, 768][..]),
+            ("attention.self.key", &[768, 768]),
+            ("attention.self.value", &[768, 768]),
+            ("attention.output.dense", &[768, 768]),
+            ("intermediate.dense", &[3072, 768]),
+            ("output.dense", &[768, 3072]),
+        ] {
+            bert.push(t(&format!("encoder.layer.{l}.{p}.weight"), "F32", s));
+            bert.push(t(&format!("encoder.layer.{l}.{p}.bias"), "F32", &s[..1]));
+        }
+    }
+    bert.push(t("pooler.dense.weight", "F32", &[768, 768]));
+    bert.push(t("pooler.dense.bias", "F32", &[768]));
+    let mut clip = vec![
+        t("token_embedding.weight", "F16", &[49408, 512]),
+        t("positional_embedding", "F16", &[77, 512]),
+        t("ln_final.weight", "F16", &[512]),
+        t("ln_final.bias", "F16", &[512]),
+        t("text_projection", "F16", &[512, 512]),
+        t("logit_scale", "F32", &[]),
+        t("visual.class_embedding", "F16", &[768]),
+        t("visual.positional_embedding", "F16", &[50, 768]),
+        t("visual.conv1.weight", "F16", &[768, 3, 32, 32]),
+        t("visual.proj", "F16", &[768, 512]),
+    ];
+    for l in 0..12 {
+        for (tower, w) in [("transformer", 512u64), ("visual.transformer", 768)] {
+            clip.push(t(
+                &format!("{tower}.resblocks.{l}.attn.in_proj_weight"),
+                "F16",
+                &[3 * w, w],
+            ));
+            clip.push(t(
+                &format!("{tower}.resblocks.{l}.attn.in_proj_bias"),
+                "F16",
+                &[3 * w],
+            ));
+            clip.push(t(
+                &format!("{tower}.resblocks.{l}.attn.out_proj.weight"),
+                "F16",
+                &[w, w],
+            ));
+            clip.push(t(
+                &format!("{tower}.resblocks.{l}.mlp.c_fc.weight"),
+                "F16",
+                &[4 * w, w],
+            ));
+            clip.push(t(
+                &format!("{tower}.resblocks.{l}.mlp.c_proj.weight"),
+                "F16",
+                &[w, 4 * w],
+            ));
+        }
+    }
+    let mut unet = vec![
+        t("time_embedding.linear_1.weight", "F16", &[1280, 320]),
+        t("time_embedding.linear_1.bias", "F16", &[1280]),
+        t("time_embedding.linear_2.weight", "F16", &[1280, 1280]),
+        t("conv_in.weight", "F16", &[320, 4, 3, 3]),
+        t("conv_out.weight", "F16", &[4, 320, 3, 3]),
+    ];
+    for (b, ch) in [(0, 320u64), (1, 640), (2, 1280)] {
+        let p = format!("down_blocks.{b}.attentions.0.transformer_blocks.0");
+        unet.push(t(&format!("{p}.attn1.to_q.weight"), "F16", &[ch, ch]));
+        unet.push(t(&format!("{p}.attn2.to_k.weight"), "F16", &[ch, 768]));
+        unet.push(t(
+            &format!("{p}.ff.net.0.proj.weight"),
+            "F16",
+            &[8 * ch, ch],
+        ));
+        unet.push(t(
+            &format!("down_blocks.{b}.resnets.0.time_emb_proj.weight"),
+            "F16",
+            &[ch, 1280],
+        ));
+    }
+    let mut vit = vec![
+        t("cls_token", "F32", &[1, 1, 768]),
+        t("pos_embed", "F32", &[1, 197, 768]),
+        t("patch_embed.proj.weight", "F32", &[768, 3, 16, 16]),
+        t("norm.weight", "F32", &[768]),
+        t("head.weight", "F32", &[1000, 768]),
+    ];
+    for l in 0..12 {
+        vit.push(t(
+            &format!("blocks.{l}.attn.qkv.weight"),
+            "F32",
+            &[2304, 768],
+        ));
+        vit.push(t(
+            &format!("blocks.{l}.mlp.fc1.weight"),
+            "F32",
+            &[3072, 768],
+        ));
+    }
+    for (name, layout) in [
+        ("bert-base", bert),
+        ("clip-vit-b-32", clip),
+        ("sd-unet", unet),
+        ("timm-vit-base", vit),
+    ] {
+        out.push(sample(
+            Group::Negative,
+            "model_checkpoint",
+            format!("{name}.safetensors"),
+            safetensors_header_only(&layout),
+        ));
     }
 }
 
@@ -743,6 +1024,13 @@ pub fn shortfalls(c: &[Sample]) -> Vec<String> {
         .filter(|s| s.group == Group::Negative && !s.kind.starts_with("existing_"))
         .count();
     need("generated negatives".into(), generated, GENERATED_NEGATIVES);
+    for k in PROBE_KINDS {
+        let have = c
+            .iter()
+            .filter(|s| s.group.is_probe() && s.kind == *k)
+            .count();
+        need(format!("probe {k}"), have, 10);
+    }
     for k in NEGATIVE_KINDS {
         need(format!("negative {k}"), n(Group::Negative, k), 1);
     }
@@ -864,6 +1152,25 @@ pub fn merged_baseline(
             if k.contains("oss") && !out.contains_key(k) {
                 out.insert(k.clone(), *v);
             }
+        }
+    }
+    out
+}
+
+/// Lines describing how `new` differs from `old`: changed, added, and
+/// removed keys.
+pub fn baseline_diff(old: &BTreeMap<String, f64>, new: &BTreeMap<String, f64>) -> Vec<String> {
+    let mut out = Vec::new();
+    for (k, v) in new {
+        match old.get(k) {
+            Some(o) if (o - v).abs() <= EPS => {}
+            Some(o) => out.push(format!("{k}: {o} -> {v}")),
+            None => out.push(format!("{k}: added {v}")),
+        }
+    }
+    for (k, o) in old {
+        if !new.contains_key(k) {
+            out.push(format!("{k}: removed (was {o})"));
         }
     }
     out
@@ -1164,9 +1471,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
             .map(|r| format!("worse than baseline: {r}")),
     );
     let merged = merged_baseline(&metrics, &old, skip_oss);
-    if write_baseline || failures.is_empty() {
+    if write_baseline {
         fs::write(&baseline_path, json(&merged)).map_err(|e| e.to_string())?;
         println!("\nwrote {}", baseline_path.display());
+    } else {
+        let diff = baseline_diff(&old, &merged);
+        if diff.is_empty() {
+            println!("\nbaseline unchanged");
+        } else {
+            println!(
+                "\n--write-baseline would change {}:",
+                baseline_path.display()
+            );
+            for d in &diff {
+                println!("  {d}");
+            }
+        }
     }
     if !failures.is_empty() {
         println!("\nFAIL:");
@@ -1249,6 +1569,7 @@ fn synthetic(ctx: &Ctx, tmp: &Path, metrics: &mut BTreeMap<String, f64>) -> Resu
     let mut neg: BTreeMap<String, Tally> = BTreeMap::new();
     let mut neg_kinds: BTreeMap<(String, String), u64> = BTreeMap::new();
     let mut neg_files = 0u64;
+    let mut probes: BTreeMap<String, Tally> = BTreeMap::new();
     // Misses and flagged negatives by (what, kind), listed up to 3 each.
     let mut notes: BTreeMap<(&str, String), Vec<String>> = BTreeMap::new();
     for (i, s) in samples.iter().enumerate() {
@@ -1262,6 +1583,12 @@ fn synthetic(ctx: &Ctx, tmp: &Path, metrics: &mut BTreeMap<String, f64>) -> Resu
             ));
         }
         match s.group.category() {
+            Some(cat) if s.group.is_probe() => {
+                probes
+                    .entry(s.kind.clone())
+                    .or_default()
+                    .add(ctx, cat, t.score(cat));
+            }
             Some(cat) => {
                 let score = t.score(cat);
                 kinds
@@ -1334,6 +1661,19 @@ fn synthetic(ctx: &Ctx, tmp: &Path, metrics: &mut BTreeMap<String, f64>) -> Resu
             cols.join("  ")
         );
     }
+    println!("\nprobes (not gated: widths outside embedding_dims, other key names)");
+    for (kind, t) in &probes {
+        let cat = if kind.starts_with("probe_generic") {
+            SECRET
+        } else {
+            BIOMETRIC
+        };
+        let cols: Vec<String> = labels(cat)
+            .iter()
+            .map(|l| format!("{l} {:.3}", t.recall(l)))
+            .collect();
+        println!("  {kind:<32} n={:<3} {}", t.files, cols.join("  "));
+    }
     println!("\nsynthetic hard negatives: {neg_files} files (false positives per 1,000)");
     for (cat, t) in &neg {
         let cols: Vec<String> = labels(cat)
@@ -1380,6 +1720,13 @@ fn synthetic(ctx: &Ctx, tmp: &Path, metrics: &mut BTreeMap<String, f64>) -> Resu
         groups.values().map(|t| t.files).sum::<u64>() as f64,
     );
     metrics.insert("files.synthetic.negative".into(), neg_files as f64);
+    // Informational: `probe.*` keys are neither gated nor compared.
+    for (kind, t) in &probes {
+        metrics.insert(
+            format!("probe.{}", kind.trim_start_matches("probe_")),
+            round4(t.recall("flag")),
+        );
+    }
     Ok(())
 }
 
@@ -1673,6 +2020,17 @@ mod tests {
         assert!(regressions(&better, &base).is_empty());
         let worse = m(&[("recall.generic", 0.8), ("fp_per_1000.oss.secret", 0.6)]);
         assert_eq!(regressions(&worse, &base).len(), 2);
+    }
+
+    #[test]
+    fn baseline_diff_lists_changes() {
+        let old = m(&[("a", 1.0), ("b", 2.0), ("gone", 3.0)]);
+        let new = m(&[("a", 1.0), ("b", 2.5), ("new", 4.0)]);
+        assert_eq!(
+            baseline_diff(&old, &new),
+            vec!["b: 2 -> 2.5", "new: added 4", "gone: removed (was 3)"]
+        );
+        assert!(baseline_diff(&old, &old).is_empty());
     }
 
     #[test]

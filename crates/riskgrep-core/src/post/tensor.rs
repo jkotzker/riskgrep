@@ -161,6 +161,8 @@ pub struct SafetensorsHeader {
     pub embedding_dims: Option<Vec<u64>>,
     /// Tensors whose names match are ignored (layer parameters).
     pub exclude_name_regex: Option<Regex>,
+    /// Files with more tensors than this (model layouts) never qualify.
+    pub max_tensors: Option<u64>,
 }
 
 impl SafetensorsHeader {
@@ -171,6 +173,16 @@ impl SafetensorsHeader {
         }
         let end = 8usize.checked_add(usize::try_from(len).ok()?)?;
         let json: serde_json::Value = serde_json::from_slice(content.get(8..end)?).ok()?;
+        if let Some(max) = self.max_tensors {
+            let n = json
+                .as_object()?
+                .keys()
+                .filter(|k| *k != "__metadata__")
+                .count();
+            if n as u64 > max {
+                return None;
+            }
+        }
         // Smallest qualifying name wins, so the result does not depend on the
         // JSON object's iteration order.
         let mut best: Option<ShapeFacts> = None;
