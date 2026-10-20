@@ -1,5 +1,104 @@
 # RiskGrep
 
-RiskGrep is a local, non-LLM scanner that scores files from 0 to 100 per sensitive-data category (such as secrets, credentials, and personal data) using YARA-X rules, with a Claude Code hook adapter that can check files before an agent reads them; it never uses the network at scan time and never records matched values. Licensed under MIT or Apache-2.0, at your option.
+RiskGrep is a local scanner that scores files from 0 to 100 per sensitive-data category. Version 1 has two categories: `secret` (API keys, tokens, private keys, credentials) and `biometric` (voice and face embedding files and printed embedding arrays). Scoring uses YARA-X rules and small structural checks in Rust; it never calls an LLM, never uses the network at scan time, and never records matched values. Reports hold rule identifiers, paths, line numbers, and scores only.
 
-What RiskGrep does not detect, and what it may flag wrongly, is listed in [Known limitations](docs/known-limitations.md).
+It has three front ends: the `riskgrep` command line, a git `pre-commit` hook, and `riskgrep-claude`, a Claude Code `PreToolUse` hook that asks or denies before an agent reads a sensitive file.
+
+Threat model: RiskGrep protects against accidental exposure by a cooperative agent or person; it does not resist one that works around it on purpose (see [Known limitations](docs/known-limitations.md)).
+
+Licensed under MIT or Apache-2.0, at your option.
+
+## Install
+
+RiskGrep is built from source with a stable Rust toolchain. Nothing is published to a registry yet.
+
+```sh
+cargo install --path crates/riskgrep
+cargo install --path crates/riskgrep-claude
+```
+
+This puts `riskgrep` and `riskgrep-claude` in `~/.cargo/bin`. Run `riskgrep rules compile` once afterwards: it compiles the rules and stores them in the cache directory, so the first scan or hook call does not pay for it (about one second).
+
+## Command line
+
+```sh
+riskgrep scan path/to/file.env                  # a file
+riskgrep scan src/ --format json                # a directory, as JSON
+cat notes.txt | riskgrep scan -                 # standard input
+riskgrep scan . --fail-above secret=80,biometric=75
+riskgrep baseline .                             # record current findings as known
+riskgrep rules list                             # every rule, category, and weight
+riskgrep rules test                             # run the rulesets' own test cases
+```
+
+`--fail-above CATEGORY=N` makes the exit status 1 when a target's score for that category is above `N`; exit status 2 means a target could not be scanned and `--on-error block` applies; 3 is a usage or configuration error. `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
+
+## Git hook
+
+```sh
+riskgrep git install-hook          # writes the pre-commit hook (honours core.hooksPath)
+riskgrep git pre-commit            # what the hook runs; also usable by hand
+```
+
+The hook scores the lines added by the staged changes (`--full-files` or `git.full_files = true` scores whole files) and exits 1 when a category reaches its `git.block_at` threshold: 80 for `secret` and 75 for `biometric` by default. It prints the path, rule identifiers, score, and line numbers, never the matched text.
+
+## Claude Code hook
+
+`riskgrep-claude` checks `Read`, `NotebookRead`, `Grep`, and `Bash` tool calls before they run. It finds the files the call would read, scans them, and answers `ask` or `deny` when a score reaches its threshold (defaults: `biometric` ask at 50 and deny at 75, `secret` ask at 90). It never answers `allow`, and any other tool is untouched.
+
+```sh
+riskgrep rules compile        # warm the rules cache before the first call
+riskgrep-claude print-config  # prints a settings.json fragment
+```
+
+Merge the printed fragment into `~/.claude/settings.json` by hand: a `PreToolUse` hook entry and deny rules that keep the agent from editing `~/.config/riskgrep/`. The full behaviour, decision rules, time budget, and what was verified against Claude Code is in [`docs/claude-code.md`](docs/claude-code.md).
+
+## Configuration
+
+Settings are layered: built-in defaults, then `~/.config/riskgrep/config.toml` (both platforms), then the repository's `.riskgrep.toml`, then command-line options. Example:
+
+```toml
+trusted_repos = ["/Users/me/work/project"]
+
+[claude_code.thresholds.secret]
+ask = 80
+deny = 95
+
+[git.block_at]
+secret = 85
+
+[limits]
+walk_files = 20000
+```
+
+Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weights (`weight_overrides`), and list paths and rules to ignore (`[ignore]`).
+
+Trust: the Claude Code hook reads a repository's `.riskgrep.toml` and `.riskgrep-baseline.json` only when the repository is listed in `trusted_repos` in the user config. An agent can write files in a repository, so an untrusted repository file is never allowed to loosen the checks. The command line and the git hook read the repository files without this restriction. `trusted_repos` in a repository file is ignored.
+
+The cache (compiled rules and per-file evidence, with no file content) is in `~/Library/Caches/riskgrep` on macOS and `$XDG_CACHE_HOME/riskgrep` or `~/.cache/riskgrep` on Linux.
+
+## Accuracy
+
+`cargo xtask eval` measures the shipped release binary against a generated corpus and 55,876 files from 13 pinned public repositories. The release bar is at most 1 flagged file per 1,000 ordinary files per category, 100% recall for provider-specific secrets and biometric file formats, and at least 90% for generic secrets; the current numbers meet it, and the measurements, corpus, and caveats are in [`eval/README.md`](eval/README.md). The recall figures on generated positives are circular by construction, and the public-repository figures are the better estimate of false positives.
+
+Latency is checked by `cargo xtask bench` against the targets in [`bench/targets.toml`](bench/targets.toml) (for example, a cached hook call under 5 ms at the 95th percentile).
+
+## Known limitations
+
+What RiskGrep does not detect, what it may flag wrongly, and why is listed in [Known limitations](docs/known-limitations.md). Read it before relying on a score.
+
+## Development
+
+```sh
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo xtask eval --skip-oss    # synthetic corpus only; omit the flag to include public repositories
+cargo xtask bench              # needs hyperfine
+```
+
+CI (`.github/workflows/ci.yml`) runs the same checks on macOS and Ubuntu.
+
+## Licence
+
+MIT or Apache-2.0, at your option: see [`LICENSE-MIT`](LICENSE-MIT) and [`LICENSE-APACHE`](LICENSE-APACHE). The `secrets-core` ruleset is converted from gitleaks (MIT); see `rulesets/secrets-core/UPSTREAM.md`.
