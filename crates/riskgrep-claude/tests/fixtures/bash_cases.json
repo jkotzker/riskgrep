@@ -2763,5 +2763,89 @@
       "a.txt"
     ],
     "expect_unresolved": true
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: gh pr view 12",
+    "command": "gh pr view 12",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: gh issue view 3 --comments",
+    "command": "gh issue view 3 --comments",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: gh run view 99 --log",
+    "command": "gh run view 99 --log",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: npm view react version",
+    "command": "npm view react version",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: pnpm view lodash",
+    "command": "pnpm view lodash",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: aws batch describe-jobs --jobs x",
+    "command": "aws batch describe-jobs --jobs x",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: go build ./cmd/view",
+    "command": "go build ./cmd/view",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: pytest tests/view",
+    "command": "pytest tests/view",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: less app/view",
+    "command": "less app/view",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: make R",
+    "command": "make R",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: docker run --rm img at",
+    "command": "docker run --rm img at",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "measured negative: argument word is not an interpreter: kubectl get pods -n ex",
+    "command": "kubectl get pods -n ex",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": false
   }
 ]

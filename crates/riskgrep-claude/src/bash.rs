@@ -355,19 +355,16 @@ fn nesting_estimate(src: &str) -> usize {
 
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash"];
 const INTERPRETERS: &[&str] = &[
-    "node",
-    "nodejs",
-    "ruby",
-    "perl",
-    "php",
-    "deno",
-    "bun",
-    "npx",
-    "tsx",
-    "ts-node",
-    // Interpreters whose inline code (`-e`, `-Command`) or script file can
-    // open any file, and programs that run commands from a script, a
-    // queue, or standard input.
+    "node", "nodejs", "ruby", "perl", "php", "deno", "bun", "npx", "tsx", "ts-node",
+];
+/// Interpreters whose inline code (`-e`, `-Command`) or script file can open
+/// any file, and programs that run commands from a script, a queue, or
+/// standard input. They are unresolved only in command position: as an
+/// argument, names like `view`, `at`, `ex`, and `R` are ordinary words
+/// (`gh pr view 12`, `docker run img at`), so [`executor_scan`] does not use
+/// this list. The cost: an unknown wrapper that runs one of them
+/// (`somewrapper lua a.txt`) is not flagged.
+const COMMAND_ONLY: &[&str] = &[
     "osascript",
     "lua",
     "luajit",
@@ -943,8 +940,14 @@ const PLAIN: &[&str] = &[
 /// Programs with their own scripting language that can read any file.
 const SCRIPTED: &[&str] = &["sed", "gsed", "awk", "gawk", "mawk", "nawk", "perl"];
 
+/// Interpreter names recognised anywhere in a command line.
 fn is_interpreter(name: &str) -> bool {
     name.starts_with("python") || INTERPRETERS.contains(&name) || SCRIPTED.contains(&name)
+}
+
+/// Interpreter names recognised in command position.
+fn is_command_interpreter(name: &str) -> bool {
+    is_interpreter(name) || COMMAND_ONLY.contains(&name)
 }
 
 /// The class rule for a command this module does not otherwise know: a
@@ -1434,7 +1437,7 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
                 _ => st.unresolved = true,
             }
         }
-        n if is_interpreter(n)
+        n if is_command_interpreter(n)
             || (n == "uv" && literal(rest.first()).as_deref() == Some("run")) =>
         {
             st.unresolved = true;

@@ -95,9 +95,13 @@ pub fn repo_root_from_env(cwd: &Path) -> Option<PathBuf> {
     )
 }
 
-/// Git's boolean spellings: `1`, `true`, `yes`, `on` (any case).
+/// Git's `git_env_bool`: `true`, `yes`, `on` (any case), or any non-zero
+/// integer.
 fn is_true(v: &str) -> bool {
-    matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    if matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "on") {
+        return true;
+    }
+    v.trim().parse::<i64>().is_ok_and(|n| n != 0)
 }
 
 #[cfg(test)]
@@ -226,10 +230,10 @@ mod tests {
 
     #[test]
     fn git_boolean_spellings() {
-        for v in ["1", "true", "TRUE", "yes", "On"] {
+        for v in ["1", "2", "-1", "true", "TRUE", "yes", "On"] {
             assert!(is_true(v), "{v}");
         }
-        for v in ["0", "false", "", "no", "off", "2"] {
+        for v in ["0", "false", "", "no", "off", "x"] {
             assert!(!is_true(v), "{v}");
         }
     }
