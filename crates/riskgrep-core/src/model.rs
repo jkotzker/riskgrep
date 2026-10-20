@@ -17,7 +17,10 @@ fn ser_scores<S: Serializer>(m: &BTreeMap<Category, f64>, s: S) -> Result<S::Ok,
 #[serde(transparent)]
 pub struct Category(pub String);
 
-/// Byte offsets into the scanned content; lines are 1-based.
+/// Byte offsets into the file (for formats read selectively, such as tensor
+/// headers, into the bytes read); lines are 1-based, and 0 when unknown:
+/// evidence in the tail sample of a partly read text file has file offsets
+/// but no line numbers, because the lines it skipped were not counted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Location {
     pub start: u64,
@@ -47,8 +50,10 @@ pub struct Evidence {
     pub count: u32,
     pub locations: Vec<Location>,
     pub shape: Vec<ShapeFacts>,
-    /// One BLAKE3 digest of the matched bytes per location; empty for
-    /// structural rules. Never serialized.
+    /// One BLAKE3 digest per location: of the matched bytes, or, for rules
+    /// decided by a whole-content post-processor (tensor headers), of all
+    /// the bytes scanned. Location-free evidence (path and condition-only
+    /// rules) carries one digest of all the bytes scanned. Never serialized.
     #[serde(skip)]
     pub fingerprints: Vec<[u8; 32]>,
 }

@@ -171,6 +171,48 @@ fn edited_secret_line_is_blocked() {
         .stderr(predicate::str::contains("(aws_access_token, line 7)"));
 }
 
+/// Filler text just over the 8 MiB text limit, so only its first and last
+/// MiB are read.
+fn big_text() -> String {
+    synth::source_text((8 << 20) + 4096, 3)
+}
+
+#[test]
+fn secret_appended_past_text_limit_is_blocked() {
+    let r = Repo::new();
+    let mut text = big_text();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    r.write("big.txt", &text);
+    r.stage("big.txt");
+    r.git(&["commit", "-q", "--no-verify", "-m", "big"]);
+    // Only the appended line is new; it lies in the tail sample.
+    text.push_str(&format!("id = \"{}\"\n", key(40)));
+    r.write("big.txt", &text);
+    r.stage("big.txt");
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("big.txt: secret 95.0"));
+}
+
+#[test]
+fn new_file_with_secret_past_text_limit_is_blocked() {
+    let r = Repo::new();
+    let mut text = big_text();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&format!("id = \"{}\"\n", key(41)));
+    r.write("new.txt", &text);
+    r.stage("new.txt");
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("new.txt: secret 95.0"));
+}
+
 #[test]
 fn deletions_only_allowed() {
     let r = Repo::new();

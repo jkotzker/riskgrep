@@ -289,14 +289,149 @@ fn grep_defaults_to_cwd() {
 }
 
 #[test]
-fn grep_honours_gitignore_and_skips_hidden() {
+fn grep_honours_gitignore_and_skips_vcs_directories() {
+    // Claude Code 2.1.301 runs rg with `--hidden` and `--glob !NAME` for
+    // each of these directories; `.gitignore` still applies.
     let e = Env::new();
     e.git_init();
     e.write(".gitignore", b"skipped/\n");
     e.write("skipped/emb.safetensors", &embedding());
-    e.write(".hidden/emb.safetensors", &embedding());
+    for vcs in [".git", ".svn", ".hg", ".bzr", ".jj", ".sl"] {
+        e.write(&format!("{vcs}/emb.safetensors"), &embedding());
+    }
     e.write("clean.txt", b"fine\n");
     e.run("Grep", json!({ "pattern": "x" })).silent();
+}
+
+#[test]
+fn grep_searches_hidden_files() {
+    let e = Env::new();
+    e.write("h/.env", aws_file().as_bytes());
+    e.write("h/readme.md", b"hello\n");
+    let (d, reason) = e
+        .run("Grep", json!({ "pattern": "x", "path": e.dir().join("h") }))
+        .decision();
+    assert_eq!(d, "ask");
+    assert!(reason.contains("h/.env scored secret 95.0"), "{reason}");
+
+    e.write("k/.aws/credentials", aws_file().as_bytes());
+    let (d, reason) = e
+        .run("Grep", json!({ "pattern": "x", "path": e.dir().join("k") }))
+        .decision();
+    assert_eq!(d, "ask");
+    assert!(
+        reason.contains("k/.aws/credentials scored secret 95.0"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn grep_glob_splits_like_claude_code() {
+    let e = Env::new();
+    e.write("g/x.env", aws_file().as_bytes());
+    e.write("g/y.md", b"hello\n");
+    let dir = e.dir().join("g");
+    e.run(
+        "Grep",
+        json!({ "pattern": "x", "path": dir, "glob": "*.md" }),
+    )
+    .silent();
+    for glob in ["*.md,*.env", "*.md *.env", "*.{md,env}", " *.md,, *.env "] {
+        let (d, reason) = e
+            .run("Grep", json!({ "pattern": "x", "path": dir, "glob": glob }))
+            .decision();
+        assert_eq!(d, "ask", "glob {glob:?}");
+        assert!(reason.contains("x.env scored secret 95.0"), "{reason}");
+    }
+}
+
+#[test]
+fn grep_path_is_trimmed_and_tilde_expanded() {
+    let e = Env::new();
+    let home = e.home.path();
+    fs::create_dir_all(home.join("proj")).unwrap();
+    fs::write(home.join("proj/a.txt"), aws_file()).unwrap();
+    for path in ["~/proj", " ~/proj ", "~/proj/a.txt", "~"] {
+        let (d, reason) = e
+            .run("Grep", json!({ "pattern": "x", "path": path }))
+            .decision();
+        assert_eq!(d, "ask", "path {path:?}");
+        assert!(reason.contains("proj/a.txt scored secret 95.0"), "{reason}");
+    }
+}
+
+#[test]
+fn read_on_a_directory_is_ignored() {
+    let e = Env::new();
+    e.write("d/config.env", aws_file().as_bytes());
+    e.run("Read", json!({ "file_path": e.dir().join("d") }))
+        .silent();
+}
+
+#[test]
+fn config_error_reason_names_position_not_content() {
+    let e = Env::new();
+    e.user_config("[claude_code]\nbogus_key = 1\n");
+    let f = e.write("a.txt", b"hello\n");
+    let (d, reason) = e.run("Read", json!({ "file_path": f })).decision();
+    assert_eq!(d, "ask");
+    let cfg = e.home.path().join(".config/riskgrep/config.toml");
+    assert_eq!(
+        reason,
+        format!(
+            "RiskGrep: configuration error (invalid config {} at line 2, column 1)",
+            cfg.display()
+        )
+    );
+}
+
+#[test]
+fn bash_home_pwd_and_tilde_are_expanded() {
+    let e = Env::new();
+    let home = e.home.path();
+    fs::create_dir_all(home.join("proj")).unwrap();
+    fs::write(home.join("proj/a.txt"), aws_file()).unwrap();
+    e.write("a.txt", aws_file().as_bytes());
+    for command in [
+        "cat \"$PWD/a.txt\"",
+        "cat ${PWD}/a.txt",
+        "cat $HOME/proj/a.txt",
+        "cat \"${HOME}\"/proj/a.txt",
+        "cat ~/proj/a.txt",
+    ] {
+        let (d, reason) = e.run("Bash", json!({ "command": command })).decision();
+        assert_eq!(d, "ask", "{command}");
+        assert!(reason.contains("a.txt scored secret 95.0"), "{reason}");
+    }
+}
+
+#[test]
+fn bash_home_pwd_stay_unresolved_after_a_change() {
+    let e = Env::new();
+    let home = e.home.path();
+    fs::create_dir_all(home.join("proj")).unwrap();
+    fs::write(home.join("proj/a.txt"), aws_file()).unwrap();
+    e.write("a.txt", aws_file().as_bytes());
+    e.write("d/a.txt", b"hello\n");
+    let commands = [
+        "HOME=/x cat $HOME/proj/a.txt",
+        "export HOME=/x; cat ~/proj/a.txt",
+        "cd d && cat $PWD/a.txt",
+        "pushd d; cat \"$PWD/a.txt\"",
+    ];
+    // Under the default `on_unresolved = "allow"` nothing is scanned.
+    for command in commands {
+        e.run("Bash", json!({ "command": command })).silent();
+    }
+    e.user_config("[claude_code]\non_unresolved = \"deny\"\n");
+    for command in commands {
+        let (d, reason) = e.run("Bash", json!({ "command": command })).decision();
+        assert_eq!(d, "deny", "{command}");
+        assert_eq!(
+            reason, "RiskGrep: command reads files that could not be determined",
+            "{command}"
+        );
+    }
 }
 
 #[test]

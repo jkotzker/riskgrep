@@ -473,7 +473,7 @@ fn install_hook(a: HookArgs) -> Result<i32, CliError> {
     drop(f);
     // The creation mode is subject to the umask.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
-    println!("installed {}", path.display());
+    outln!("installed {}", path.display())?;
     Ok(EXIT_OK)
 }
 

@@ -103,7 +103,12 @@ fn condition_only_rule_counts_once() {
     let ev = scan(&e, "dir/speaker.voiceprint.bin", b"anything");
     assert_eq!(ev.len(), 1);
     assert_eq!(ev[0].count, 1);
-    assert!(ev[0].locations.is_empty() && ev[0].fingerprints.is_empty());
+    assert!(ev[0].locations.is_empty());
+    // Location-free evidence carries one digest: the scanned content's.
+    assert_eq!(
+        ev[0].fingerprints,
+        vec![*blake3::hash(b"anything").as_bytes()]
+    );
     assert!(scan(&e, "dir/other.bin", b"anything").is_empty());
 }
 
@@ -180,6 +185,9 @@ fn tensor_header_rule_emits_shape() {
     );
     let ev = scan(&e, "f", &c);
     assert_eq!(ev[0].count, 1);
+    // The verdict depends on the whole header, so the location's digest is
+    // the content's, not the anchor's (which every such file shares).
+    assert_eq!(ev[0].fingerprints, vec![*blake3::hash(&c).as_bytes()]);
     assert_eq!(
         ev[0].shape,
         vec![ShapeFacts::Tensor {

@@ -113,23 +113,44 @@ impl Cache {
     }
 
     fn try_open(dir: &Path) -> Result<Cache, String> {
-        crate::paths::ensure_private_dir(dir).map_err(|e| format!("directory: {e}"))?;
-        let meta = std::fs::metadata(dir).map_err(|e| format!("directory: {e}"))?;
         // SAFETY: geteuid has no preconditions and cannot fail.
-        if meta.uid() != unsafe { libc::geteuid() } {
+        let euid = unsafe { libc::geteuid() };
+        // One stat on the common path (the directory exists); create it only
+        // when missing.
+        let meta = match std::fs::metadata(dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                crate::paths::ensure_private_dir(dir).map_err(|e| format!("directory: {e}"))?;
+                std::fs::metadata(dir)
+            }
+            other => other,
+        }
+        .map_err(|e| format!("directory: {e}"))?;
+        if !meta.is_dir() {
+            return Err("directory: not a directory".into());
+        }
+        if meta.uid() != euid {
             return Err("directory is not owned by the current user".into());
+        }
+        if meta.mode() & 0o077 != 0 {
+            std::fs::set_permissions(dir, Permissions::from_mode(0o700))
+                .map_err(|e| format!("directory: {e}"))?;
         }
         let file = dir.join(DB_NAME);
         // Create the file private before SQLite does; the -wal/-shm siblings
-        // inherit the main file's mode.
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&file)
-            .map_err(|e| format!("database file: {e}"))?;
-        std::fs::set_permissions(&file, Permissions::from_mode(0o600))
-            .map_err(|e| format!("database file mode: {e}"))?;
+        // inherit the main file's mode. An existing private file of ours
+        // needs neither an open nor a chmod.
+        let private = std::fs::symlink_metadata(&file)
+            .is_ok_and(|m| m.file_type().is_file() && m.uid() == euid && m.mode() & 0o077 == 0);
+        if !private {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(&file)
+                .map_err(|e| format!("database file: {e}"))?;
+            std::fs::set_permissions(&file, Permissions::from_mode(0o600))
+                .map_err(|e| format!("database file mode: {e}"))?;
+        }
         let conn = Connection::open(&file).map_err(|e| format!("open: {e}"))?;
         // Wait for other first-time openers. The busy handler does not cover
         // every step of the WAL switch, so a busy error also retries the setup.

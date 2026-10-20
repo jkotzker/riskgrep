@@ -937,7 +937,7 @@
   },
   {
     "name": "parameter expansion in a path",
-    "command": "cat $HOME/.netrc",
+    "command": "cat $SECRETS/.netrc",
     "cwd_files": [],
     "expect_files": [],
     "expect_unresolved": true
@@ -1879,7 +1879,7 @@
   },
   {
     "name": "unbroken (( subshell with an expansion",
-    "command": "((cat $HOME/.ssh/id_rsa) )",
+    "command": "((cat $KEYS/.ssh/id_rsa) )",
     "cwd_files": [],
     "expect_files": [],
     "expect_unresolved": true
@@ -2847,5 +2847,173 @@
     "cwd_files": [],
     "expect_files": [],
     "expect_unresolved": false
+  },
+  {
+    "name": "PWD: quoted $PWD is the working directory",
+    "command": "cat \"$PWD/a.txt\"",
+    "cwd_files": ["a.txt"],
+    "expect_files": ["a.txt"],
+    "expect_unresolved": false
+  },
+  {
+    "name": "PWD: unquoted ${PWD}",
+    "command": "cat ${PWD}/a.txt",
+    "cwd_files": ["a.txt"],
+    "expect_files": ["a.txt"],
+    "expect_unresolved": false
+  },
+  {
+    "name": "PWD: quoted $PWD with an unquoted glob",
+    "command": "cat \"$PWD\"/*.txt",
+    "cwd_files": ["a.txt", "b.txt", "c.md"],
+    "expect_files": ["a.txt", "b.txt"],
+    "expect_unresolved": false
+  },
+  {
+    "name": "PWD: in an input redirection",
+    "command": "wc -l < $PWD/a.txt",
+    "cwd_files": ["a.txt"],
+    "expect_files": ["a.txt"],
+    "expect_unresolved": false
+  },
+  {
+    "name": "PWD: in a substitution body",
+    "command": "echo $(cat $PWD/a.txt)",
+    "cwd_files": ["a.txt"],
+    "expect_files": ["a.txt"],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: in an sh -c payload",
+    "command": "sh -c 'cat \"$PWD/a.txt\"'",
+    "cwd_files": ["a.txt"],
+    "expect_files": ["a.txt"],
+    "expect_unresolved": false
+  },
+  {
+    "name": "PWD: another variable is not PWD",
+    "command": "cat $PWDX/a.txt",
+    "cwd_files": ["a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: an operator form is unknown",
+    "command": "cat ${PWD:-/x}/a.txt",
+    "cwd_files": ["a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: after cd",
+    "command": "cd d && cat $PWD/a.txt",
+    "cwd_files": ["a.txt", "d/a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: cd later in the line (loops run later text first)",
+    "command": "for i in 1 2; do cat \"$PWD/a.txt\"; cd d; done",
+    "cwd_files": ["a.txt", "d/a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: pushd",
+    "command": "pushd d; cat $PWD/a.txt",
+    "cwd_files": ["a.txt", "d/a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: builtin cd",
+    "command": "builtin cd d; cat $PWD/a.txt",
+    "cwd_files": ["a.txt", "d/a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: cd inside a function",
+    "command": "f() { cd d; }; f; cat $PWD/a.txt",
+    "cwd_files": ["a.txt", "d/a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: assigned",
+    "command": "PWD=/x; cat $PWD/a.txt",
+    "cwd_files": ["a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: exported",
+    "command": "export PWD=/x; cat \"$PWD/a.txt\"",
+    "cwd_files": ["a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: unset",
+    "command": "unset PWD; cat $PWD/a.txt",
+    "cwd_files": ["a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: eval may change it",
+    "command": "eval true; cat $PWD/a.txt",
+    "cwd_files": ["a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: a command name that is not literal may be cd",
+    "command": "$CMD d; cat $PWD/a.txt",
+    "cwd_files": ["a.txt", "d/a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: export with an argument that is not literal",
+    "command": "export \"$V=/x\"; cat $PWD/a.txt",
+    "cwd_files": ["a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: IFS changes how an unquoted expansion splits",
+    "command": "IFS=/; cat $PWD/a.txt",
+    "cwd_files": ["a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: a payload run through sudo may have another directory",
+    "command": "sudo sh -c 'cat $PWD/a.txt'",
+    "cwd_files": ["a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: a payload run after cd",
+    "command": "cd d && sh -c 'cat $PWD/a.txt'",
+    "cwd_files": ["a.txt", "d/a.txt"],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: a change inside a payload does not reach the outer shell",
+    "command": "cat $PWD/a.txt; sh -c 'cd d'",
+    "cwd_files": ["a.txt", "d/a.txt"],
+    "expect_files": ["a.txt"],
+    "expect_unresolved": true
+  },
+  {
+    "name": "PWD: cd does not affect a word that does not use PWD",
+    "command": "cat a.txt; cd d",
+    "cwd_files": ["a.txt", "d/a.txt"],
+    "expect_files": ["a.txt"],
+    "expect_unresolved": true
   }
 ]

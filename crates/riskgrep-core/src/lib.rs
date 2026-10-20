@@ -10,6 +10,7 @@ pub mod paths;
 pub mod post;
 pub mod repo;
 pub mod ruleset;
+mod ruleset_digest;
 pub mod scanner;
 pub mod score;
 pub mod suppress;

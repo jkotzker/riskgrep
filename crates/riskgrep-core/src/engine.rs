@@ -167,10 +167,18 @@ impl Engine {
 
         let mut found: Vec<(String, Evidence)> = Vec::new();
         let mut lines: Option<LineIndex> = None;
+        // Digest of the whole content, for evidence its matched bytes do not
+        // identify (see `Evidence::fingerprints`).
+        let mut whole_digest: Option<[u8; 32]> = None;
+        let mut content_digest =
+            || *whole_digest.get_or_insert_with(|| *blake3::hash(content).as_bytes());
         for rule in results.matching_rules() {
             let key = format!("{}:{}", rule.namespace(), rule.identifier());
             let chain = self.chain(&key).map_err(ScanError::Yara)?;
             let meta = &self.bundle.meta[&key];
+            // A whole-content verdict matches on a shared anchor (a magic
+            // number), so the content, not the anchor, identifies it.
+            let by_content = chain.iter().any(|p| p.whole_content());
             let mut has_anchor = false;
             let mut ranges = Vec::new();
             // A range-producing processor replaces the pattern matches: the
@@ -263,8 +271,11 @@ impl Engine {
                         line_start,
                         line_end,
                     });
-                    ev.fingerprints
-                        .push(*blake3::hash(&content[range]).as_bytes());
+                    ev.fingerprints.push(if by_content {
+                        content_digest()
+                    } else {
+                        *blake3::hash(&content[range]).as_bytes()
+                    });
                     for s in shapes {
                         if !ev.shape.contains(&s) {
                             ev.shape.push(s);
@@ -275,6 +286,8 @@ impl Engine {
                 if ev.count == 0 {
                     continue;
                 }
+            } else {
+                ev.fingerprints.push(content_digest());
             }
             found.push((key, ev));
         }
