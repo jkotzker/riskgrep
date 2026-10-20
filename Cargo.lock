@@ -1629,6 +1629,8 @@ version = "0.1.0"
 dependencies = [
  "brush-parser",
  "glob",
+ "ignore",
+ "riskgrep-core",
  "serde",
  "serde_json",
  "tempfile",
