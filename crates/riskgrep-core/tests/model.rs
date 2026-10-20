@@ -175,3 +175,26 @@ fn fingerprints_not_serialized() {
     let s = serde_json::to_string(&e).unwrap();
     assert!(!s.contains("fingerprints"));
 }
+
+#[test]
+fn tensor_name_is_never_serialized() {
+    let f = ShapeFacts::Tensor {
+        dtype: "F32".into(),
+        shape: vec![1, 192],
+        name: Some("speaker_embedding".into()),
+    };
+    let json = serde_json::to_string(&f).unwrap();
+    assert!(
+        !json.contains("speaker_embedding") && !json.contains("name"),
+        "{json}"
+    );
+    let back: ShapeFacts = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        back,
+        ShapeFacts::Tensor {
+            dtype: "F32".into(),
+            shape: vec![1, 192],
+            name: None
+        }
+    );
+}

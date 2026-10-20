@@ -1618,6 +1618,7 @@ dependencies = [
  "predicates",
  "regex",
  "riskgrep-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

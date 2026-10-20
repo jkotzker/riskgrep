@@ -21,6 +21,8 @@ struct World {
     files: Vec<PathBuf>,
 }
 
+/// Binaries are taken from `<target>/debug`; a `--release` test run needs
+/// `cargo build --bins` (debug) first, which this function runs itself.
 fn target_bin(name: &str) -> PathBuf {
     static BUILD: OnceLock<()> = OnceLock::new();
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -42,6 +44,7 @@ fn target_bin(name: &str) -> PathBuf {
 
 struct Out {
     label: String,
+    code: Option<i32>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
@@ -79,6 +82,7 @@ impl World {
         t.join().unwrap();
         Out {
             label: label.to_string(),
+            code: o.status.code(),
             stdout: o.stdout,
             stderr: o.stderr,
         }
@@ -158,6 +162,27 @@ fn world() -> &'static World {
             needles.extend(needles_for(kind, &secret));
         }
         let floats = synth::printed_floats(256, FloatStyle::JsonArray);
+        let tok = Regex::new(r"-?\d+\.\d+").unwrap();
+        let toks: Vec<&[u8]> = tok
+            .find_iter(floats.as_bytes())
+            .map(|m| m.as_bytes())
+            .collect();
+        assert_eq!(toks.len(), 256);
+        for i in [0usize, 100, 255] {
+            needles.push(("printed embedding float".to_string(), toks[i].to_vec()));
+        }
+        for i in [0usize, 100] {
+            needles.push((
+                "printed embedding float run".to_string(),
+                format!(
+                    "{},\n    {},\n    {}",
+                    String::from_utf8_lossy(toks[i]),
+                    String::from_utf8_lossy(toks[i + 1]),
+                    String::from_utf8_lossy(toks[i + 2])
+                )
+                .into_bytes(),
+            ));
+        }
         let p = work.join("embedding.json");
         fs::write(&p, &floats).unwrap();
         files.push(p);
@@ -167,9 +192,15 @@ fn world() -> &'static World {
         ]);
         // First 24 bytes of tensor data, after the 8-byte length and header.
         let hlen = u64::from_le_bytes(st[..8].try_into().unwrap()) as usize;
+        let window = st[8 + hlen..8 + hlen + 24].to_vec();
+        assert!(
+            window.iter().any(|b| *b != window[0]),
+            "tensor data window is constant"
+        );
+        needles.push(("safetensors tensor data".to_string(), window));
         needles.push((
-            "safetensors tensor data".to_string(),
-            st[8 + hlen..8 + hlen + 24].to_vec(),
+            "safetensors tensor name".to_string(),
+            b"speaker_embedding".to_vec(),
         ));
         let p = work.join("emb.safetensors");
         fs::write(&p, &st).unwrap();
@@ -202,6 +233,32 @@ fn names(files: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
+/// Every way `bytes` leaks: a needle's bytes, or a run of 8+ printed floats.
+/// Messages name the kind, never the value.
+fn find_leaks(label: &str, bytes: &[u8], needles: &[NeedlePair], float_run: &Regex) -> Vec<String> {
+    let mut v = Vec::new();
+    for (kind, n) in needles {
+        if contains(bytes, n) {
+            v.push(format!("{label}: contains a generated `{kind}` value"));
+        }
+    }
+    if float_run.is_match(bytes) {
+        v.push(format!("{label}: contains a run of 8 or more floats"));
+    }
+    v
+}
+
+fn check_bytes(
+    w: &World,
+    label: &str,
+    bytes: &[u8],
+    float_run: &Regex,
+    failures: &mut Vec<String>,
+) {
+    let needles = &w.needles;
+    failures.extend(find_leaks(label, bytes, needles, float_run));
+}
+
 fn check(w: &World, out: &Out, float_run: &Regex, failures: &mut Vec<String>) {
     for (what, bytes) in [("stdout", &out.stdout), ("stderr", &out.stderr)] {
         check_bytes(
@@ -214,21 +271,28 @@ fn check(w: &World, out: &Out, float_run: &Regex, failures: &mut Vec<String>) {
     }
 }
 
-fn check_bytes(
-    w: &World,
-    label: &str,
-    bytes: &[u8],
-    float_run: &Regex,
-    failures: &mut Vec<String>,
-) {
-    for (kind, n) in &w.needles {
-        if contains(bytes, n) {
-            failures.push(format!("{label}: contains a generated `{kind}` value"));
-        }
-    }
-    if float_run.is_match(bytes) {
-        failures.push(format!("{label}: contains a run of 8 or more floats"));
-    }
+fn float_regex() -> Regex {
+    Regex::new(r"(-?\d+\.\d+[,\s\]\[]+){8,}").unwrap()
+}
+
+#[test]
+fn checker_reports_planted_needle_and_float_run() {
+    let needles = vec![("planted".to_string(), b"PLANTED-VALUE-123".to_vec())];
+    let clean = find_leaks("o", b"nothing here 95.0", &needles, &float_regex());
+    assert!(clean.is_empty(), "{clean:?}");
+    let hit = find_leaks("o", b"x PLANTED-VALUE-123 y", &needles, &float_regex());
+    assert_eq!(hit, vec!["o: contains a generated `planted` value"]);
+    let run = "[0.123456, 0.234567, 0.345678, 0.456789, 0.567891, 0.678912, 0.789123, 0.891234]";
+    let hit = find_leaks("o", run.as_bytes(), &needles, &float_regex());
+    assert_eq!(hit, vec!["o: contains a run of 8 or more floats"]);
+    let seven = "[0.123456, 0.234567, 0.345678, 0.456789, 0.567891, 0.678912, 0.789123]";
+    assert!(find_leaks("o", seven.as_bytes(), &needles, &float_regex()).is_empty());
+}
+
+fn find<'a>(outs: &'a [Out], label: &str) -> &'a Out {
+    outs.iter()
+        .find(|o| o.label == label)
+        .unwrap_or_else(|| panic!("no output labelled `{label}`"))
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -245,7 +309,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 #[test]
 fn no_value_leaves_the_process() {
     let w = world();
-    let float_run = Regex::new(r"(-?\d+\.\d+[,\s\]\[]+){8,}").unwrap();
+    let float_run = float_regex();
     let mut failures = Vec::new();
     let mut outs: Vec<Out> = Vec::new();
 
@@ -306,22 +370,108 @@ fn no_value_leaves_the_process() {
             b"",
         ));
     }
-    let json_scan = &outs[1];
+    // The JSON report must show a finding of the expected category per file.
+    let json_scan = find(&outs, "scan json files");
+    let report: serde_json::Value =
+        serde_json::from_slice(&json_scan.stdout).expect("scan json is JSON");
+    let targets = report["targets"].as_array().expect("targets array");
+    let mut expect: Vec<(String, String, &str)> = FAKE_SECRET_KINDS
+        .iter()
+        .map(|k| {
+            (
+                k.to_string(),
+                format!("{k}.txt"),
+                if NO_FINDING.contains(k) {
+                    "none"
+                } else {
+                    "secret"
+                },
+            )
+        })
+        .collect();
+    expect.push((
+        "printed embedding".into(),
+        "embedding.json".into(),
+        "biometric",
+    ));
+    expect.push((
+        "safetensors embedding".into(),
+        "emb.safetensors".into(),
+        "biometric",
+    ));
+    for (kind, file, cat) in &expect {
+        let t = targets
+            .iter()
+            .find(|t| {
+                t["target"]
+                    .as_str()
+                    .is_some_and(|n| n.ends_with(file.as_str()))
+            })
+            .unwrap_or_else(|| panic!("scan json has no target for kind `{kind}`"));
+        let ev = t["evidence"].as_array().expect("evidence array");
+        if *cat == "none" {
+            assert!(
+                t["status"] == "scanned" && ev.is_empty(),
+                "kind `{kind}` is expected to be scanned with no finding"
+            );
+        } else {
+            let found = ev.iter().any(|e| e["category"] == *cat);
+            assert!(found, "scan json has no `{cat}` finding for kind `{kind}`");
+        }
+    }
+
+    // A hook call must decide for every file whose scan score reaches the
+    // default ask thresholds (secret 90, biometric 75).
+    let must_decide: Vec<String> = targets
+        .iter()
+        .filter(|t| {
+            t["scores"]["secret"].as_f64().unwrap_or(0.0) >= 90.0
+                || t["scores"]["biometric"].as_f64().unwrap_or(0.0) >= 75.0
+        })
+        .filter_map(|t| t["target"].as_str())
+        .map(|n| n.rsplit('/').next().unwrap().to_string())
+        .collect();
     assert!(
-        json_scan.stdout.len() > 100,
-        "scan json produced no report; the guard would be vacuous"
+        must_decide.len() >= 9,
+        "too few files reach a hook threshold"
     );
-    let report = String::from_utf8_lossy(&json_scan.stdout);
-    assert!(
-        report.contains("secret") && report.contains("biometric"),
-        "scan json reports no secret/biometric finding; the guard would be vacuous"
-    );
+
+    // Each other scan shows a nonzero score; --fail-above exits 1.
+    let nonzero = Regex::new(r"[1-9]\d*\.\d").unwrap();
+    for fmt in ["json", "text"] {
+        for what in ["files (no cache)", "files", "dir", "stdin", "fail-above"] {
+            let label = format!("scan {fmt} {what}");
+            let o = find(&outs, &label);
+            assert!(!o.stdout.is_empty(), "{label}: empty stdout");
+            let shows = if fmt == "json" {
+                serde_json::from_slice::<serde_json::Value>(&o.stdout)
+                    .ok()
+                    .and_then(|v| v["summary"]["scores"].as_object().cloned())
+                    .is_some_and(|m| m.values().any(|x| x.as_f64().unwrap_or(0.0) > 0.0))
+            } else {
+                nonzero.is_match(&o.stdout)
+            };
+            assert!(shows, "{label}: no nonzero score shown");
+        }
+        let label = format!("scan {fmt} fail-above");
+        assert_eq!(find(&outs, &label).code, Some(1), "{label}: exit status");
+    }
 
     // baseline.
     let baseline = w.work.join("baseline.json");
     let mut args = vec!["baseline", "--out", baseline.to_str().unwrap()];
     args.extend(all.iter().map(String::as_str));
     outs.push(w.run("baseline", "riskgrep", &w.work, &args, b""));
+    let bl = find(&outs, "baseline");
+    assert_eq!(bl.code, Some(0), "baseline exit status");
+    let msg =
+        String::from_utf8_lossy(&bl.stdout).to_string() + &String::from_utf8_lossy(&bl.stderr);
+    let count: usize = msg
+        .split_once("wrote ")
+        .and_then(|(_, r)| r.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .expect("baseline reports a fingerprint count");
+    assert!(count > 0, "baseline wrote no fingerprints");
     let baseline_bytes = fs::read(&baseline).expect("baseline file written");
     assert!(baseline_bytes.len() > 20, "baseline file is empty");
     check_bytes(
@@ -359,6 +509,12 @@ fn no_value_leaves_the_process() {
         ),
     ] {
         outs.push(w.run(label, "riskgrep", &repo, &args, b""));
+        let o = outs.last().unwrap();
+        assert_eq!(o.code, Some(1), "{label}: exit status");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("riskgrep: "),
+            "{label}: names no finding"
+        );
     }
 
     // riskgrep-claude: Read, Grep (directory), Bash.
@@ -383,6 +539,13 @@ fn no_value_leaves_the_process() {
         "Grep",
         serde_json::json!({ "pattern": "key", "path": w.work }),
     ));
+    for o in outs.iter().filter(|o| o.label.starts_with("hook ")) {
+        let decided = String::from_utf8_lossy(&o.stdout).contains("permissionDecision");
+        let must =
+            o.label == "hook Grep dir" || must_decide.iter().any(|f| o.label.ends_with(f.as_str()));
+        assert!(!must || decided, "{}: no permissionDecision", o.label);
+        assert_eq!(o.code, Some(0), "{}: exit status", o.label);
+    }
     let emb = w.work.join("emb.safetensors");
     let hook_emb = w.hook(
         "hook Read emb",
@@ -418,6 +581,42 @@ fn no_value_leaves_the_process() {
         }
     }
     assert!(saw_db, "no evidence.sqlite under the isolated HOME");
+    assert_evidence_rows(w.home.path());
 
     assert!(failures.is_empty(), "leaks found:\n{}", failures.join("\n"));
+}
+
+/// Kinds the rules deliberately do not flag (documentation-example key,
+/// low-entropy value); the test requires them to be scanned with no finding.
+const NO_FINDING: &[&str] = &["aws_example_key", "low_entropy_generic"];
+
+/// Open a COPY of the cache database (with -wal/-shm) read-only and assert
+/// the evidence table has rows; the live database is never opened.
+fn assert_evidence_rows(home: &Path) {
+    let mut found = Vec::new();
+    walk(home, &mut found);
+    let db = found
+        .iter()
+        .find(|p| p.file_name().is_some_and(|n| n == "evidence.sqlite"))
+        .expect("evidence.sqlite");
+    assert!(
+        fs::metadata(db).unwrap().len() > 0,
+        "evidence.sqlite is empty"
+    );
+    let copy = tempfile::tempdir().unwrap();
+    for suffix in ["", "-wal", "-shm"] {
+        let src = PathBuf::from(format!("{}{suffix}", db.display()));
+        if src.exists() {
+            fs::copy(&src, copy.path().join(format!("evidence.sqlite{suffix}"))).unwrap();
+        }
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        copy.path().join("evidence.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT count(*) FROM evidence", [], |r| r.get(0))
+        .unwrap();
+    assert!(rows > 0, "evidence table has no rows");
 }

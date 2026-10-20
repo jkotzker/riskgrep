@@ -32,7 +32,8 @@ pub enum ShapeFacts {
     Tensor {
         dtype: String,
         shape: Vec<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        /// In memory only: names come from the file and may be personal data.
+        #[serde(skip)]
         name: Option<String>,
     },
 }
