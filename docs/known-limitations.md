@@ -6,8 +6,8 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 ### Embedding banks are found by a name and structure heuristic
 
-- **Not covered:** a bank of speaker or face vectors stored under hierarchical names (for example `model.speakers.0.vec`), or stored alongside more other float tensors than bank vectors. Conversely, a model checkpoint whose parameter names are flat and not on the exclusion lists can be mistaken for a bank.
-- **Why:** a file is treated as a bank when 3 or more tensors (or `.npz` members) share one embedding shape, have flat names, and make up at least half of the file's float tensors. Model checkpoints are excluded by their parameter names (`weight`, `bias`, `kernel`, `scale`, `gamma`, `beta`, `time_mix`, `mixer`, and others) and by layer or index segments in their names. A naming scheme outside those lists is not recognised.
+- **Not covered:** a bank of speaker or face vectors stored under hierarchical names (for example `model.speakers.0.vec`, or `model_p225` with an underscore), or stored alongside at least as many other float tensors as bank vectors. Conversely, a model checkpoint whose parameter names are flat and not on the exclusion lists can be mistaken for a bank.
+- **Why:** a file is treated as a bank when 3 or more tensors (or `.npz` members) share one embedding shape, have flat names, and make up more than half of the file's float tensors. Model checkpoints are excluded by their parameter names (`weight`, `bias`, `kernel`, `scale`, `gamma`, `beta`, `time_mix`, `mixer`, and others) and by layer segments (`layers`, `blocks`, `encoder`, `transformer`, `backbone`, `model`, also when followed by `_`) or dot- or slash-delimited index segments (`.0.`) in their names. Underscore-delimited numbers (`spk_3_emb`, `19_198_0001`) do not exclude a bank. A naming scheme outside those lists is not recognised.
 - **How it shows up:** a missed bank scores 25 to 30, or 70 when one tensor is flat-named; a checkpoint mistaken for a bank scores 94 (deny in Claude Code, blocked by the git hook).
 - **Planned fix:** none decided. Possible approaches are reading the checkpoint's metadata or architecture fields, and extending the exclusion lists as new layouts are found.
 
@@ -16,6 +16,13 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **Not covered:** a single embedding saved in safetensors or `.npz` under a name containing a parameter word (`kernel`, `scale`, `beta`, …) or a layer or index segment (`encoder.0.out`, `vec_1_a`).
 - **Why:** the same name exclusions that keep model checkpoints out apply to the single-tensor rules.
 - **How it shows up:** the file scores 25 (safetensors) or 30 (`.npz`) instead of 70; it is not flagged.
+- **Planned fix:** none decided.
+
+### Single embeddings under underscore-indexed identity keys
+
+- **Not covered:** a file holding one or two embeddings under a key with an underscore-delimited number, such as `spk_12_emb`, `speaker_0_vec`, or LibriSpeech-style `19_198_0001`.
+- **Why:** the single-tensor rules treat `_N_` as an index segment, so they ignore such names. This keeps reference-vector archives in the style of scipy's FFT test data (members `dct_1_128`, `dst_2_256`, …) from scoring 70; the bank rules do not apply that exclusion, so 3 or more such vectors are still found.
+- **How it shows up:** the file scores 25 (safetensors) or 30 (`.npz`) and is not flagged, unless the key is also an embedding name in safetensors (`speaker_0_vec` scores 85 by name).
 - **Planned fix:** none decided.
 
 ### Embedding widths outside the configured list
@@ -48,9 +55,16 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 ### Flat-named float arrays of an embedding width are flagged
 
-- **Not covered (false positive):** ordinary numeric arrays in `.npy` or `.npz` files whose last dimension happens to be an embedding width, such as benchmark or test data.
+- **Not covered (false positive):** ordinary numeric arrays in `.npy`, `.npz`, or safetensors files whose last dimension happens to be an embedding width, such as benchmark or test data, a Gaussian mixture's `means` [8, 192], or a small numpy MLP's flat-named biases (`b1` [256]).
 - **Why:** an unnamed array of an embedding width cannot be told apart from an embedding by its header.
-- **How it shows up:** a score of 70 (ask in Claude Code; below the git hook's block threshold of 75). In the evaluation's 55,876 public-repository files, 4 such files were flagged.
+- **How it shows up:** a score of 70 (ask in Claude Code; below the git hook's block threshold of 75). In the evaluation's 55,876 public-repository files, 4 such files were flagged; the evaluation's flat-MLP probe scores 70 (ask), never deny, in all 10 files.
+- **Planned fix:** none decided.
+
+### Printed float arrays of an embedding width in test code
+
+- **Not covered (false positive):** test files that print expected values as one bracketed float array whose length is an embedding width.
+- **Why:** a printed array of 128, 256, 512, … floats looks the same whether it is an embedding or a test's expected output.
+- **How it shows up:** a score of 60 (ask in Claude Code; not blocked by the git hook). In the evaluation's public repositories one file was flagged: transformers' RoPE utility test.
 - **Planned fix:** none decided.
 
 ## Secrets
@@ -68,3 +82,11 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **Why:** the generic rule only accepts key names ending in `secret`, `password`, `token`, `credential(s)`, `creds`, `auth`, an `…_key` form such as `api_key` or `access_key`, or an uppercase `[A-Z0-9_]+_KEY`; broader names flagged too many ordinary files.
 - **How it shows up:** no evidence is reported; provider-specific rules still find credentials in a provider's own format.
 - **Planned fix:** none decided.
+
+### Generic secret assignments in test code and documentation
+
+- **Not covered (false positive):** credential-named assignments with placeholder or test values in test code, test configuration, and documentation (for example `api_key = "..."` in a test fixture or a tutorial).
+- **Why:** the generic rule sees a credential-named key with a random-looking value and cannot tell a test value from a real one.
+- **How it shows up:** a score of 80 (blocked by the git hook; below Claude Code's ask threshold of 90). In the evaluation's 55,876 public-repository files, 21 such files were flagged, most of the 25 secret false positives (0.45 per 1,000).
+- **Planned fix:** none decided.
+

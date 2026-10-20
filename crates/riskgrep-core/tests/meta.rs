@@ -124,18 +124,18 @@ fn meta_rejects_bad_bank_keys() {
         ("min_bank = 0", "min_bank"),
         ("min_bank = 1", "min_bank"),
         ("min_bank = 3\nmin_bank_share = 0", "min_bank_share"),
-        ("min_bank = 3\nmin_bank_share = 101", "min_bank_share"),
+        ("min_bank = 3\nmin_bank_share = 100", "min_bank_share"),
         ("min_bank_share = 50", "min_bank_share"),
     ] {
         let e = parse(&format!("{base}\n{keys}")).unwrap_err();
         assert!(e.0.contains(needle), "{keys}: {e}");
     }
-    let m = parse(&format!("{base}\nmin_bank = 2\nmin_bank_share = 100")).unwrap();
+    let m = parse(&format!("{base}\nmin_bank = 2\nmin_bank_share = 99")).unwrap();
     assert!(matches!(
         m.post[0],
         PostSpec::SafetensorsHeader {
             min_bank: Some(2),
-            min_bank_share: Some(100),
+            min_bank_share: Some(99),
             ..
         }
     ));

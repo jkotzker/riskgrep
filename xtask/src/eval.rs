@@ -98,6 +98,7 @@ pub const PROBE_KINDS: &[&str] = &[
     "probe_bank_of_2",
     "probe_bank_mixed_shapes",
     "probe_bank_offlist_width",
+    "probe_flat_mlp",
 ];
 
 /// Generated hard-negative families.
@@ -126,6 +127,8 @@ pub const BIOMETRIC_KINDS: &[&str] = &[
     "floats_json",
     "bank_safetensors",
     "bank_npz",
+    "bank_indexed_safetensors",
+    "bank_indexed_npz",
 ];
 
 // ---- synthetic corpus --------------------------------------------------------
@@ -148,6 +151,7 @@ pub fn corpus() -> Vec<Sample> {
     banks(&mut out);
     probes(&mut out);
     bank_probes(&mut out);
+    mlp_probes(&mut out);
     negatives(&mut out);
     checkpoints(&mut out);
     existing_negatives(&mut out);
@@ -392,19 +396,34 @@ fn bank_key(style: usize, k: usize) -> String {
     }
 }
 
+/// Identity keys with an underscore-delimited number: `spk_N_emb`,
+/// `speaker_N_vec`, or LibriSpeech-style `19_198_NNNN`.
+fn indexed_bank_key(style: usize, k: usize) -> String {
+    match style % 3 {
+        0 => format!("spk_{k}_emb"),
+        1 => format!("speaker_{k}_vec"),
+        _ => format!("19_198_{k:04}"),
+    }
+}
+
 /// Embedding banks: one identically shaped vector per identity.
 fn banks(out: &mut Vec<Sample>) {
+    bank_set(out, "", &bank_key);
+    bank_set(out, "indexed_", &indexed_bank_key);
+}
+
+fn bank_set(out: &mut Vec<Sample>, tag: &str, key: &dyn Fn(usize, usize) -> String) {
     let shapes: [&[u64]; 4] = [&[192], &[1, 256], &[3, 256], &[512]];
     for i in 0..PER_FORMAT {
         let n = BANK_SIZES[i % BANK_SIZES.len()];
         let shape = shapes[(i / BANK_SIZES.len()) % shapes.len()];
-        let keys: Vec<String> = (0..n).map(|k| bank_key(i, k + i)).collect();
+        let keys: Vec<String> = (0..n).map(|k| key(i, k + i)).collect();
         let t: Vec<(&str, &str, &[u64])> =
             keys.iter().map(|k| (k.as_str(), "F32", shape)).collect();
         out.push(sample(
             Group::Biometric,
-            "bank_safetensors",
-            format!("store_{i}.safetensors"),
+            &format!("bank_{tag}safetensors"),
+            format!("{tag}store_{i}.safetensors"),
             synth::safetensors(&t),
         ));
         let members: Vec<(String, Vec<u8>)> = keys
@@ -417,8 +436,8 @@ fn banks(out: &mut Vec<Sample>) {
             .collect();
         out.push(sample(
             Group::Biometric,
-            "bank_npz",
-            format!("store_{i}.npz"),
+            &format!("bank_{tag}npz"),
+            format!("{tag}store_{i}.npz"),
             synth::npz(&refs),
         ));
     }
@@ -469,6 +488,40 @@ fn bank_probes(out: &mut Vec<Sample>) {
             "probe_bank_offlist_width",
             format!("store_{i}.safetensors"),
             st(&names, &shapes),
+        ));
+    }
+}
+
+/// Flat numpy MLPs (`W1`..`W4`, `b1`..`b4`) whose hidden width is an
+/// embedding width: the biases are exactly half of the float tensors, so not
+/// a bank, but each flat bias is an embedding-shaped tensor (known
+/// limitation: ask, not deny).
+fn mlp_probes(out: &mut Vec<Sample>) {
+    for i in 0..10 {
+        let w = EMBED_DIMS[i % EMBED_DIMS.len()];
+        let mut mlp = vec![
+            ("W1".to_string(), "<f4", vec![784u64, w]),
+            ("b1".to_string(), "<f4", vec![w]),
+        ];
+        for l in 2..=4 {
+            mlp.push((format!("W{l}"), "<f4", vec![w, w]));
+            mlp.push((format!("b{l}"), "<f4", vec![w]));
+        }
+        let bytes = if i % 2 == 0 {
+            npz_header_only(&mlp)
+        } else {
+            let st: Vec<(String, &str, Vec<u64>)> = mlp
+                .iter()
+                .map(|(n, _, s)| (n.clone(), "F32", s.clone()))
+                .collect();
+            safetensors_header_only(&st)
+        };
+        let ext = if i % 2 == 0 { "npz" } else { "safetensors" };
+        out.push(sample(
+            Group::ProbeBiometric,
+            "probe_flat_mlp",
+            format!("mlp_{i}.{ext}"),
+            bytes,
         ));
     }
 }

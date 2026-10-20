@@ -424,10 +424,10 @@ fn bank_share_counts_every_float_tensor() {
         safetensors(&format!("{{{}}}", items.join(",")))
     };
     assert!(kept(&p.apply(&file(0), 0..8)));
-    // 3 of 6 float tensors: exactly half.
-    assert!(kept(&p.apply(&file(3), 0..8)));
-    // 3 of 7: under half. The integer tensor never counts.
-    assert_eq!(p.apply(&file(4), 0..8), PostResult::Drop);
+    // 3 of 5 float tensors: more than half. The integer tensor never counts.
+    assert!(kept(&p.apply(&file(2), 0..8)));
+    // 3 of 6: exactly half is not enough.
+    assert_eq!(p.apply(&file(3), 0..8), PostResult::Drop);
 }
 
 #[test]
@@ -466,8 +466,8 @@ fn npz_exclusions_and_bank_share() {
         let refs: Vec<(&str, Vec<u8>)> = m.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
         npz(&refs)
     };
-    assert_eq!(tensor(&bank.apply(&store(3), 0..4)).2, Some("spk_0"));
-    assert_eq!(bank.apply(&store(4), 0..4), PostResult::Drop);
+    assert_eq!(tensor(&bank.apply(&store(2), 0..4)).2, Some("spk_0"));
+    assert_eq!(bank.apply(&store(3), 0..4), PostResult::Drop);
     // Excluded members never join a bank.
     let refs: Vec<(String, Vec<u8>)> = (0..4)
         .map(|i| (format!("dct_{i}_192.npy"), npy("<f8", "(192,)")))

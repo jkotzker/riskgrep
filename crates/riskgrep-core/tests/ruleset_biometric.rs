@@ -365,7 +365,7 @@ fn banks_need_flat_keys_and_a_majority() {
             .iter()
             .any(|r| r == "safetensors_embedding_bank" || r == "npz_embedding_bank")
     };
-    let flat: [&dyn Fn(usize) -> String; 6] = [
+    let flat: [&dyn Fn(usize) -> String; 10] = [
         &|i| format!("speakers/p{}", 225 + i),
         &|i| format!("faces.{i}"),
         &|i| format!("p{}", 225 + i),
@@ -373,16 +373,26 @@ fn banks_need_flat_keys_and_a_majority() {
         &|i| format!("spk_{i}"),
         // Contains `beta`, but not as a token.
         &|i| format!("Betancourt_{i}"),
+        // Identity keys with an underscore-delimited number.
+        &|i| format!("spk_{i}_emb"),
+        &|i| format!("speaker_{i}_vec"),
+        &|i| format!("19_198_{i:04}"),
+        &|i| format!("h_lee_{i}"),
     ];
     for keys in flat {
         let names: Vec<Tensor> = (0..5).map(|i| t(&keys(i), "F32", &[192])).collect();
         let data = st_header(&names);
         assert!(flagged(&data, "s.safetensors"), "{}", keys(0));
-        // 94 by the bank rule; 97 when the key is also an embedding name.
+        // At least the deny threshold: 94 with the single-tensor rule, 85
+        // for underscore-indexed keys (the single-tensor rule ignores them),
+        // 97 when the key is also an embedding name.
         let score = biometric(&f, "s.safetensors", &data).unwrap_or(0.0);
-        assert!(score >= 94.0, "{}: {score}", keys(0));
+        assert!(score >= 75.0, "{}: {score}", keys(0));
         let npz: Vec<Tensor> = (0..5).map(|i| t(&keys(i), "<f4", &[192])).collect();
-        assert!(flagged(&npz_headers(&npz), "s.npz"), "{} (npz)", keys(0));
+        let data = npz_headers(&npz);
+        assert!(flagged(&data, "s.npz"), "{} (npz)", keys(0));
+        let score = biometric(&f, "s.npz", &data).unwrap_or(0.0);
+        assert!(score >= 75.0, "{} (npz): {score}", keys(0));
     }
     let layered: [&dyn Fn(usize) -> String; 4] = [
         &|i| format!("encoder.layer.{i}.out"),
@@ -402,6 +412,16 @@ fn banks_need_flat_keys_and_a_majority() {
         mixed.push(t(&format!("aux{i}"), "F32", &[7]));
     }
     assert!(!flagged(&st_header(&mixed), "s.safetensors"));
+    // A flat MLP: 4 biases [256] are exactly half of 8 float tensors, and 3
+    // weights [256, 256] less than half. Neither is a bank.
+    let mut mlp = vec![t("W1", "F32", &[784, 256]), t("b1", "F32", &[256])];
+    for l in 2..=4 {
+        mlp.push(t(&format!("W{l}"), "F32", &[256, 256]));
+        mlp.push(t(&format!("b{l}"), "F32", &[256]));
+    }
+    assert!(!flagged(&st_header(&mlp), "m.safetensors"));
+    let npz: Vec<Tensor> = mlp.iter().map(|(n, _, s)| t(n, "<f4", s)).collect();
+    assert!(!flagged(&npz_headers(&npz), "m.npz"));
 }
 
 #[test]

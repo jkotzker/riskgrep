@@ -11,10 +11,11 @@
 // (`time_mix`, `time_decay`, `time_first`), Mamba (`mixer`, `A_log`,
 // `dt_bias`, `conv1d`), ViT (`cls`), and model-embedding names. The unnamed
 // and bank rules also ignore hierarchical names: a layer or block segment
-// (`layers`, `blocks`, `h`, `encoder`, `encoderblock_0`, `transformer`,
-// `backbone`, `model`) or an index segment between separators (`.0.`,
-// `_1_`); identity keys are flat (`p225`, `person_000`, `spk_12`,
-// `faces.0`, `speakers/p225`).
+// (`layers`, `blocks`, `encoder`, `encoderblock_0`, `transformer`,
+// `backbone`, `model`) or an index segment between separators. The
+// single-tensor rules count `_` as a separator (`dct_1_128`); the bank rules
+// do not, so identity keys such as `spk_3_emb` and `19_198_0001` still form
+// a bank, as do `p225`, `person_000`, `faces.0`, and `speakers/p225`.
 
 rule npy_embedding_tensor {
   meta:
@@ -54,15 +55,15 @@ rule npz_embedding_tensor {
     post = "npz_members"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|h|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
   strings:
     $hdr = { 50 4B 03 04 }
   condition:
     $hdr at 0
 }
 
-// Several flat-named members of one identical embedding shape making up at
-// least half of the archive's float members: one vector per person. Not in
+// Several flat-named members of one identical embedding shape making up
+// more than half of the archive's float members: one vector per person. Not in
 // family `npz`, so it adds to the single-tensor rules.
 rule npz_embedding_bank {
   meta:
@@ -71,7 +72,7 @@ rule npz_embedding_bank {
     post = "npz_members"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|h|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[./][0-9]+[./])"
     min_bank = 3
     min_bank_share = 50
   strings:
@@ -126,7 +127,7 @@ rule safetensors_embedding_tensor {
     post = "safetensors_header"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|h|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
   strings:
     $hdr = { 7B 22 }
   condition:
@@ -134,7 +135,7 @@ rule safetensors_embedding_tensor {
 }
 
 // An embedding bank: three or more such tensors of one identical shape,
-// flat-named and at least half of the file's float tensors (a speaker or
+// flat-named and more than half of the file's float tensors (a speaker or
 // face store keyed by identity). Not in family `safetensors`, so it adds to
 // the rules above.
 rule safetensors_embedding_bank {
@@ -144,7 +145,7 @@ rule safetensors_embedding_bank {
     post = "safetensors_header"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|h|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[./][0-9]+[./])"
     min_bank = 3
     min_bank_share = 50
   strings:

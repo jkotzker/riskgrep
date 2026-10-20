@@ -84,10 +84,10 @@ fn npy_float(data: &[u8]) -> Option<(String, Vec<u64>)> {
 }
 
 /// A bank of `count` identically shaped tensors qualifies when it has at
-/// least `min` tensors and, with `share` (percent), makes up at least that
+/// least `min` tensors and, with `share` (percent), makes up more than that
 /// share of the file's `floats` float tensors.
 fn bank_qualifies(count: u64, floats: u64, min: u64, share: Option<u64>) -> bool {
-    count >= min && share.is_none_or(|s| count.saturating_mul(100) >= s.saturating_mul(floats))
+    count >= min && share.is_none_or(|s| count.saturating_mul(100) > s.saturating_mul(floats))
 }
 
 fn excluded(re: Option<&Regex>, name: &str) -> bool {
@@ -130,7 +130,7 @@ pub struct NpzMembers {
     pub exclude_name_regex: Option<Regex>,
     /// Require at least this many qualifying members of one identical shape.
     pub min_bank: Option<u64>,
-    /// With `min_bank`: the bank must be at least this percentage of the
+    /// With `min_bank`: the bank must be more than this percentage of the
     /// archive's float members.
     pub min_bank_share: Option<u64>,
 }
@@ -199,7 +199,7 @@ pub struct SafetensorsHeader {
     /// Require at least this many qualifying tensors of one identical shape
     /// (an embedding bank: one vector per person).
     pub min_bank: Option<u64>,
-    /// With `min_bank`: the bank must be at least this percentage of the
+    /// With `min_bank`: the bank must be more than this percentage of the
     /// file's float tensors.
     pub min_bank_share: Option<u64>,
 }

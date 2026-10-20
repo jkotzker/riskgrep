@@ -135,8 +135,8 @@ impl<'a> Raw<'a> {
         }
     }
 
-    /// `min_bank` (at least 2) and `min_bank_share` (a percentage, 1 to 100,
-    /// only with `min_bank`).
+    /// `min_bank` (at least 2) and `min_bank_share` (a percentage, 1 to 99,
+    /// only with `min_bank`; the bank must exceed it).
     fn bank(&self) -> Result<(Option<u64>, Option<u64>), MetaError> {
         let min = self.uint("min_bank")?;
         if min.is_some_and(|n| n < 2) {
@@ -144,8 +144,8 @@ impl<'a> Raw<'a> {
         }
         let share = self.uint("min_bank_share")?;
         match share {
-            Some(s) if !(1..=100).contains(&s) => {
-                Err(self.err("`min_bank_share` must be a percentage from 1 to 100"))
+            Some(s) if !(1..=99).contains(&s) => {
+                Err(self.err("`min_bank_share` must be a percentage from 1 to 99"))
             }
             Some(_) if min.is_none() => Err(self.err("`min_bank_share` requires `min_bank`")),
             _ => Ok((min, share)),
