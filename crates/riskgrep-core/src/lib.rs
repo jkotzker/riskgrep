@@ -8,6 +8,7 @@ pub mod meta;
 pub mod model;
 pub mod paths;
 pub mod post;
+pub mod repo;
 pub mod ruleset;
 pub mod scanner;
 pub mod score;

@@ -15,18 +15,20 @@ jobs:
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # rust-toolchain.toml pins the channel and components.
+      # Installs the channel and components named in rust-toolchain.toml
+      # (stable, clippy, rustfmt) and makes them the default for this job.
       - name: Install Rust toolchain
-        run: rustup show
+        run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -57,9 +59,13 @@ jobs:
             sudo apt-get install -y hyperfine
           fi
 
-      # Targets are absolute, but the regression check needs a baseline from
-      # the same OS. Skip, with a message, until one is committed.
-      - name: Benchmarks
+      # Informational on hosted runners: the p95 targets are for the
+      # reference machine, and shared runners are slower and noisier, so a
+      # miss here is a signal to look at, not a failure. The local
+      # `cargo xtask bench` is the gate. The regression check also needs a
+      # baseline from the same OS; skip, with a message, until one is committed.
+      - name: Benchmarks (informational)
+        continue-on-error: true
         shell: bash
         run: |
           os=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')

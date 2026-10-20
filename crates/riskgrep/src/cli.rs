@@ -122,8 +122,15 @@ pub struct HookArgs {
 pub enum RulesCommand {
     /// List every enabled rule: namespace, rule id, category, weight
     List,
-    /// Compile all enabled rulesets and validate every rule's post-processors
-    Compile,
+    /// Compile the rulesets the Claude Code hook uses, validate every rule's
+    /// post-processors, and store the bundle in the cache (warm-up)
+    Compile {
+        /// Use the rulesets of this repository's `.riskgrep.toml` as well
+        /// (default: the user configuration only, as the hook resolves them
+        /// outside a trusted repository)
+        #[arg(long)]
+        repo: bool,
+    },
     /// Run the cases in each embedded ruleset's tests.toml
     Test,
 }

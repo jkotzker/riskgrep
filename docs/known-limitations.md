@@ -39,8 +39,8 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 ### Embedding banks are found by a name and structure heuristic
 
 - **Not covered:** a bank of speaker or face vectors stored under hierarchical names (for example `model.speakers.0.vec`, or `model_p225` with an underscore), or stored alongside at least as many other float tensors as bank vectors. Conversely, a model checkpoint whose parameter names are flat and not on the exclusion lists can be mistaken for a bank.
-- **Why:** a file is treated as a bank when 3 or more tensors (or `.npz` members) share one embedding shape, have flat names, and make up more than half of the file's float tensors. Model checkpoints are excluded by their parameter names (`weight`, `bias`, `kernel`, `scale`, `gamma`, `beta`, `time_mix`, `mixer`, and others) and by layer segments (`layers`, `blocks`, `encoder`, `transformer`, `backbone`, `model`, also when followed by `_`) or dot- or slash-delimited index segments (`.0.`) in their names. Underscore-delimited numbers (`spk_3_emb`, `19_198_0001`) do not exclude a bank. A naming scheme outside those lists is not recognised.
-- **How it shows up:** a missed bank scores 25 to 30, or 70 when one tensor is flat-named; a checkpoint mistaken for a bank scores 94 (deny in Claude Code, blocked by the git hook).
+- **Why:** a file is treated as a bank when 3 or more tensors (or `.npz` members) share one embedding shape, have flat names, and make up more than half of the file's float tensors. Model checkpoints are excluded by their parameter names (`weight`, `bias`, `kernel`, `scale`, `gamma`, `beta`, `time_mix`, `mixer`, and others) and by layer segments (`layers`, `blocks`, `encoder`, `transformer`, `backbone`, `model`, also when followed by `_`) or dot- or slash-delimited index segments (`.0.`) in their names. Underscore-delimited numbers (`spk_3_emb`, `19_198_0001`) do not exclude a bank. A naming scheme outside those lists is not recognised. For example, a GPT-2 style checkpoint with flat names `h0_ln_1_g`, `h0_ln_1_b`, `h0_ln_2_g`, and `h0_ln_2_b`, all of shape [768], scores 86 (deny in Claude Code, blocked by the git hook); a unit test pins this.
+- **How it shows up:** a missed bank scores 25 to 30, or 70 when one tensor is flat-named; a checkpoint mistaken for a bank scores 86 to 94 (deny in Claude Code, blocked by the git hook).
 - **Planned fix:** none decided. Possible approaches are reading the checkpoint's metadata or architecture fields, and extending the exclusion lists as new layouts are found.
 
 ### Unnamed tensors with parameter-like or hierarchical names are not treated as embeddings
@@ -150,6 +150,41 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** a score of 80 (blocked by the git hook; below Claude Code's ask threshold of 90). In the evaluation's 55,876 public-repository files, 21 such files were flagged, most of the 25 secret false positives (0.45 per 1,000).
 - **Planned fix:** none decided.
 
+### Paths on gitleaks' global allowlist are never scanned for secrets
+
+- **Not covered:** secrets in files whose path matches gitleaks' global path allowlist: any path containing `gitleaks.toml`; `node_modules/`, `bower_components/`, `vendor/` Go module directories, and Ruby and Python library directories; lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Pipfile.lock`, `poetry.lock`, `go.sum`, `gradle.lockfile`); `gradlew` and `mvnw` wrappers; and files ending in `.bin`, `.pdf`, `.docx`, `.xlsx`, `.exe`, `.dll`, font and image extensions. The list is `gitleaks_global_path_allowlist` in `rulesets/secrets-core/gitleaks.yar` (lines 9 to 30).
+- **Why:** it is converted unchanged from gitleaks, whose defaults assume that vendored and generated files hold no first-party secrets.
+- **How it shows up:** no evidence for a secret placed in such a path, including a real one in a file named like a lockfile or inside `node_modules/`. A path containing `gitleaks.toml` is skipped wherever it is.
+- **Planned fix:** none decided; the exclusions could be made configurable per ruleset.
+
+### The `true|false|null` value allowlist drops any value containing `false`
+
+- **Not covered:** a generic-rule value that contains the text `false` (or starts with `true`, or ends with `null`).
+- **Why:** gitleaks' allowlist is written `(?:(?i)^true|false|null$)`. The alternation binds looser than the anchors, so it reads "starts with `true`, or contains `false`, or ends with `null`" rather than "is exactly `true`, `false`, or `null`". The converter keeps the expression.
+- **How it shows up:** a random-looking value that happens to contain `false` (case-insensitive) is not reported by the rules that carry this allowlist.
+- **Planned fix:** none decided; anchoring the three alternatives is a local change to the converter.
+
+### DER private keys in two layouts are not matched
+
+- **Not covered:** PKCS#8 keys with a short-form length (`30 81 ?? 02 01 00`, for example many EC keys) and PKCS#8 Ed25519 keys (`30 2e 02 01 00`), in `.der` and `.key` files. The rule recognises PKCS#1 and PKCS#8 with a two-byte length, SEC1 EC keys, and the PKCS#12 header.
+- **Why:** the header pattern in `rulesets/secrets-core/keystores.yar` lists the layouts that were checked; these two were not.
+- **How it shows up:** the file is a binary of unknown format and is skipped. PEM-encoded versions of the same keys are found.
+- **Planned fix:** none decided; adding the two header forms is a small rule change.
+
+### Generic and weight-80 secrets never prompt in Claude Code by default
+
+- **Not covered:** the generic secret rule and the provider rules that need context score 80. The default Claude Code threshold for `secret` is `ask` at 90 with no `deny`, so these hits do not prompt. The git hook blocks at 80.
+- **Why:** the weights were set so that the git hook (block at 80) flags them while a Claude Code prompt is reserved for provider-specific formats (95) and private keys; the evaluation's false-positive rate depends on that split.
+- **How it shows up:** a file with only a generic credential assignment is blocked at commit but read by the agent without a prompt. Lower `claude_code.thresholds.secret.ask` to 80 to prompt on them, at the cost of the 21 generic false positives in the evaluation corpus.
+- **Planned fix:** none decided.
+
+### Embedding names with a parameter suffix are not flagged by name
+
+- **Not covered:** a tensor whose name contains an embedding word and also a parameter word (for example `speaker_embedding.weight`, `face_embedding.bias`).
+- **Why:** the named safetensors rule ignores parameter-like names anywhere (`weight`, `bias`, `running_mean`, `in_proj`, and others) so that model layers named like embeddings are not flagged; the exclusion wins over the embedding word.
+- **How it shows up:** the file scores 25 (the generic float-tensor rule) instead of 85.
+- **Planned fix:** none decided.
+
 ### Provider coverage is gitleaks v8.30.1 plus local key-store rules
 
 - **Not covered:** credential formats gitleaks does not define or that were added after v8.30.1, internal token formats of the user's own services, and secrets that are encoded, split across lines, built at run time, or stored encrypted.
@@ -210,12 +245,12 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 ## Claude Code hook
 
-### Bash analysis is a static reading of one command line
+### Bash analysis is a static reading of one command line, and unlisted executors are not detected
 
-- **Not covered:** variables, functions, and aliases defined elsewhere; files a program opens at run time; anything a script or interpreter does; commands that run other programs but are not in the command tables; an option missing from the hand-written option tables (which makes the result unresolved, not wrong). Commands over 64 KiB, unparseable, too deeply nested, or too slow fall back to a whitespace split.
-- **Why:** the parser (brush-parser 0.4.0, pinned) sees syntax only, and exact semantics need a shell. Detail and the accepted costs: [`docs/decisions/shell-parser.md`](decisions/shell-parser.md).
-- **How it shows up:** such commands are `unresolved`. The default `on_unresolved = "allow"` lets them run; set `ask` or `deny` to be stricter at the cost of more prompts.
-- **Planned fix:** none; the tables and rules grow with reports. A separate output-redaction tool is the backstop.
+- **Not covered:** variables, functions, and aliases defined elsewhere; files a program opens at run time; anything a script or interpreter does. Commands that run or read other files but are not in the command tables are resolved as if they read nothing: the analysis does not know they are executors, so the command is not marked `unresolved` either. Measured with the release hook and `on_unresolved = "deny"`, each of these produced no decision for a file that scores above the threshold: `osascript a.txt`, `lua a.txt`, `Rscript a.txt`, `pwsh a.txt`, `tmux new -d "cat a.txt"`, `at -f a.txt now`, `sort --files0-from=a.txt`, `LESSOPEN="|cat %s" less a.txt`, the `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, `GIT_CONFIG_VALUE_0` alias mechanism, `vim -s a.txt`, `ed a.txt`, and `yq "load_str(…)"`. Other commands outside the tables behave the same way. Commands over 64 KiB, unparseable, too deeply nested, or too slow fall back to a whitespace split and are `unresolved`.
+- **Why:** the parser (brush-parser 0.4.0, pinned) sees syntax only. Classification is by command name and hand-written option tables, so an executor missing from the tables is invisible; `on_unresolved` applies only to commands the analysis recognises as possibly reading files it cannot name. Detail and the accepted costs: [`docs/decisions/shell-parser.md`](decisions/shell-parser.md).
+- **How it shows up:** no decision, so the command runs. Tightening `on_unresolved` does not close this gap; it only covers the recognised cases (an option missing from a table, a shell or interpreter name in the arguments, `-c`).
+- **Planned fix:** the tables grow with reports, but an enumerated list cannot be complete. The intended backstop is the separate output-redaction tool, which is not part of v1; until then, treat the Bash check as best-effort.
 
 ### Bash command details that are not resolved
 
@@ -233,8 +268,8 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 ### Repository detection is by walking up for `.git`
 
-- **Not covered:** repositories located through `GIT_DIR`, a bare repository with a separate work tree, and a repository above a symlinked `$HOME`. The walk stops before the parent of `$HOME`.
-- **Why:** git is not spawned in the hook, to stay inside the time budget.
+- **Not covered:** repositories located through `GIT_DIR` or `GIT_WORK_TREE` (in the hook), a bare repository with a separate work tree, a repository above a symlinked `$HOME`, and a repository whose root or `.git` is owned by another user. The walk stops before the parent of `$HOME` and at `GIT_CEILING_DIRECTORIES`, and a working directory inside a `.git` directory has no repository.
+- **Why:** git is not spawned in the hook, to stay inside the time budget, and the walk is made no laxer than git's own: it applies git's ceilings, refuses `.git` interiors, and requires ownership by the effective user (the analogue of git's `safe.directory`).
 - **How it shows up:** the directory is treated as having no repository, so its `.riskgrep.toml` and baseline are not read (the stricter outcome, because an untrusted repository is never allowed to loosen the checks).
 - **Planned fix:** none decided.
 
@@ -246,6 +281,13 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **Planned fix:** none.
 
 ## Git hook and command line
+
+### The command line finds the repository by the same walk
+
+- **Not covered:** the command line (`scan`, `baseline`, `rules`) finds the repository root with the in-process walk used by the hook, not with `git rev-parse`, unless `GIT_DIR` or `GIT_WORK_TREE` is set (then git is asked). The same exclusions apply as for the hook: a root owned by another user, a working directory inside `.git`, and layouts that need git's configuration (`core.worktree`, `safe.directory` entries the user added) are not recognised, and a `.git` entry that is not a valid repository still counts as a root.
+- **Why:** spawning git costs 7 to 9 ms, which was a third of a small scan and put two benchmark targets out of reach. `git pre-commit` still asks git.
+- **How it shows up:** a repository's `.riskgrep.toml` and baseline are not loaded for the command line in those layouts; the user configuration still applies.
+- **Planned fix:** none decided.
 
 ### Type changes are not scanned by the git hook
 

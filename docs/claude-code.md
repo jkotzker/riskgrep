@@ -28,7 +28,7 @@ With several findings the top three by score are listed, followed by `, and N mo
 
 Failures apply `on_error` (default `ask`) and the exit status is always 0. An exit other than 0 or 2 without a JSON decision is a non-blocking error that lets the tool call proceed (fail-open), so a failure can only ask or deny through a JSON decision. This covers malformed hook input, a configuration error (always `ask`), a panic (the default panic message is suppressed), and a scan that exceeds the time budget.
 
-Repository: the root is the nearest ancestor of the hook input's `cwd` (itself included) that holds a `.git` entry, a directory or a file (worktrees and submodules). The walk stops at `/` and before the parent of `$HOME`; git is not spawned. A repository's `.riskgrep.toml` is read only if the user config lists the repository in `trusted_repos`.
+Repository: the root is the nearest ancestor of the hook input's `cwd` (itself included) that holds a `.git` entry, a directory or a file (worktrees and submodules). The walk (shared with the command line, `riskgrep_core::repo`) stops at `/`, before the parent of `$HOME`, and at `GIT_CEILING_DIRECTORIES`; a `cwd` inside a `.git` directory has no repository, and a root (or its `.git`) not owned by the effective user is not a root. Git is not spawned. A repository's `.riskgrep.toml` is read only if the user config lists the repository in `trusted_repos`.
 
 Time budget: one budget (`claude_code.time_budget_ms`, default 2000, capped at one hour) covers the whole call. Bash analysis gets at most 25% of it (at least 50 ms). The scan runs on a worker thread; the main thread waits for the remainder.
 

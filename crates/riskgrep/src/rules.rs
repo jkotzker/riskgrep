@@ -23,7 +23,7 @@ const SCORE_TOLERANCE: f64 = 0.05;
 pub fn run(cmd: RulesCommand) -> Result<i32, CliError> {
     match cmd {
         RulesCommand::List => list(),
-        RulesCommand::Compile => compile(),
+        RulesCommand::Compile { repo } => compile(repo),
         RulesCommand::Test => test(),
     }
 }
@@ -33,6 +33,18 @@ fn enabled() -> Result<(Config, Vec<Ruleset>), CliError> {
     let base = root.or_else(|| std::env::current_dir().ok());
     let sets = resolve_rulesets(&cfg, base.as_deref())?;
     Ok((cfg, sets))
+}
+
+/// The rulesets the Claude Code hook resolves outside a trusted repository:
+/// defaults and the user configuration only.
+fn hook_rulesets() -> Result<Vec<Ruleset>, CliError> {
+    let cfg = riskgrep_core::config::load(
+        riskgrep_core::config::Mode::ClaudeCode,
+        None,
+        Overrides::default(),
+    )?;
+    let base = std::env::current_dir().ok();
+    Ok(resolve_rulesets(&cfg, base.as_deref())?)
 }
 
 fn compile_all(sets: &[Ruleset]) -> Result<Bundle, CliError> {
@@ -58,8 +70,8 @@ fn list() -> Result<i32, CliError> {
     Ok(0)
 }
 
-fn compile() -> Result<i32, CliError> {
-    let (_, sets) = enabled()?;
+fn compile(repo: bool) -> Result<i32, CliError> {
+    let sets = if repo { enabled()?.1 } else { hook_rulesets()? };
     let start = Instant::now();
     // Warm-up: write the bundle and its sidecar to the cache so the next scan
     // and the Claude Code hook start without compiling. With no usable cache
@@ -73,12 +85,18 @@ fn compile() -> Result<i32, CliError> {
         eprintln!("riskgrep: {w}");
     }
     let rules = bundle.meta.len();
+    let bundle_compiled = bundle.compiled;
     let engine = Engine::new(bundle).map_err(|e| CliError(format!("rules: {e}")))?;
     engine
         .validate_all()
         .map_err(|e| CliError(format!("rules: {e}")))?;
+    let verb = if bundle_compiled {
+        "compiled"
+    } else {
+        "already compiled"
+    };
     println!(
-        "compiled {rules} rules from {} rulesets in {} ms",
+        "{verb} {rules} rules from {} rulesets in {} ms",
         sets.len(),
         start.elapsed().as_millis()
     );

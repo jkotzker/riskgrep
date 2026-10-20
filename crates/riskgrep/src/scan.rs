@@ -37,39 +37,15 @@ pub fn repo_root_git() -> Option<PathBuf> {
     (!s.is_empty()).then(|| PathBuf::from(s))
 }
 
-/// The nearest ancestor of `cwd` (itself included) holding a `.git` entry,
-/// a directory or, for worktrees and submodules, a file. The walk does not
-/// ascend into a directory listed in `ceilings` (git's
-/// `GIT_CEILING_DIRECTORIES`). It does not spawn git.
-pub fn find_repo_root(cwd: &Path, ceilings: &[PathBuf]) -> Option<PathBuf> {
-    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    for dir in cwd.ancestors() {
-        if dir != cwd && ceilings.iter().any(|c| c == dir) {
-            break;
-        }
-        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
-            return Some(dir.to_path_buf());
-        }
-    }
-    None
-}
-
 /// The repository root of the working directory, found without spawning git
-/// (a spawn costs about 7 ms, a third of a small scan). With `GIT_DIR` or
-/// `GIT_WORK_TREE` set the layout is not discoverable by walking up, so git
-/// is asked.
+/// (a spawn costs about 7 ms, a third of a small scan); see
+/// [`riskgrep_core::repo`] for the rules. With `GIT_DIR` or `GIT_WORK_TREE`
+/// set the layout is not discoverable by walking up, so git is asked.
 pub fn repo_root() -> Option<PathBuf> {
     if std::env::var_os("GIT_DIR").is_some() || std::env::var_os("GIT_WORK_TREE").is_some() {
         return repo_root_git();
     }
-    let ceilings: Vec<PathBuf> = std::env::var_os("GIT_CEILING_DIRECTORIES")
-        .map(|v| {
-            std::env::split_paths(&v)
-                .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
-                .collect()
-        })
-        .unwrap_or_default();
-    find_repo_root(&std::env::current_dir().ok()?, &ceilings)
+    riskgrep_core::repo::repo_root_from_env(&std::env::current_dir().ok()?)
 }
 
 /// Load the layered configuration for the CLI.
@@ -275,38 +251,6 @@ pub fn baseline(a: BaselineArgs) -> Result<i32, CliError> {
 mod tests {
     use super::*;
     use riskgrep_core::TargetReport;
-
-    #[test]
-    fn repo_root_walks_up_for_a_git_entry() {
-        let d = tempfile::tempdir().unwrap();
-        let top = std::fs::canonicalize(d.path()).unwrap();
-        let sub = top.join("a/b");
-        std::fs::create_dir_all(&sub).unwrap();
-        assert_eq!(find_repo_root(&sub, &[]), None);
-        std::fs::create_dir(top.join(".git")).unwrap();
-        assert_eq!(find_repo_root(&sub, &[]), Some(top.clone()));
-        // A `.git` file (worktree or submodule) counts too.
-        std::fs::remove_dir(top.join(".git")).unwrap();
-        std::fs::write(top.join("a/.git"), "gitdir: elsewhere\n").unwrap();
-        assert_eq!(find_repo_root(&sub, &[]), Some(top.join("a")));
-    }
-
-    #[test]
-    fn repo_root_honours_ceiling_directories() {
-        let d = tempfile::tempdir().unwrap();
-        let top = std::fs::canonicalize(d.path()).unwrap();
-        let sub = top.join("a/b");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::create_dir(top.join(".git")).unwrap();
-        // The ceiling is not ascended into, so the repository above it is hidden.
-        assert_eq!(find_repo_root(&sub, &[top.join("a")]), None);
-        // The starting directory is always examined.
-        std::fs::create_dir(sub.join(".git")).unwrap();
-        assert_eq!(
-            find_repo_root(&sub, std::slice::from_ref(&sub)),
-            Some(sub.clone())
-        );
-    }
 
     fn t(status: TargetStatus, secret: f64) -> TargetReport {
         TargetReport {

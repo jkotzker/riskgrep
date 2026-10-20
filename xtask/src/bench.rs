@@ -65,8 +65,9 @@ pub fn judge(p95: f64, target: f64, baseline: Option<f64>) -> Result<(), Vec<Str
     }
 }
 
-/// Deterministic source-like text of about `bytes` bytes. It contains no
-/// long random strings, so it triggers no rule.
+/// Deterministic source-like text of at most `bytes` bytes (whole lines, so
+/// slightly fewer). It contains no long random strings, so it triggers no
+/// rule.
 fn filler(bytes: usize, seed: usize) -> String {
     const WORDS: [&str; 12] = [
         "handler", "context", "buffer", "result", "request", "index", "record", "stream", "cursor",
@@ -74,14 +75,25 @@ fn filler(bytes: usize, seed: usize) -> String {
     ];
     let mut out = String::with_capacity(bytes + 128);
     let mut i = seed;
-    while out.len() < bytes {
+    loop {
         let (a, b) = (WORDS[i % 12], WORDS[(i / 12 + 5) % 12]);
         out.push_str(&format!(
             "fn {a}_{b}_{i}(ctx: &Context, items: &[Item]) -> usize {{ items.len() + {a}_count(ctx) }}\n"
         ));
         i += 7;
+        if out.len() > bytes {
+            break;
+        }
     }
+    // Drop the line that crossed the limit.
+    let keep = out[..bytes].rfind('\n').map_or(0, |n| n + 1);
+    out.truncate(keep);
     out
+}
+
+/// `s` as one single-quoted shell word.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn os_name() -> &'static str {
@@ -150,8 +162,41 @@ impl Bench {
     /// Shell command that wipes the evidence cache but keeps the bundles.
     fn wipe_command(&self) -> String {
         let db = self.cache.join("evidence.sqlite");
-        let db = db.display();
-        format!("rm -f {db} {db}-wal {db}-shm")
+        let db = db.display().to_string();
+        let files: Vec<String> = [db.clone(), format!("{db}-wal"), format!("{db}-shm")]
+            .iter()
+            .map(|f| shell_quote(f))
+            .collect();
+        format!("rm -f {}", files.join(" "))
+    }
+
+    /// Proves the wipe works before it is relied on: one hook call creates
+    /// the evidence database, the wipe command removes it.
+    fn check_wipe(&self, input: &Path) -> Result<(), String> {
+        let db = self.cache.join("evidence.sqlite");
+        let mut probe = Command::new(&self.claude);
+        probe
+            .current_dir(&self.work)
+            .stdin(fs::File::open(input).map_err(|e| e.to_string())?)
+            .stdout(Stdio::null());
+        self.env(&mut probe);
+        let status = probe
+            .status()
+            .map_err(|e| format!("probe hook call: {e}"))?;
+        if !status.success() {
+            return Err(format!("probe hook call: {status}"));
+        }
+        if !db.exists() {
+            return Err(format!("probe run did not create {}", db.display()));
+        }
+        run_checked(
+            Command::new("sh").arg("-c").arg(self.wipe_command()),
+            "wipe command",
+        )?;
+        if db.exists() {
+            return Err(format!("wipe command left {} behind", db.display()));
+        }
+        Ok(())
     }
 
     /// Runs one case and returns the p95 in milliseconds.
@@ -327,6 +372,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
     let rg = b.riskgrep.display().to_string();
     let cl = b.claude.display().to_string();
+    b.check_wipe(&hook_uncached)?;
     let wipe = b.wipe_command();
     let mut measured: BTreeMap<&str, f64> = BTreeMap::new();
     measured.insert(
@@ -458,7 +504,9 @@ mod tests {
     #[test]
     fn filler_has_the_requested_size() {
         let s = filler(4096, 1);
-        assert!(s.len() >= 4096 && s.len() < 4096 + 256);
+        assert!(s.len() <= 4096 && s.len() > 4096 - 256, "{}", s.len());
+        assert!(s.ends_with('\n'));
+        assert!(filler(64 * 1024, 3).len() <= 65_536);
         assert_eq!(s, filler(4096, 1));
     }
 }

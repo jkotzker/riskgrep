@@ -385,12 +385,93 @@ fn rules_compile_warms_the_bundle_cache() {
         (1, 1),
         "bundle and sidecar written"
     );
-    // A second run reuses the cached bundle.
+    // A second run reuses the cached bundle and says so.
     riskgrep_in(home.path(), cwd.path())
         .args(["rules", "compile"])
         .assert()
-        .code(0);
+        .code(0)
+        .stdout(predicate::str::starts_with("already compiled "));
     assert_eq!(bundle_files(home.path()), (1, 1));
+}
+
+/// Runs `git` in `dir` with a clean environment, for fixtures.
+fn git_in(dir: &Path, args: &[&str]) {
+    let st = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CEILING_DIRECTORIES", dir.parent().unwrap())
+        .status()
+        .unwrap();
+    assert!(st.success(), "git {args:?}");
+}
+
+const LOWER_AWS: &str = "[weight_overrides]\n\"secrets_core:aws_access_token\" = 50\n";
+const AWS_ROW: &str = r"(?m)^secrets_core +aws_access_token +secret +(\d+)$";
+
+fn aws_weight(out: &[u8]) -> String {
+    let text = String::from_utf8_lossy(out);
+    let re = regex::Regex::new(AWS_ROW).unwrap();
+    re.captures(&text).expect("aws row")[1].to_string()
+}
+
+#[test]
+fn repo_config_found_by_walking_up_without_git() {
+    let repo = tempfile::tempdir().unwrap();
+    fs::create_dir_all(repo.path().join(".git")).unwrap();
+    fs::create_dir_all(repo.path().join("a/b")).unwrap();
+    fs::write(repo.path().join(".riskgrep.toml"), LOWER_AWS).unwrap();
+    let out = riskgrep_in(shared_home(), &repo.path().join("a/b"))
+        .env("GIT_CEILING_DIRECTORIES", repo.path().parent().unwrap())
+        .args(["rules", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(aws_weight(&out.stdout), "50");
+}
+
+#[test]
+fn git_dir_is_delegated_to_git() {
+    // cwd is outside the work tree, so only `git rev-parse` can name the root.
+    let repo = tempfile::tempdir().unwrap();
+    git_in(repo.path(), &["init", "-q"]);
+    fs::write(repo.path().join(".riskgrep.toml"), LOWER_AWS).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let out = riskgrep_in(shared_home(), elsewhere.path())
+        .env("GIT_DIR", repo.path().join(".git"))
+        .env("GIT_WORK_TREE", repo.path())
+        .args(["rules", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(aws_weight(&out.stdout), "50");
+    // Without them the same directory has no repository.
+    let out = riskgrep_in(shared_home(), elsewhere.path())
+        .args(["rules", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(aws_weight(&out.stdout), "95");
+}
+
+#[test]
+fn rules_compile_defaults_to_the_hook_rulesets() {
+    // The repository narrows the rulesets; `compile` ignores that unless
+    // `--repo` is given.
+    let repo = tempfile::tempdir().unwrap();
+    fs::create_dir_all(repo.path().join(".git")).unwrap();
+    fs::write(
+        repo.path().join(".riskgrep.toml"),
+        "rulesets = [\"secrets_core\"]\n",
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let o = riskgrep_in(home.path(), repo.path())
+            .env("GIT_CEILING_DIRECTORIES", repo.path().parent().unwrap())
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).to_string()
+    };
+    assert!(run(&["rules", "compile"]).contains("from 2 rulesets"));
+    assert!(run(&["rules", "compile", "--repo"]).contains("from 1 rulesets"));
 }
 
 #[test]

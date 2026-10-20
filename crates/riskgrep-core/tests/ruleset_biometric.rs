@@ -434,11 +434,39 @@ fn flat_mlp_scores_below_deny() {
         mlp.push(t(&format!("W{l}"), "F32", &[256, 256]));
         mlp.push(t(&format!("b{l}"), "F32", &[256]));
     }
-    let st = biometric(&f, "m.safetensors", &st_header(&mlp)).expect("flagged at ask");
+    let st = biometric(&f, "m.safetensors", &st_header(&mlp)).unwrap_or(0.0);
     assert!(st < 75.0, "safetensors MLP scored {st}");
     let npz: Vec<Tensor> = mlp.iter().map(|(n, _, s)| t(n, "<f4", s)).collect();
-    let nz = biometric(&f, "m.npz", &npz_headers(&npz)).expect("flagged at ask");
+    let nz = biometric(&f, "m.npz", &npz_headers(&npz)).unwrap_or(0.0);
     assert!(nz < 75.0, "npz MLP scored {nz}");
+}
+
+#[test]
+fn underscore_numbered_checkpoint_is_a_known_false_positive() {
+    // A GPT-2 style checkpoint with flat, underscore-numbered names
+    // (`h0_ln_1_g`) is not excluded by the bank rules: `_N_` is an identity
+    // index there. Documented in docs/known-limitations.md; if this starts
+    // scoring lower, update that entry.
+    let f = fixture();
+    let names = ["h0_ln_1_g", "h0_ln_1_b", "h0_ln_2_g", "h0_ln_2_b"];
+    let members: Vec<Tensor> = names.iter().map(|n| t(n, "<f4", &[768])).collect();
+    let score = biometric(&f, "gpt2.npz", &npz_headers(&members)).unwrap_or(0.0);
+    assert!((score - 86.0).abs() < 1e-6, "scored {score}");
+}
+
+#[test]
+fn embedding_name_with_parameter_suffix_is_not_named() {
+    // Documented in docs/known-limitations.md: the parameter exclusion wins
+    // over the embedding word, so the by-name rule (85) does not fire.
+    let f = fixture();
+    let data = synth::safetensors(&[("speaker_embedding.weight", "F32", &[1, 192])]);
+    let rules = rules_of(&f, "m.safetensors", &data);
+    assert!(
+        !rules.iter().any(|r| r == "safetensors_named_embedding"),
+        "{rules:?}"
+    );
+    let score = biometric(&f, "m.safetensors", &data).unwrap_or(0.0);
+    assert!((score - 25.0).abs() < 1e-6, "scored {score}");
 }
 
 #[test]

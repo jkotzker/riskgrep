@@ -89,25 +89,6 @@ fn print_config() {
     );
 }
 
-/// The nearest ancestor of `cwd` (itself included) holding a `.git` entry,
-/// a directory or, for worktrees and submodules, a file. The walk stops at
-/// `/` and before the parent of `$HOME`. It does not spawn git.
-fn repo_root(cwd: &Path) -> Option<PathBuf> {
-    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let home_parent = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .and_then(|h| h.parent().map(Path::to_path_buf));
-    for dir in cwd.ancestors() {
-        if home_parent.as_deref() == Some(dir) {
-            break;
-        }
-        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
-            return Some(dir.to_path_buf());
-        }
-    }
-    None
-}
-
 fn run(start: Instant) -> Decision {
     let mut buf = Vec::new();
     let read = std::io::stdin()
@@ -142,7 +123,7 @@ fn run(start: Instant) -> Decision {
     };
     // The scanner resolves relative paths against the process directory.
     let _ = std::env::set_current_dir(&cwd);
-    let root = repo_root(&cwd);
+    let root = riskgrep_core::repo::repo_root_from_env(&cwd);
     let cfg = match config::load(Mode::ClaudeCode, root.as_deref(), Overrides::default()) {
         Ok(c) => c,
         Err(e) => {

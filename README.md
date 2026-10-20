@@ -17,7 +17,7 @@ cargo install --path crates/riskgrep
 cargo install --path crates/riskgrep-claude
 ```
 
-This puts `riskgrep` and `riskgrep-claude` in `~/.cargo/bin`. Run `riskgrep rules compile` once afterwards: it compiles the rules and stores them in the cache directory, so the first scan or hook call does not pay for it (about one second).
+This puts `riskgrep` and `riskgrep-claude` in `~/.cargo/bin`. Run `riskgrep rules compile` once afterwards, from any directory: it compiles the rulesets the Claude Code hook uses (the defaults and your user configuration) and stores them in the cache directory, so the first scan or hook call does not pay for it (about one second). It prints `already compiled` when the cache already holds them. Add `--repo` to compile the rulesets a repository's `.riskgrep.toml` selects instead; run it from inside that repository.
 
 ## Command line
 
@@ -47,7 +47,7 @@ The hook scores the lines added by the staged changes (`--full-files` or `git.fu
 `riskgrep-claude` checks `Read`, `NotebookRead`, `Grep`, and `Bash` tool calls before they run. It finds the files the call would read, scans them, and answers `ask` or `deny` when a score reaches its threshold (defaults: `biometric` ask at 50 and deny at 75, `secret` ask at 90). It never answers `allow`, and any other tool is untouched.
 
 ```sh
-riskgrep rules compile        # warm the rules cache before the first call
+riskgrep rules compile        # warm the rules cache before the first call (any directory)
 riskgrep-claude print-config  # prints a settings.json fragment
 ```
 
@@ -81,7 +81,7 @@ The cache (compiled rules and per-file evidence, with no file content) is in `~/
 
 `cargo xtask eval` measures the shipped release binary against a generated corpus and 55,876 files from 13 pinned public repositories. The release bar is at most 1 flagged file per 1,000 ordinary files per category, 100% recall for provider-specific secrets and biometric file formats, and at least 90% for generic secrets; the current numbers meet it, and the measurements, corpus, and caveats are in [`eval/README.md`](eval/README.md). The recall figures on generated positives are circular by construction, and the public-repository figures are the better estimate of false positives.
 
-Latency is checked by `cargo xtask bench` against the targets in [`bench/targets.toml`](bench/targets.toml) (for example, a cached hook call under 5 ms at the 95th percentile).
+Latency is checked by `cargo xtask bench` against the targets in [`bench/targets.toml`](bench/targets.toml) (for example, a cached hook call under 5 ms at the 95th percentile) and against a stored baseline per OS. The local run is the gate. CI runs the same benchmark on hosted runners as an informational step that cannot fail the build, because shared runners are slower and noisier than the reference machine the targets were set on.
 
 ## Known limitations
 
