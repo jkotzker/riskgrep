@@ -661,6 +661,42 @@ fn untrusted_baseline_ignored_for_claude_code_honoured_for_git() {
     assert_eq!(only(&trusted).scores[&secret()], 0.0);
 }
 
+#[test]
+fn close_cache_checkpoints_and_keeps_scanning() {
+    let cache = tempfile::tempdir().unwrap();
+    for e in fs::read_dir(shared_cache().join("bundles")).unwrap() {
+        let p = e.unwrap().path();
+        let dest = cache.path().join("bundles");
+        fs::create_dir_all(&dest).unwrap();
+        fs::copy(&p, dest.join(p.file_name().unwrap())).unwrap();
+    }
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("creds.rs");
+    fs::write(&f, aws_line(34)).unwrap();
+    age(&f);
+    let mut g = scanner_in(cache.path());
+    let first = g.scan_paths(std::slice::from_ref(&f));
+    let wal = cache.path().join("evidence.sqlite-wal");
+    assert!(
+        fs::metadata(&wal).is_ok_and(|m| m.len() > 0),
+        "the scan wrote to the WAL"
+    );
+    g.close_cache();
+    // Closing the last connection checkpoints the WAL into the database.
+    assert!(
+        fs::metadata(&wal).map_or(true, |m| m.len() == 0),
+        "WAL left with {} bytes",
+        fs::metadata(&wal).map_or(0, |m| m.len())
+    );
+    // Still usable, uncached.
+    assert_eq!(g.scan_paths(std::slice::from_ref(&f)), first);
+    assert!(fs::metadata(&wal).map_or(true, |m| m.len() == 0));
+    // The checkpointed rows are there for the next process.
+    let mut h = scanner_in(cache.path());
+    assert_eq!(h.scan_paths(std::slice::from_ref(&f)), first);
+    assert!(!h.bundle_loaded(), "evidence was persisted before close");
+}
+
 fn biometric() -> Category {
     Category("biometric".into())
 }

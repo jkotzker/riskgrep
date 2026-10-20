@@ -354,6 +354,14 @@ impl RiskGrep {
         })
     }
 
+    /// Close the evidence cache now: its SQLite connection closes, which
+    /// checkpoints the write-ahead log into the database. Later scans on this
+    /// instance still work, uncached (the compiled-rules cache is unaffected).
+    /// For callers that end the process without running destructors.
+    pub fn close_cache(&mut self) {
+        self.cache = None;
+    }
+
     /// True once the compiled rules bundle has been loaded.
     pub fn bundle_loaded(&self) -> bool {
         matches!(self.engine, EngineState::Loaded(_))
