@@ -48,14 +48,15 @@ name_regex = "weight$""#,
             },
             PostSpec::NpzMembers {
                 min_dim: 128,
-                embedding_dims: None
+                embedding_dims: None,
+                min_bank: None,
             },
             PostSpec::SafetensorsHeader {
                 min_dim: 128,
                 name_regex: Some("weight$".into()),
                 embedding_dims: None,
                 exclude_name_regex: None,
-                max_tensors: None,
+                min_bank: None,
             },
         ]
     );
@@ -70,7 +71,7 @@ post = "npy_header, safetensors_header, float_array"
 min_dim = 64
 embedding_dims = "128, 192,256"
 exclude_name_regex = "bias$"
-max_tensors = 4"#,
+min_bank = 3"#,
     )
     .unwrap();
     let dims = Some(vec![128, 192, 256]);
@@ -86,7 +87,7 @@ max_tensors = 4"#,
                 name_regex: None,
                 embedding_dims: dims,
                 exclude_name_regex: Some("bias$".into()),
-                max_tensors: Some(4),
+                min_bank: Some(3),
             },
             PostSpec::FloatArray {
                 embedding_dims: vec![128, 192, 256]

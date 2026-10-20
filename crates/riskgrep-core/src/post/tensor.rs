@@ -4,6 +4,7 @@
 use super::{Post, PostResult};
 use crate::model::ShapeFacts;
 use regex::bytes::Regex;
+use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 use std::ops::Range;
 
@@ -117,6 +118,8 @@ pub struct NpzMembers {
     pub min_dim: u64,
     /// Require an embedding-shaped member with one of these last dimensions.
     pub embedding_dims: Option<Vec<u64>>,
+    /// Require at least this many qualifying members of one identical shape.
+    pub min_bank: Option<u64>,
 }
 
 impl Post for NpzMembers {
@@ -128,6 +131,7 @@ impl Post for NpzMembers {
         let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(content)) else {
             return PostResult::Drop;
         };
+        let mut banks: BTreeMap<Vec<u64>, (u64, ShapeFacts)> = BTreeMap::new();
         for i in 0..zip.len().min(NPZ_MAX_MEMBERS) {
             let Ok(file) = zip.by_index(i) else { continue };
             let Some(name) = file.name().strip_suffix(".npy").map(str::to_string) else {
@@ -137,17 +141,24 @@ impl Post for NpzMembers {
             if file.take(NPZ_MEMBER_BYTES).read_to_end(&mut head).is_err() {
                 continue;
             }
-            if let Some((dtype, shape)) =
+            let Some((dtype, shape)) =
                 npy_qualifies(&head, self.min_dim, self.embedding_dims.as_deref())
-            {
-                return PostResult::KeepWithShape(
-                    m,
-                    ShapeFacts::Tensor {
-                        dtype,
-                        shape,
-                        name: Some(name),
-                    },
-                );
+            else {
+                continue;
+            };
+            let facts = ShapeFacts::Tensor {
+                dtype,
+                shape: shape.clone(),
+                name: Some(name),
+            };
+            let Some(min) = self.min_bank else {
+                return PostResult::KeepWithShape(m, facts);
+            };
+            // Archive order: the first member of the first full bank.
+            let e = banks.entry(shape).or_insert((0, facts));
+            e.0 += 1;
+            if e.0 >= min {
+                return PostResult::KeepWithShape(m, e.1.clone());
             }
         }
         PostResult::Drop
@@ -161,8 +172,9 @@ pub struct SafetensorsHeader {
     pub embedding_dims: Option<Vec<u64>>,
     /// Tensors whose names match are ignored (layer parameters).
     pub exclude_name_regex: Option<Regex>,
-    /// Files with more tensors than this (model layouts) never qualify.
-    pub max_tensors: Option<u64>,
+    /// Require at least this many qualifying tensors of one identical shape
+    /// (an embedding bank: one vector per person).
+    pub min_bank: Option<u64>,
 }
 
 impl SafetensorsHeader {
@@ -173,19 +185,10 @@ impl SafetensorsHeader {
         }
         let end = 8usize.checked_add(usize::try_from(len).ok()?)?;
         let json: serde_json::Value = serde_json::from_slice(content.get(8..end)?).ok()?;
-        if let Some(max) = self.max_tensors {
-            let n = json
-                .as_object()?
-                .keys()
-                .filter(|k| *k != "__metadata__")
-                .count();
-            if n as u64 > max {
-                return None;
-            }
-        }
-        // Smallest qualifying name wins, so the result does not depend on the
-        // JSON object's iteration order.
+        // Smallest qualifying name wins (per shape, for banks), so the result
+        // does not depend on the JSON object's iteration order.
         let mut best: Option<ShapeFacts> = None;
+        let mut banks: BTreeMap<Vec<u64>, (u64, String, String)> = BTreeMap::new();
         for (name, entry) in json.as_object()? {
             if name == "__metadata__" {
                 continue;
@@ -216,6 +219,18 @@ impl SafetensorsHeader {
                 && !excluded
                 && shape_qualifies(&shape, self.min_dim, self.embedding_dims.as_deref())
             {
+                if self.min_bank.is_some() {
+                    let e =
+                        banks
+                            .entry(shape.clone())
+                            .or_insert((0, name.clone(), dtype.to_string()));
+                    e.0 += 1;
+                    if *name < e.1 {
+                        e.1 = name.clone();
+                        e.2 = dtype.to_string();
+                    }
+                    continue;
+                }
                 let better = match &best {
                     Some(ShapeFacts::Tensor { name: Some(n), .. }) => name < n,
                     _ => true,
@@ -228,6 +243,17 @@ impl SafetensorsHeader {
                     });
                 }
             }
+        }
+        if let Some(min) = self.min_bank {
+            return banks
+                .into_iter()
+                .filter(|(_, (n, _, _))| *n >= min)
+                .min_by(|a, b| (a.1).1.cmp(&(b.1).1))
+                .map(|(shape, (_, name, dtype))| ShapeFacts::Tensor {
+                    dtype,
+                    shape,
+                    name: Some(name),
+                });
         }
         best
     }

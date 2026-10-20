@@ -50,6 +50,22 @@ rule npz_embedding_tensor {
     $hdr at 0
 }
 
+// Several members of one identical embedding shape: one vector per person.
+// Not in family `npz`, so it adds to the single-tensor rules.
+rule npz_embedding_bank {
+  meta:
+    category = "biometric"
+    weight = 80
+    post = "npz_members"
+    min_dim = 64
+    embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
+    min_bank = 3
+  strings:
+    $hdr = { 50 4B 03 04 }
+  condition:
+    $hdr at 0
+}
+
 rule npz_float_tensor {
   meta:
     category = "biometric"
@@ -75,18 +91,17 @@ rule safetensors_named_embedding {
     family_cap = 85
     post = "safetensors_header"
     min_dim = 1
-    name_regex = "(?i)(embedding|speaker|voice|face|xvector|dvector|ecapa|spk_emb)"
-    exclude_name_regex = "(?i)((\\.weight|\\.bias)$|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe)"
+    name_regex = "(?i)(^|[._/-])(embeddings?|speakers?|voices?|voiceprints?|faces?|xvectors?|dvectors?|ecapa|spk_emb)($|[._/-])"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe)"
   strings:
     $hdr = { 7B 22 }
   condition:
     $hdr at 8 and uint32(4) == 0 and uint32(0) > 1 and uint32(0) + 8 <= filesize
 }
 
-// Embedding-shaped tensors without an embedding name, in files with at most
-// a few tensors: a model layout has many. With `safetensors_float_tensor` it
-// scores 70 (1 - 0.4 * 0.75), an ask rather than a deny. Model parameter
-// names never count.
+// Embedding-shaped tensors without an embedding name. With
+// `safetensors_float_tensor` one scores 70 (1 - 0.4 * 0.75), an ask rather
+// than a deny. Model parameter and projection names never count.
 rule safetensors_embedding_tensor {
   meta:
     category = "biometric"
@@ -96,8 +111,25 @@ rule safetensors_embedding_tensor {
     post = "safetensors_header"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    max_tensors = 4
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe)"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection)"
+  strings:
+    $hdr = { 7B 22 }
+  condition:
+    $hdr at 8 and uint32(4) == 0 and uint32(0) > 1 and uint32(0) + 8 <= filesize
+}
+
+// An embedding bank: three or more such tensors of one identical shape (a
+// speaker or face store keyed by identity). Not in family `safetensors`, so
+// it adds to the rules above.
+rule safetensors_embedding_bank {
+  meta:
+    category = "biometric"
+    weight = 80
+    post = "safetensors_header"
+    min_dim = 64
+    embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection)"
+    min_bank = 3
   strings:
     $hdr = { 7B 22 }
   condition:

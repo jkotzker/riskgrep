@@ -46,6 +46,14 @@ path = "t.safetensors"
 expect = 70
 
 [[case]]
+# An embedding bank: three tensors of one embedding shape keyed by speaker.
+# 80 (bank) with the family's 70: 1 - 0.2 * 0.3.
+rule = "safetensors_embedding_bank"
+synth = "safetensors:p225=F32@192;p226=F32@192;p227=F32@192"
+path = "store.safetensors"
+expect = 94
+
+[[case]]
 rule = "safetensors_float_tensor"
 synth = "safetensors:layer.0.weight=F32@768x768"
 path = "w.safetensors"

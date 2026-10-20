@@ -125,7 +125,7 @@ fn safetensors_name_rule() {
         name_regex: Some(re("embedding")),
         embedding_dims: None,
         exclude_name_regex: None,
-        max_tensors: None,
+        min_bank: None,
     };
     let r = named.apply(&data, 0..8);
     assert_eq!(
@@ -142,7 +142,7 @@ fn safetensors_name_rule() {
         name_regex: None,
         embedding_dims: None,
         exclude_name_regex: None,
-        max_tensors: None,
+        min_bank: None,
     };
     let r = unnamed.apply(&layer_only, 0..8);
     assert_eq!(tensor(&r).2, Some("layer.0.weight"));
@@ -170,6 +170,7 @@ fn npz_members() {
     let p = NpzMembers {
         min_dim: 192,
         embedding_dims: None,
+        min_bank: None,
     };
     let both = npz(&[
         ("ids.npy", npy("<i8", "(500,)")),
@@ -193,13 +194,14 @@ fn headers_never_panic_on_malformed_input() {
     let npz_p = NpzMembers {
         min_dim: 1,
         embedding_dims: None,
+        min_bank: None,
     };
     let st_p = SafetensorsHeader {
         min_dim: 1,
         name_regex: None,
         embedding_dims: None,
         exclude_name_regex: None,
-        max_tensors: None,
+        min_bank: None,
     };
     let good_npy = npy("<f4", "(10, 192)");
     let good_st = safetensors(r#"{"t":{"dtype":"F32","shape":[4,4],"data_offsets":[0,64]}}"#);
@@ -283,6 +285,7 @@ fn npz_embedding_shape() {
     let p = NpzMembers {
         min_dim: 64,
         embedding_dims: Some(DIMS.to_vec()),
+        min_bank: None,
     };
     let emb = npz(&[
         ("x.npy", npy("<f8", "(5000, 7)")),
@@ -300,7 +303,7 @@ fn safetensors_embedding_shape_and_exclusions() {
         name_regex: None,
         embedding_dims: Some(DIMS.to_vec()),
         exclude_name_regex: Some(re("(?i)(weight|bias)")),
-        max_tensors: None,
+        min_bank: None,
     };
     let emb = safetensors(r#"{"data":{"dtype":"F32","shape":[4,256],"data_offsets":[0,4096]}}"#);
     assert_eq!(tensor(&p.apply(&emb, 0..8)).2, Some("data"));
@@ -313,26 +316,64 @@ fn safetensors_embedding_shape_and_exclusions() {
 }
 
 #[test]
-fn safetensors_max_tensors() {
+fn safetensors_embedding_bank() {
     let p = SafetensorsHeader {
         min_dim: 64,
         name_regex: None,
         embedding_dims: Some(DIMS.to_vec()),
-        exclude_name_regex: None,
-        max_tensors: Some(2),
+        exclude_name_regex: Some(re("(?i)weight")),
+        min_bank: Some(3),
     };
-    let t = |n: usize| {
+    let bank = |n: usize, shape: &str| {
         let items: Vec<String> = (0..n)
-            .map(|i| format!(r#""t{i}":{{"dtype":"F32","shape":[1,256],"data_offsets":[0,9]}}"#))
+            .map(|i| {
+                format!(
+                    r#""p{}":{{"dtype":"F32","shape":{shape},"data_offsets":[0,9]}}"#,
+                    225 + i
+                )
+            })
             .collect();
         safetensors(&format!(
             r#"{{"__metadata__":{{"a":"b"}},{}}}"#,
             items.join(",")
         ))
     };
-    assert!(kept(&p.apply(&t(2), 0..8)));
-    // A model layout (many tensors) is not an embedding file.
-    assert_eq!(p.apply(&t(3), 0..8), PostResult::Drop);
+    assert_eq!(tensor(&p.apply(&bank(3, "[192]"), 0..8)).2, Some("p225"));
+    assert!(kept(&p.apply(&bank(109, "[1,256]"), 0..8)));
+    assert_eq!(p.apply(&bank(2, "[192]"), 0..8), PostResult::Drop);
+    assert_eq!(p.apply(&bank(5, "[193]"), 0..8), PostResult::Drop);
+    // Three embedding-shaped tensors of different shapes are not a bank.
+    let mixed = safetensors(
+        r#"{"a":{"dtype":"F32","shape":[192],"data_offsets":[0,9]},"b":{"dtype":"F32","shape":[256],"data_offsets":[0,9]},"c":{"dtype":"F32","shape":[2,192],"data_offsets":[0,9]}}"#,
+    );
+    assert_eq!(p.apply(&mixed, 0..8), PostResult::Drop);
+    // Excluded names do not count towards a bank.
+    let layers = safetensors(
+        r#"{"l1.weight":{"dtype":"F32","shape":[192],"data_offsets":[0,9]},"l2.weight":{"dtype":"F32","shape":[192],"data_offsets":[0,9]},"x":{"dtype":"F32","shape":[192],"data_offsets":[0,9]}}"#,
+    );
+    assert_eq!(p.apply(&layers, 0..8), PostResult::Drop);
+}
+
+#[test]
+fn npz_embedding_bank() {
+    let p = NpzMembers {
+        min_dim: 64,
+        embedding_dims: Some(DIMS.to_vec()),
+        min_bank: Some(3),
+    };
+    let members = |n: usize, shape: &str| -> Vec<u8> {
+        let m: Vec<(String, Vec<u8>)> = (0..n)
+            .map(|i| (format!("person_{i:03}.npy"), npy("<f4", shape)))
+            .collect();
+        let refs: Vec<(&str, Vec<u8>)> = m.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
+        npz(&refs)
+    };
+    assert_eq!(
+        tensor(&p.apply(&members(3, "(3, 256)"), 0..4)).2,
+        Some("person_000")
+    );
+    assert_eq!(p.apply(&members(2, "(3, 256)"), 0..4), PostResult::Drop);
+    assert_eq!(p.apply(&members(4, "(3, 7)"), 0..4), PostResult::Drop);
 }
 
 /// `n` floats joined by `sep`, wrapped in `open`/`close`.

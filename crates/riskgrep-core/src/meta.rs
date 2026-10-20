@@ -46,13 +46,14 @@ pub enum PostSpec {
     NpzMembers {
         min_dim: u64,
         embedding_dims: Option<Vec<u64>>,
+        min_bank: Option<u64>,
     },
     SafetensorsHeader {
         min_dim: u64,
         name_regex: Option<String>,
         embedding_dims: Option<Vec<u64>>,
         exclude_name_regex: Option<String>,
-        max_tensors: Option<u64>,
+        min_bank: Option<u64>,
     },
     FloatArray {
         embedding_dims: Vec<u64>,
@@ -206,13 +207,14 @@ impl RuleMeta {
             "npz_members" => PostSpec::NpzMembers {
                 min_dim: raw.need(raw.uint("min_dim")?, "min_dim", name)?,
                 embedding_dims: raw.dims("embedding_dims")?,
+                min_bank: raw.uint("min_bank")?,
             },
             "safetensors_header" => PostSpec::SafetensorsHeader {
                 min_dim: raw.need(raw.uint("min_dim")?, "min_dim", name)?,
                 name_regex: raw.string("name_regex")?,
                 embedding_dims: raw.dims("embedding_dims")?,
                 exclude_name_regex: raw.string("exclude_name_regex")?,
-                max_tensors: raw.uint("max_tensors")?,
+                min_bank: raw.uint("min_bank")?,
             },
             "float_array" => PostSpec::FloatArray {
                 embedding_dims: raw.need(raw.dims("embedding_dims")?, "embedding_dims", name)?,

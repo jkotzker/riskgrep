@@ -6,6 +6,7 @@
 cargo xtask eval                    # synthetic corpus and OSS repositories
 cargo xtask eval --skip-oss         # synthetic corpus only (no network, seconds)
 cargo xtask eval --write-baseline   # rewrite baseline-metrics.json (from any run)
+cargo xtask eval --keep-corpus DIR  # also keep the synthetic corpus in DIR (an empty or new directory)
 ```
 
 ## How it runs
@@ -23,12 +24,12 @@ Generated deterministically at run time into a temporary directory (`xtask/src/e
 |---|---|---|
 | Provider-specific secrets | `aws_access_key`, `github_pat`, `anthropic_key`, `pem_private_key`, `stripe_key`, `slack_bot_token`, `npm_token`, `openai_key` (each in 7 file types; PEM in 4 containers), `pkcs12`, `der_key` | 20 each, 200 |
 | Generic secrets | `generic_api_key` assignments in 7 file types and key names | 50 |
-| Biometric formats | `npy`, `npz`, `safetensors_named` (tensor name matches the embedding regex), `safetensors_unnamed`, printed floats in python, numpy, and JSON styles; widths 128 to 3072 | 20 each, 140 |
-| Hard negatives (generated) | sensor CSVs (plain float matrices and timestamped logs), model-weight safetensors, header-only model checkpoints (7 single parameters named or shaped like embeddings: timm `pos_embed`/`cls_token`, BERT `word_embeddings`, HF ViT `position_embeddings`, OpenCLIP `positional_embedding`/`visual.class_embedding`, diffusers `time_embedding`; and BERT-base, CLIP ViT-B/32, SD UNet, and timm ViT-B layouts), integer `.npy`, example and placeholder keys, low-entropy assignments, UUID lists, hex hashes, base64 blobs, source code, prices and logs | 231 |
+| Biometric formats | `npy`, `npz`, `safetensors_named` (tensor name matches the embedding regex), `safetensors_unnamed`, printed floats in python, numpy, and JSON styles; widths 128 to 3072; embedding banks as safetensors and as npz (3, 5, 20, or 109 identically shaped vectors keyed `p225…` VCTK-style or `person_NNN`) | 20 each, 180 |
+| Hard negatives (generated) | sensor CSVs (plain float matrices and timestamped logs), model-weight safetensors, header-only model checkpoints (7 single parameters named or shaped like embeddings: timm `pos_embed`/`cls_token`, BERT `word_embeddings`, HF ViT `position_embeddings`, OpenCLIP `positional_embedding`/`visual.class_embedding`, diffusers `time_embedding`; and a reduced 4-tensor OpenCLIP checkpoint, BERT-base, CLIP ViT-B/32, SD UNet, and timm ViT-B layouts), integer `.npy`, example and placeholder keys, low-entropy assignments, UUID lists, hex hashes, base64 blobs, source code, prices and logs | 232 |
 | Hard negatives (existing) | the `expect = "none"` cases from the ruleset tests, plus the model-weight and sensor-CSV cases from `ruleset_biometric.rs` | 11 |
-| Probes (not gated) | embeddings at widths outside `embedding_dims` (100, 300, 1000) as npy, safetensors, and printed floats; npy embeddings with 3 leading dimensions; generic secrets under env-style `<PROVIDER>_KEY` names and `consumer_key`/`app_key`/`master_key`/`HMAC_KEY` | 62 |
+| Probes (not gated) | embeddings at widths outside `embedding_dims` (100, 300, 1000) as npy, safetensors, and printed floats; npy embeddings with 3 leading dimensions; generic secrets under env-style `<PROVIDER>_KEY` names and `consumer_key`/`app_key`/`master_key`/`HMAC_KEY`; tensor counts around the bank rule (2 identical tensors, 5 tensors of different shapes, banks at off-list widths) | 92 |
 
-**Gated recall is circular by construction:** the biometric positives use widths that are in `embedding_dims` with at most two leading dimensions, and the generic positives use key names the generic rule accepts. The probes measure what falls outside those lists; they are reported, kept in the baseline as `probe.*`, and neither gated nor compared.
+**Gated recall is circular by construction:** the biometric positives use widths that are in `embedding_dims` with at most two leading dimensions, banks use 3 or more identically shaped tensors, and the generic positives use key names the generic rule accepts. The probes measure what falls outside those lists; they are reported, kept in the baseline as `probe.*`, and neither gated nor compared.
 
 ## OSS corpus
 
@@ -44,7 +45,7 @@ Findings are inspected only through the report (rule ids, paths, lines, scores).
 | `hashicorp_tf_password` in terraform test data | 3 | False positive: a 10-character dummy value containing a dictionary word, entropy 2.9 |
 | `curl_auth_user` in `prometheus/scripts/sync_repo_files.sh` | 1 | False positive: the value is two shell variable references |
 | `generic_api_key` (credential-named keys in test code, test configs, and docs) | 21 | Counted as false positives without triage (the bar holds even so) |
-| `npz_embedding_tensor` in scipy (benchmark and FFT reference arrays whose last dimension is an embedding width) | 6 | False positives: test artefacts, none named as an embedding |
+| `npz_embedding_tensor` in scipy (benchmark and FFT reference arrays whose last dimension is an embedding width) | 6 | False positives: test artefacts, none named as an embedding. Two (`fftpack/tests/fftw_double_ref.npz`, `fftw_single_ref.npz`) hold several arrays of one embedding shape and also match `npz_embedding_bank` (94) |
 | `printed_embedding_array` in `transformers/tests/utils/test_modeling_rope_utils.py` | 1 | False positive: expected values of a test |
 
 Before the rule changes below, 124 scipy `.npy`/`.npz` files (linprog benchmark matrices, test reference data) scored 70; they were counted as false positives, none being named as an embedding.
@@ -59,11 +60,11 @@ Per category, at the flag threshold: at most 1 flagged file per 1,000 ordinary f
 |---|---|---|---|
 | Recall, provider-specific secrets | 200/200 (100%) | 100% | met |
 | Recall, generic secrets | 50/50 (100%) | ≥ 90% | met |
-| Recall, biometric formats | 140/140 (100%), every format 20/20 | 100% | met |
-| Synthetic FP per 1,000, secret | 0/242 (0.0) | ≤ 1 | met |
-| Synthetic FP per 1,000, biometric | 0/242 (0.0); every model checkpoint scores 25 | ≤ 1 | met |
+| Recall, biometric formats | 180/180 (100%), every format 20/20 | 100% | met |
+| Synthetic FP per 1,000, secret | 0/243 (0.0) | ≤ 1 | met |
+| Synthetic FP per 1,000, biometric | 0/243 (0.0); every model checkpoint scores 25 | ≤ 1 | met |
 | OSS FP per 1,000, secret | 25/55,876 (0.45); 14 known findings excluded | ≤ 1 | met |
-| OSS FP per 1,000, biometric | 7/55,876 (0.13) | ≤ 1 | met |
+| OSS FP per 1,000, biometric | 7/55,876 (0.13); 2 of them reach 94 (deny) | ≤ 1 | met |
 
 `baseline-metrics.json` holds these numbers.
 
@@ -77,8 +78,11 @@ Per category, at the flag threshold: at most 1 flagged file per 1,000 ordinary f
 | printed floats at widths 100, 300, 1000 | 0/10 |
 | generic, `<PROVIDER>_KEY` in `.env` | 9/10 |
 | generic, `consumer_key`/`app_key`/`master_key`/`HMAC_KEY` | 3/12 (the `HMAC_KEY` ones) |
+| safetensors with 2 identical embedding-shaped tensors | 10/10 (70: the single-tensor rule, not the bank) |
+| safetensors with 5 embedding-shaped tensors of different shapes | 10/10 (70) |
+| banks of 3 to 109 tensors at widths 100, 300, 1000 | 0/10 (25) |
 
-Off-list embedding widths score 30 (npy), 25 (safetensors), or 40 (printed floats): known, not flagged. One `<PROVIDER>_KEY` probe is not reported at all; the cause was not examined (the file is generated and removed with the temporary directory).
+Off-list embedding widths score 30 (npy), 25 (safetensors), or 40 (printed floats): known, not flagged. One `<PROVIDER>_KEY` probe is not reported: its random 32-character value happens to contain no digit, and gitleaks' generic allowlist `^[a-zA-Z_.-]+$` (kept by the converter) drops letter-only values as identifiers. Found with `--keep-corpus` by re-scanning the value under other key names (no evidence for any) and testing it against the allowlist pattern; the value was not printed.
 
 ## Changes
 
@@ -124,5 +128,18 @@ Each row is a full `cargo xtask eval` run.
 | checkpoint exclusions and caps, 11 checkpoint negatives (4) | 1.000 / 1.000 | 0.0 / 0.0 | 0.43 / 0.13 | 1/10 / 0/12 |
 | uppercase env form `[A-Z0-9_]+_KEY` (5) | 1.000 / 1.000 | 0.0 / 0.0 | 0.45 / 0.13 | 9/10 / 3/12 |
 
-4. **Model checkpoints.** Header-only checkpoints scored 79 (timm `pos_embed`, `cls_token`, by the unnamed embedding-shape rule) or 85 (BERT `word_embeddings`, HF ViT `position_embeddings`, OpenCLIP `positional_embedding`/`class_embedding`, diffusers `time_embedding`, by the named rule). Now `safetensors_named_embedding` ignores tensor names matching `(\.weight|\.bias)$|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe` (case-insensitive) and also counts `dvector` and `spk_emb`. `safetensors_embedding_tensor` ignores the same names plus layer parameters and applies only to files with at most 4 tensors (`max_tensors`: a model layout has many, and CLIP's `text_projection` and `visual.proj` are embedding-shaped); it is weighted 60 and `safetensors_float_tensor` 25, so an unnamed embedding-shaped file scores 70 (ask, not deny). All 11 checkpoint negatives score 25.
+4. **Model checkpoints.** Header-only checkpoints scored 79 (timm `pos_embed`, `cls_token`, by the unnamed embedding-shape rule) or 85 (BERT `word_embeddings`, HF ViT `position_embeddings`, OpenCLIP `positional_embedding`/`class_embedding`, diffusers `time_embedding`, by the named rule). Now `safetensors_named_embedding` ignores tensor names matching `(\.weight|\.bias)$|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe` (case-insensitive) and also counts `dvector` and `spk_emb`. `safetensors_embedding_tensor` ignores the same names plus layer parameters and applies only to files with at most 4 tensors (`max_tensors`: a model layout has many, and CLIP's `text_projection` and `visual.proj` are embedding-shaped); it is weighted 60 and `safetensors_float_tensor` 25, so an unnamed embedding-shaped file scores 70 (ask, not deny). All 11 checkpoint negatives score 25. (Round 3 replaces `max_tensors` with name exclusions and a bank rule.)
 5. **Env key form.** The generic rule also accepts an identifier ending in uppercase `_KEY` after `[A-Z0-9_]` (`STRIPE_KEY`, `HMAC_KEY`). It met the bar (one more OSS file, a terraform S3 backend test), so it is kept.
+
+### Round 3: embedding banks, precise checkpoint exclusions
+
+| Change | Recall biometric | Synthetic FP per 1,000 biometric | OSS FP per 1,000 biometric | Bank probes (2 tensors / mixed shapes / off-list) |
+|---|---|---|---|---|
+| before (140 gated biometric, 242 negatives) | 1.000 | 0.0 | 0.13 (7) | not measured |
+| banks, `max_tensors` removed, exclusions, token-bounded names (6, 7) | 1.000 (180 gated) | 0.0 (243 negatives) | 0.13 (7; 2 at 94) | 10/10 / 10/10 / 0/10 |
+
+Secret metrics did not change (OSS 0.45, synthetic 0.0).
+
+6. **Embedding banks.** `max_tensors` is gone: it hid speaker and face stores (5, 20, and 109 tensors keyed `p225…`, each [192], and `person_NNN` [3,256], scored 25; `voiceprints.safetensors` with 20 such tensors scored 47.5). New rules `safetensors_embedding_bank` and `npz_embedding_bank` (80, outside the format families, so they add to them) fire on 3 or more non-excluded tensors or `.npy` members of one identical embedding shape (`min_bank = 3`); a bank scores 94 (1 − 0.2 × 0.3), a single unnamed embedding-shaped tensor stays at 70. CLIP's projections are excluded by name instead: the unnamed and bank rules ignore `(^|[._])proj(ection)?($|[._])`, `_proj$`, and `text_projection`, plus `in_proj`. The reduced OpenCLIP checkpoint (`positional_embedding`, `text_projection` [512,512], `token_embedding.weight`, `visual.class_embedding`) and all other checkpoint negatives score 25.
+7. **Named rule.** Parameter-like names anywhere (`weight`, `bias`, `running_mean`/`running_var`, `in_proj`, which covers `weight_ih`/`weight_hh`) and the model-parameter names never count, and `name_regex` is token-bounded (`(^|[._/-])` … `($|[._/-])`), so `invoice_total`, `surface_normals`, and `interface.dense` are not named embeddings while `face_embedding` and `voice.embedding` are.
+

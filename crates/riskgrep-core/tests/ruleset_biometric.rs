@@ -172,6 +172,99 @@ fn embedding_names_still_count() {
     }
 }
 
+fn bank(keys: &dyn Fn(usize) -> String, n: usize, shape: &[u64]) -> Vec<u8> {
+    let names: Vec<String> = (0..n).map(keys).collect();
+    let t: Vec<(&str, &str, &[u64])> = names.iter().map(|k| (k.as_str(), "F32", shape)).collect();
+    synth::safetensors(&t)
+}
+
+#[test]
+fn embedding_banks_are_flagged() {
+    let f = fixture();
+    let vctk = |i: usize| format!("p{}", 225 + i);
+    let person = |i: usize| format!("person_{i:03}");
+    for (keys, n, shape) in [
+        (&vctk as &dyn Fn(usize) -> String, 3usize, &[192u64][..]),
+        (&vctk, 5, &[192]),
+        (&vctk, 20, &[192]),
+        (&vctk, 109, &[192]),
+        (&person, 10, &[3, 256]),
+    ] {
+        let data = bank(keys, n, shape);
+        let rules = rules_of(&f, "store.safetensors", &data);
+        assert!(
+            rules.contains(&"safetensors_embedding_bank".to_string()),
+            "{n}"
+        );
+        // 80 (bank) with the family's 70: 1 - 0.2 * 0.3.
+        assert_score(biometric(&f, "store.safetensors", &data), 94.0);
+    }
+    let members: Vec<(String, Vec<u8>)> = (0..5)
+        .map(|i| (format!("p{}.npy", 225 + i), synth::npy("<f4", &[192])))
+        .collect();
+    let refs: Vec<(&str, Vec<u8>)> = members
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.clone()))
+        .collect();
+    let data = synth::npz(&refs);
+    assert!(rules_of(&f, "store.npz", &data).contains(&"npz_embedding_bank".to_string()));
+    assert_score(biometric(&f, "store.npz", &data), 94.0);
+}
+
+#[test]
+fn single_unnamed_tensor_and_reduced_openclip() {
+    let f = fixture();
+    // One unnamed embedding-shaped tensor is not a bank.
+    let one = synth::safetensors(&[("p225", "F32", &[192])]);
+    assert_score(biometric(&f, "one.safetensors", &one), 70.0);
+    // Reduced OpenCLIP checkpoint: projections and embeddings by name.
+    let clip = synth::safetensors(&[
+        ("positional_embedding", "F32", &[77, 512]),
+        ("text_projection", "F32", &[512, 512]),
+        ("token_embedding.weight", "F32", &[64, 512]),
+        ("visual.class_embedding", "F32", &[768]),
+    ]);
+    assert_eq!(
+        rules_of(&f, "clip.safetensors", &clip),
+        ["safetensors_float_tensor"]
+    );
+    assert_score(biometric(&f, "clip.safetensors", &clip), 25.0);
+}
+
+#[test]
+fn named_rule_is_token_bounded() {
+    let f = fixture();
+    for name in ["invoice_total", "surface_normals", "interface.dense"] {
+        let data = synth::safetensors(&[(name, "F32", &[1, 192])]);
+        let rules = rules_of(&f, "t.safetensors", &data);
+        assert!(
+            !rules.contains(&"safetensors_named_embedding".to_string()),
+            "{name}"
+        );
+    }
+    for name in ["face_embedding", "voice.embedding"] {
+        let data = synth::safetensors(&[(name, "F32", &[1, 192])]);
+        let rules = rules_of(&f, "t.safetensors", &data);
+        assert!(
+            rules.contains(&"safetensors_named_embedding".to_string()),
+            "{name}"
+        );
+    }
+    // Parameter-like names never count as named embeddings.
+    for name in [
+        "speaker_encoder.lstm.weight_ih_l0",
+        "voice.in_proj",
+        "face_embedding.bias_v",
+    ] {
+        let data = synth::safetensors(&[(name, "F32", &[1, 192])]);
+        let rules = rules_of(&f, "t.safetensors", &data);
+        assert!(
+            !rules.contains(&"safetensors_named_embedding".to_string()),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn layer_parameters_are_not_embeddings() {
     let f = fixture();

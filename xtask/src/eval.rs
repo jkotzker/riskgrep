@@ -95,6 +95,9 @@ pub const PROBE_KINDS: &[&str] = &[
     "probe_floats_offlist_width",
     "probe_generic_env_key",
     "probe_generic_other_key",
+    "probe_bank_of_2",
+    "probe_bank_mixed_shapes",
+    "probe_bank_offlist_width",
 ];
 
 /// Generated hard-negative families.
@@ -120,6 +123,8 @@ pub const BIOMETRIC_KINDS: &[&str] = &[
     "floats_python",
     "floats_numpy",
     "floats_json",
+    "bank_safetensors",
+    "bank_npz",
 ];
 
 // ---- synthetic corpus --------------------------------------------------------
@@ -139,7 +144,9 @@ pub fn corpus() -> Vec<Sample> {
     provider_secrets(&mut out);
     generic_secrets(&mut out);
     biometric(&mut out);
+    banks(&mut out);
     probes(&mut out);
+    bank_probes(&mut out);
     negatives(&mut out);
     checkpoints(&mut out);
     existing_negatives(&mut out);
@@ -369,6 +376,99 @@ fn biometric(out: &mut Vec<Sample>) {
             };
             out.push(sample(Group::Biometric, kind, name, text));
         }
+    }
+}
+
+/// Bank sizes (tensors per file) of the embedding-bank positives.
+const BANK_SIZES: &[usize] = &[3, 5, 20, 109];
+
+/// Identity keys: VCTK speaker ids (`p225`) or `person_NNN`.
+fn bank_key(style: usize, k: usize) -> String {
+    if style.is_multiple_of(2) {
+        format!("p{}", 225 + k)
+    } else {
+        format!("person_{k:03}")
+    }
+}
+
+/// Embedding banks: one identically shaped vector per identity.
+fn banks(out: &mut Vec<Sample>) {
+    let shapes: [&[u64]; 4] = [&[192], &[1, 256], &[3, 256], &[512]];
+    for i in 0..PER_FORMAT {
+        let n = BANK_SIZES[i % BANK_SIZES.len()];
+        let shape = shapes[(i / BANK_SIZES.len()) % shapes.len()];
+        let keys: Vec<String> = (0..n).map(|k| bank_key(i, k + i)).collect();
+        let t: Vec<(&str, &str, &[u64])> =
+            keys.iter().map(|k| (k.as_str(), "F32", shape)).collect();
+        out.push(sample(
+            Group::Biometric,
+            "bank_safetensors",
+            format!("store_{i}.safetensors"),
+            synth::safetensors(&t),
+        ));
+        let members: Vec<(String, Vec<u8>)> = keys
+            .iter()
+            .map(|k| (format!("{k}.npy"), synth::npy("<f4", shape)))
+            .collect();
+        let refs: Vec<(&str, Vec<u8>)> = members
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.clone()))
+            .collect();
+        out.push(sample(
+            Group::Biometric,
+            "bank_npz",
+            format!("store_{i}.npz"),
+            synth::npz(&refs),
+        ));
+    }
+}
+
+/// Tensor-count probes around the bank rule.
+fn bank_probes(out: &mut Vec<Sample>) {
+    let st = |names: &[String], shapes: &[&[u64]]| {
+        let t: Vec<(&str, &str, &[u64])> = names
+            .iter()
+            .zip(shapes)
+            .map(|(n, s)| (n.as_str(), "F32", *s))
+            .collect();
+        synth::safetensors(&t)
+    };
+    for i in 0..10 {
+        let names: Vec<String> = (0..2).map(|k| bank_key(i, k + i)).collect();
+        let d = EMBED_DIMS[i % EMBED_DIMS.len()];
+        let bytes = st(&names, &[&[d], &[d]]);
+        out.push(sample(
+            Group::ProbeBiometric,
+            "probe_bank_of_2",
+            format!("pair_{i}.safetensors"),
+            bytes,
+        ));
+    }
+    for i in 0..10 {
+        let names: Vec<String> = (0..5).map(|k| bank_key(i, k + i)).collect();
+        let dims: Vec<[u64; 1]> = (0..5)
+            .map(|k| [EMBED_DIMS[(i + k) % EMBED_DIMS.len()]])
+            .collect();
+        let shapes: Vec<&[u64]> = dims.iter().map(|d| &d[..]).collect();
+        out.push(sample(
+            Group::ProbeBiometric,
+            "probe_bank_mixed_shapes",
+            format!("mixed_{i}.safetensors"),
+            st(&names, &shapes),
+        ));
+    }
+    for i in 0..10 {
+        let n = BANK_SIZES[i % BANK_SIZES.len()];
+        let w = OFF_LIST_DIMS[i % OFF_LIST_DIMS.len()];
+        let names: Vec<String> = (0..n).map(|k| bank_key(i, k + i)).collect();
+        let shape = [w];
+        let shapes: Vec<&[u64]> = (0..n).map(|_| &shape[..]).collect();
+        out.push(sample(
+            Group::ProbeBiometric,
+            "probe_bank_offlist_width",
+            format!("store_{i}.safetensors"),
+            st(&names, &shapes),
+        ));
     }
 }
 
@@ -615,7 +715,14 @@ fn checkpoints(out: &mut Vec<Sample>) {
             &[3072, 768],
         ));
     }
+    let reduced_openclip = vec![
+        t("positional_embedding", "F32", &[77, 512]),
+        t("text_projection", "F32", &[512, 512]),
+        t("token_embedding.weight", "F32", &[49408, 512]),
+        t("visual.class_embedding", "F32", &[768]),
+    ];
     for (name, layout) in [
+        ("openclip-reduced", reduced_openclip),
         ("bert-base", bert),
         ("clip-vit-b-32", clip),
         ("sd-unet", unet),
@@ -1327,7 +1434,7 @@ pub fn workspace_root() -> PathBuf {
 
 // ---- running -----------------------------------------------------------------
 
-const USAGE: &str = "usage: cargo xtask eval [--skip-oss] [--write-baseline]";
+const USAGE: &str = "usage: cargo xtask eval [--skip-oss] [--write-baseline] [--keep-corpus DIR]";
 
 /// Metric values are stored rounded, so reruns compare equal.
 fn round4(x: f64) -> f64 {
@@ -1400,10 +1507,27 @@ fn hit_list(t: &Target, category: &str) -> String {
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let (mut skip_oss, mut write_baseline) = (false, false);
-    for a in args {
+    let mut keep: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         match a.as_str() {
             "--skip-oss" => skip_oss = true,
             "--write-baseline" => write_baseline = true,
+            "--keep-corpus" => {
+                let d = PathBuf::from(
+                    it.next()
+                        .ok_or(format!("--keep-corpus needs a directory\n{USAGE}"))?,
+                );
+                if d.exists()
+                    && fs::read_dir(&d)
+                        .map_err(|e| e.to_string())?
+                        .next()
+                        .is_some()
+                {
+                    return Err(format!("--keep-corpus: {} is not empty", d.display()));
+                }
+                keep = Some(d);
+            }
             other => return Err(format!("unknown argument `{other}`\n{USAGE}")),
         }
     }
@@ -1442,7 +1566,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 
     let mut metrics = BTreeMap::new();
-    synthetic(&ctx, tmp.path(), &mut metrics)?;
+    let corpus_dir = keep.unwrap_or_else(|| tmp.path().join("corpus"));
+    synthetic(&ctx, &corpus_dir, &mut metrics)?;
     if !skip_oss {
         oss(&ctx, &mut metrics)?;
     }
@@ -1536,13 +1661,13 @@ impl Tally {
     }
 }
 
-fn synthetic(ctx: &Ctx, tmp: &Path, metrics: &mut BTreeMap<String, f64>) -> Result<(), String> {
+/// Writes the corpus to `dir` (sample `i` in `dir/sNNNN/`) and scans it.
+fn synthetic(ctx: &Ctx, dir: &Path, metrics: &mut BTreeMap<String, f64>) -> Result<(), String> {
     let samples = corpus();
     let short = shortfalls(&samples);
     if !short.is_empty() {
         return Err(format!("synthetic corpus: {}", short.join("; ")));
     }
-    let dir = tmp.join("corpus");
     let mut dirs = Vec::with_capacity(samples.len());
     for (i, s) in samples.iter().enumerate() {
         let d = format!("s{i:04}");
@@ -1551,7 +1676,7 @@ fn synthetic(ctx: &Ctx, tmp: &Path, metrics: &mut BTreeMap<String, f64>) -> Resu
         fs::write(&p, &s.bytes).map_err(|e| format!("{}: {e}", p.display()))?;
         dirs.push(d);
     }
-    let report = scan(ctx, &dir, &dirs, &ctx.out_dir.join("synthetic.json"))?;
+    let report = scan(ctx, dir, &dirs, &ctx.out_dir.join("synthetic.json"))?;
     let mut by_sample: BTreeMap<usize, &Target> = BTreeMap::new();
     for t in &report.targets {
         let idx = t

@@ -83,16 +83,18 @@ pub fn build(
         PostSpec::NpzMembers {
             min_dim,
             embedding_dims,
+            min_bank,
         } => Box::new(NpzMembers {
             min_dim: *min_dim,
             embedding_dims: embedding_dims.clone(),
+            min_bank: *min_bank,
         }),
         PostSpec::SafetensorsHeader {
             min_dim,
             name_regex,
             embedding_dims,
             exclude_name_regex,
-            max_tensors,
+            min_bank,
         } => Box::new(SafetensorsHeader {
             min_dim: *min_dim,
             name_regex: match name_regex {
@@ -104,7 +106,7 @@ pub fn build(
                 Some(s) => Some(re("exclude_name_regex", s)?),
                 None => None,
             },
-            max_tensors: *max_tensors,
+            min_bank: *min_bank,
         }),
         PostSpec::FloatArray { embedding_dims } => Box::new(FloatArray {
             embedding_dims: embedding_dims.clone(),
