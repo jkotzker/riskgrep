@@ -210,6 +210,24 @@ fn read_layer(path: &Path) -> Result<Option<Layer>, ConfigError> {
         .map_err(|e| ConfigError(format!("invalid config {}: {e}", path.display())))
 }
 
+impl Layer {
+    /// Make the layer's relative paths absolute against `base`, the
+    /// directory the layer's own file belongs to; never the working
+    /// directory, whose contents may be untrusted.
+    fn resolve_paths(&mut self, base: &Path) {
+        for paths in [&mut self.extra_ruleset_dirs, &mut self.trusted_repos]
+            .into_iter()
+            .flatten()
+        {
+            for p in paths.iter_mut() {
+                if p.is_relative() {
+                    *p = base.join(&*p);
+                }
+            }
+        }
+    }
+}
+
 fn merge_map<K: Ord, V>(into: &mut BTreeMap<K, V>, from: BTreeMap<K, V>) {
     into.extend(from);
 }
@@ -344,9 +362,12 @@ impl Config {
     }
 }
 
+/// `~/.config/riskgrep/config.toml`; `None` unless `HOME` is absolute, so
+/// the user file is never looked up relative to the working directory.
 fn user_config_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
-    Some(PathBuf::from(home).join(".config/riskgrep/config.toml"))
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    home.is_absolute()
+        .then(|| home.join(".config/riskgrep/config.toml"))
 }
 
 fn canonical(p: &Path) -> PathBuf {
@@ -361,7 +382,9 @@ fn is_trusted(repo_root: &Path, trusted: &[PathBuf]) -> bool {
 /// Defaults, then the user file, then the repository file, then `cli`.
 /// `Mode::ClaudeCode` reads the repository file only when `repo_root` is in
 /// the user file's `trusted_repos`; `trusted_repos` in a repository file is
-/// ignored in every mode.
+/// ignored in every mode. Relative paths in a file (`extra_ruleset_dirs`,
+/// `trusted_repos`) resolve against that file's directory: the user file's
+/// own directory, or the repository root for the repository file.
 pub fn load(
     mode: Mode,
     repo_root: Option<&Path>,
@@ -372,17 +395,19 @@ pub fn load(
         ..Config::default()
     };
     let mut spec = IgnoreSpec::default();
-    if let Some(layer) = user_config_path()
-        .map(|p| read_layer(&p))
-        .transpose()?
-        .flatten()
-    {
-        cfg.merge(layer, true, &mut spec);
+    if let Some(path) = user_config_path() {
+        if let Some(mut layer) = read_layer(&path)? {
+            if let Some(dir) = path.parent() {
+                layer.resolve_paths(dir);
+            }
+            cfg.merge(layer, true, &mut spec);
+        }
     }
     if let Some(root) = repo_root {
         let allowed = mode != Mode::ClaudeCode || is_trusted(root, &cfg.trusted_repos);
         if allowed {
-            if let Some(layer) = read_layer(&root.join(REPO_CONFIG))? {
+            if let Some(mut layer) = read_layer(&root.join(REPO_CONFIG))? {
+                layer.resolve_paths(root);
                 cfg.merge(layer, false, &mut spec);
             }
         }

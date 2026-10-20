@@ -1,4 +1,6 @@
-use riskgrep_core::bundle::{bundle_key, load_or_compile};
+use riskgrep_core::bundle::{
+    bundle_key, bundle_key_for_version, load_or_compile, load_or_compile_keyed, Sidecar,
+};
 use riskgrep_core::paths::ensure_private_dir;
 use riskgrep_core::ruleset::{builtin_rulesets, Ruleset};
 use std::fs;
@@ -67,6 +69,81 @@ fn bundle_key_changes_with_source() {
     let rs2 = write_ruleset(d.path(), "t1", &RULE.replace("AKIA", "ASIA"));
     assert_ne!(bundle_key(&[&rs1]), bundle_key(&[&rs2]));
     assert_eq!(bundle_key(&[&rs1]), bundle_key(&[&rs1]));
+}
+
+#[test]
+fn bundle_key_changes_with_stopwords() {
+    let d = tempfile::tempdir().unwrap();
+    let rs1 = write_ruleset(d.path(), "t1", RULE);
+    fs::write(d.path().join("stopwords/common.txt"), "foo\nbaz\n").unwrap();
+    let rs2 = Ruleset::load_dir(d.path()).unwrap();
+    assert_ne!(bundle_key(&[&rs1]), bundle_key(&[&rs2]));
+    // A new list changes it too.
+    fs::write(d.path().join("stopwords/more.txt"), "foo\nbar\n").unwrap();
+    fs::write(d.path().join("stopwords/common.txt"), "foo\n\nbar\n").unwrap();
+    let rs3 = Ruleset::load_dir(d.path()).unwrap();
+    assert_ne!(bundle_key(&[&rs1]), bundle_key(&[&rs3]));
+}
+
+#[test]
+fn bundle_key_includes_riskgrep_version() {
+    let d = tempfile::tempdir().unwrap();
+    let rs = write_ruleset(d.path(), "t1", RULE);
+    assert_eq!(
+        bundle_key(&[&rs]),
+        bundle_key_for_version(env!("CARGO_PKG_VERSION"), &[&rs])
+    );
+    assert_ne!(
+        bundle_key_for_version("0.1.0", &[&rs]),
+        bundle_key_for_version("0.1.1", &[&rs])
+    );
+    let builtin = builtin_rulesets();
+    let refs: Vec<&Ruleset> = builtin.iter().collect();
+    assert_ne!(
+        bundle_key_for_version("0.1.0", &refs),
+        bundle_key_for_version("0.1.1", &refs)
+    );
+}
+
+#[test]
+fn builtin_sources_are_borrowed() {
+    for rs in builtin_rulesets() {
+        assert!(!rs.sources.is_empty());
+        for (name, src) in &rs.sources {
+            assert!(
+                matches!(src, std::borrow::Cow::Borrowed(_)),
+                "{} {name} was copied",
+                rs.id
+            );
+        }
+    }
+}
+
+#[test]
+fn sidecar_policies() {
+    let d = tempfile::tempdir().unwrap();
+    let c = tempfile::tempdir().unwrap();
+    let rs = write_ruleset(d.path(), "t1", RULE);
+    let key = bundle_key(&[&rs]);
+    let b = load_or_compile_keyed(&[&rs], c.path(), &key, Sidecar::IfMissing).unwrap();
+    assert!(b.compiled);
+    assert_eq!(b.hash, key);
+    let side = c.path().join("bundles").join(format!("{key}.meta.json"));
+    let load = |policy| {
+        let b = load_or_compile_keyed(&[&rs], c.path(), &key, policy).unwrap();
+        assert!(!b.compiled);
+    };
+    // IfMissing: an existing sidecar is not parsed again, even when corrupt.
+    fs::write(&side, b"{not json").unwrap();
+    load(Sidecar::IfMissing);
+    assert_eq!(fs::read(&side).unwrap(), b"{not json");
+    // Known bad (the caller failed to read it): rewritten.
+    load(Sidecar::Rewrite);
+    assert!(riskgrep_core::bundle::load_meta_sidecar(c.path(), &key).is_some());
+    // Missing: rewritten under either policy.
+    fs::remove_file(&side).unwrap();
+    load(Sidecar::IfMissing);
+    assert!(riskgrep_core::bundle::load_meta_sidecar(c.path(), &key).is_some());
 }
 
 #[test]

@@ -144,7 +144,7 @@ fn walk_sorted_and_recursive() {
 }
 
 #[test]
-fn walk_limit_partial() {
+fn walk_limit_unscanned() {
     let d = tempfile::tempdir().unwrap();
     for i in 0..5 {
         fs::write(d.path().join(format!("f{i}.txt")), "x\n").unwrap();
@@ -158,7 +158,13 @@ fn walk_limit_partial() {
         .iter()
         .find(|t| t.target == d.path().display().to_string())
         .expect("directory target");
-    assert!(matches!(dir.status, TargetStatus::Partial { .. }));
+    // A truncated walk is an error, so `on_error` applies to it.
+    assert_eq!(
+        dir.status,
+        TargetStatus::Unscanned {
+            reason: "directory walk stopped at the limit of 3 files (limits.walk_files)".into()
+        }
+    );
     let files = r
         .targets
         .iter()
@@ -178,7 +184,8 @@ fn walk_limit_partial() {
             .map(|i| format!("{base}/f{i}.txt"))
             .collect::<Vec<_>>()
     );
-    assert_eq!(r.summary.partial, 1);
+    assert_eq!(r.summary.unscanned, 1);
+    assert_eq!(r.summary.partial, 0);
 }
 
 #[test]
@@ -652,4 +659,233 @@ fn untrusted_baseline_ignored_for_claude_code_honoured_for_git() {
     let mut g = RiskGrep::with_cache_dir(cfg, Some(repo.path()), Some(shared_cache())).unwrap();
     let trusted = g.scan_paths(std::slice::from_ref(&f));
     assert_eq!(only(&trusted).scores[&secret()], 0.0);
+}
+
+fn biometric() -> Category {
+    Category("biometric".into())
+}
+
+/// A scanner whose limits are small enough that a few KB is "large".
+fn small_limits() -> RiskGrep {
+    let mut cfg = Config::default();
+    cfg.limits.text_max = 1024;
+    cfg.limits.sample = 256;
+    RiskGrep::with_cache_dir(cfg, None, Some(shared_cache())).unwrap()
+}
+
+#[test]
+fn npz_over_text_limit_scores_like_small() {
+    let d = tempfile::tempdir().unwrap();
+    let small = d.path().join("small.npz");
+    let large = d.path().join("large.npz");
+    fs::write(
+        &small,
+        synth::npz(&[("vectors.npy", synth::npy("<f4", &[100, 192]))]),
+    )
+    .unwrap();
+    let big = synth::npz(&[("vectors.npy", synth::npy("<f4", &[12_000, 192]))]);
+    assert!(big.len() > 8 << 20, "{}", big.len());
+    fs::write(&large, big).unwrap();
+    let r = scanner().scan_paths(&[small, large]);
+    for t in &r.targets {
+        assert_eq!(t.status, TargetStatus::Scanned, "{}", t.target);
+        assert_eq!(t.scores[&biometric()], 70.0, "{}", t.target);
+    }
+}
+
+#[test]
+fn npz_over_text_limit_bank_before_large_member() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("largebank.npz");
+    let big = synth::npz(&[
+        ("alice.npy", synth::npy("<f4", &[192])),
+        ("bob.npy", synth::npy("<f4", &[192])),
+        ("carol.npy", synth::npy("<f4", &[192])),
+        ("zz_noise.npy", synth::npy("<f4", &[2_400_000])),
+    ]);
+    assert!(big.len() > 8 << 20, "{}", big.len());
+    fs::write(&f, big).unwrap();
+    let r = scanner().scan_paths(&[f]);
+    let t = only(&r);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&biometric()], 94.0);
+}
+
+#[test]
+fn npz_over_text_limit_unreadable_is_unscanned() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("broken.npz");
+    let mut data = synth::npz(&[("a.npy", synth::npy("<f4", &[4096]))]);
+    data.truncate(data.len() - 100);
+    fs::write(&f, data).unwrap();
+    let r = small_limits().scan_paths(&[f]);
+    assert_eq!(
+        only(&r).status,
+        TargetStatus::Unscanned {
+            reason: "npz central directory unreadable".into()
+        }
+    );
+    assert_eq!(r.summary.unscanned, 1);
+}
+
+/// About 4 KB of filler text ending in a key line, and the key's offset.
+fn text_with_tail_key(seed: u64) -> (String, u64) {
+    let mut text = synth::source_text(4000, seed);
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    let key = synth::fake_secret("aws_access_key", seed);
+    let at = (text.len() + "id = \"".len()) as u64;
+    text.push_str(&format!("id = \"{key}\"\n"));
+    (text, at)
+}
+
+#[test]
+fn partial_text_tail_evidence_has_file_offsets_and_no_lines() {
+    let (text, at) = text_with_tail_key(31);
+    let head_key = aws_line(32);
+    let text = format!("{head_key}{text}");
+    let at = at + head_key.len() as u64;
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("big.txt");
+    fs::write(&f, &text).unwrap();
+    let r = small_limits().scan_paths(&[f]);
+    let t = only(&r);
+    assert!(matches!(t.status, TargetStatus::Partial { .. }));
+    let ev = t
+        .evidence
+        .iter()
+        .find(|e| e.rule == "aws_access_token")
+        .expect("aws evidence");
+    assert_eq!(ev.locations.len(), 2);
+    let head = &ev.locations[0];
+    assert_eq!((head.line_start, head.line_end), (1, 1));
+    let tail = &ev.locations[1];
+    assert_eq!(tail.start, at);
+    assert_eq!(tail.end, at + 20);
+    // Lines of the unread middle are unknown, so tail lines are 0.
+    assert_eq!((tail.line_start, tail.line_end), (0, 0));
+}
+
+#[test]
+fn partial_blob_ignores_only_lines() {
+    let (text, _) = text_with_tail_key(33);
+    let lines = text.lines().count() as u32;
+    let mut g = small_limits();
+    // Only the last line was added; its line number within the sample is
+    // far below `lines`, so filtering by line would drop it.
+    let t = g.scan_blob(
+        "big.txt",
+        b"blob-partial",
+        text.as_bytes(),
+        Some(std::slice::from_ref(&(lines..=lines))),
+    );
+    assert!(matches!(t.status, TargetStatus::Partial { .. }));
+    assert_eq!(t.scores[&secret()], 95.0);
+}
+
+fn rel_to(root: &Path) -> impl Fn(&str) -> String + '_ {
+    move |t: &str| {
+        fs::canonicalize(t)
+            .unwrap()
+            .strip_prefix(root)
+            .unwrap()
+            .display()
+            .to_string()
+    }
+}
+
+fn scan_in_repo(repo: &Path, f: &Path) -> Report {
+    let mut g =
+        RiskGrep::with_cache_dir(Config::default(), Some(repo), Some(shared_cache())).unwrap();
+    g.scan_paths(&[f.to_path_buf()])
+}
+
+#[test]
+fn baseline_of_header_evidence_follows_content() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(repo.path()).unwrap();
+    let f = repo.path().join("vectors.npy");
+    fs::write(&f, synth::npy_header("<f4", &[10, 192])).unwrap();
+    let first = scanner().scan_paths(std::slice::from_ref(&f));
+    assert_eq!(only(&first).scores[&biometric()], 70.0);
+    let b = riskgrep_core::suppress::Baseline::create(&first.targets, rel_to(&root)).unwrap();
+    b.save(&repo.path().join(".riskgrep-baseline.json"))
+        .unwrap();
+    let known = scan_in_repo(repo.path(), &f);
+    assert_eq!(only(&known).scores[&biometric()], 0.0, "unchanged: known");
+    fs::write(&f, synth::npy_header("<f4", &[2000, 512])).unwrap();
+    let after = scan_in_repo(repo.path(), &f);
+    assert_eq!(only(&after).suppressed, 0);
+    assert_eq!(only(&after).scores[&biometric()], 70.0, "changed: new");
+}
+
+#[test]
+fn baseline_of_location_free_evidence_follows_content() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(repo.path()).unwrap();
+    let f = repo.path().join("speaker_notes.txt");
+    fs::write(&f, "agenda\n").unwrap();
+    let first = scanner().scan_paths(std::slice::from_ref(&f));
+    let ev = only(&first)
+        .evidence
+        .iter()
+        .find(|e| e.rule == "path_biometric_name")
+        .expect("path rule");
+    assert!(ev.locations.is_empty());
+    let b = riskgrep_core::suppress::Baseline::create(&first.targets, rel_to(&root)).unwrap();
+    b.save(&repo.path().join(".riskgrep-baseline.json"))
+        .unwrap();
+    let known = scan_in_repo(repo.path(), &f);
+    assert!(only(&known).evidence.is_empty(), "unchanged: known");
+    fs::write(&f, "agenda, revised\n").unwrap();
+    let after = scan_in_repo(repo.path(), &f);
+    assert!(only(&after)
+        .evidence
+        .iter()
+        .any(|e| e.rule == "path_biometric_name"));
+}
+
+/// A ruleset whose one rule flags `token_[a-z]+` unless the match holds a
+/// word of the `probe_words` stopword list.
+fn stopword_ruleset(dir: &Path, words: &str) {
+    fs::create_dir_all(dir.join("stopwords")).unwrap();
+    fs::write(
+        dir.join("ruleset.toml"),
+        "id = \"stopword_probe\"\nversion = \"1\"\nlicence = \"MIT\"\n\
+         description = \"t\"\ncategories = [\"probe\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("a.yar"),
+        "rule probe_token { meta:\n category = \"probe\"\n weight = 60\n \
+         post = \"stopwords\"\n stopwords = \"probe_words\"\n \
+         strings: $re = /token_[a-z]+/\n condition: $re }\n",
+    )
+    .unwrap();
+    fs::write(dir.join("stopwords/probe_words.txt"), words).unwrap();
+}
+
+#[test]
+fn stopword_change_invalidates_cached_evidence() {
+    let rules = tempfile::tempdir().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("probe.txt");
+    fs::write(&f, "value = token_example\n").unwrap();
+    age(&f);
+    let probe = Category("probe".into());
+    let score = |words: &str| {
+        stopword_ruleset(rules.path(), words);
+        let cfg = Config {
+            rulesets: vec!["stopword_probe".into()],
+            extra_ruleset_dirs: vec![rules.path().to_path_buf()],
+            ..Config::default()
+        };
+        let mut g = RiskGrep::with_cache_dir(cfg, None, Some(shared_cache())).unwrap();
+        only(&g.scan_paths(std::slice::from_ref(&f))).scores[&probe]
+    };
+    assert_eq!(score("unrelated\n"), 60.0);
+    assert_eq!(score("unrelated\n"), 60.0, "cached");
+    assert_eq!(score("example\n"), 0.0, "stopword added");
+    assert_eq!(score("unrelated\n"), 60.0, "stopword removed");
 }

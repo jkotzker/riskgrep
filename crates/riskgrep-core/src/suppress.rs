@@ -1,7 +1,10 @@
 //! Suppression: path/rule ignore globs and the fingerprint baseline.
 //! Fingerprints are keyed hashes of the rule, the repository-relative path,
-//! and the digest of the matched bytes, so neither the baseline file nor a
-//! fingerprint can reveal a matched value.
+//! and the digest the engine stored for the finding (of the matched bytes,
+//! or of the whole content scanned for header and location-free findings),
+//! so neither the baseline file nor a fingerprint can reveal a matched
+//! value, and a header or location-free finding stays known only while the
+//! content is unchanged.
 
 use crate::model::TargetReport;
 use globset::{Glob, GlobMatcher};
@@ -109,8 +112,9 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Keyed fingerprint of one finding. `matched_digest` is the BLAKE3 digest
-/// the engine stored in `Evidence.fingerprints`; structural evidence has
-/// none and is identified by rule and path alone.
+/// the engine stored in `Evidence.fingerprints`; evidence without one
+/// (built by hand, or cached before digests were stored for it) is
+/// identified by rule and path alone.
 pub fn fingerprint(
     key: &[u8; 32],
     rule: &str,
@@ -129,12 +133,22 @@ pub fn fingerprint(
 }
 
 /// Fingerprint inputs of one evidence item: one digest per location when
-/// the evidence is location-addressable, otherwise a single unit.
+/// the evidence is location-addressable, otherwise a single unit carrying
+/// the content digest of location-free evidence.
 fn units(ev: &crate::model::Evidence) -> Vec<Option<&[u8; 32]>> {
     if !ev.locations.is_empty() && ev.fingerprints.len() == ev.locations.len() {
         ev.fingerprints.iter().map(Some).collect()
     } else {
-        vec![None]
+        vec![whole_unit(ev)]
+    }
+}
+
+/// The digest identifying evidence suppressed as one unit.
+fn whole_unit(ev: &crate::model::Evidence) -> Option<&[u8; 32]> {
+    if ev.locations.is_empty() {
+        ev.fingerprints.first()
+    } else {
+        None
     }
 }
 
@@ -252,7 +266,7 @@ pub fn apply(
                 ignored || baseline.is_some_and(|b| b.contains(&ev.rule, &path, digest))
             };
             if ev.locations.is_empty() || ev.fingerprints.len() != ev.locations.len() {
-                if suppress(None) {
+                if suppress(whole_unit(&ev)) {
                     removed += 1;
                 } else {
                     kept.push(ev);

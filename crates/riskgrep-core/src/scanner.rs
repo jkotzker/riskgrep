@@ -5,9 +5,9 @@
 //! The bundle is compiled or loaded only when some target misses the cache;
 //! scoring cached evidence reads the rule-metadata sidecar instead.
 
-use crate::bundle;
+use crate::bundle::{self, Sidecar};
 use crate::cache::{Cache, StatKey};
-use crate::classify::{self, Content, FileClass, Known};
+use crate::classify::{self, Content, FileClass, Known, Tail};
 use crate::config::{self, Config};
 use crate::engine::{Engine, ScanError};
 use crate::meta::RuleMeta;
@@ -74,6 +74,9 @@ pub struct RiskGrep {
     cache: Option<Cache>,
     engine: EngineState,
     meta: MetaState,
+    /// Set when the rule-metadata sidecar was found unusable, so the next
+    /// bundle load rewrites it.
+    sidecar_bad: bool,
     baseline: Option<Baseline>,
     /// Suppression paths are relative to this (repository root, else cwd).
     rel_base: Option<PathBuf>,
@@ -132,7 +135,7 @@ struct Pending {
 
 enum Step {
     Done(Raw),
-    Scan(Pending),
+    Scan(Box<Pending>),
 }
 
 enum Job {
@@ -222,6 +225,25 @@ fn keep_lines(evidence: &mut Vec<Evidence>, only: &[RangeInclusive<u32>]) {
     });
 }
 
+/// Move evidence found in the tail sample of a partly read text file to its
+/// offsets in the file. Its line numbers are unknown (0): the lines of the
+/// unread middle were never counted. A range across the joint keeps its
+/// start and also loses its lines.
+fn place_tail(evidence: &mut [Evidence], tail: Tail) {
+    let to_file = |o: u64| o - tail.at + tail.file_offset;
+    for l in evidence.iter_mut().flat_map(|e| e.locations.iter_mut()) {
+        if l.end < tail.at {
+            continue;
+        }
+        if l.start >= tail.at {
+            l.start = to_file(l.start);
+        }
+        l.end = to_file(l.end.max(tail.at));
+        l.line_start = 0;
+        l.line_end = 0;
+    }
+}
+
 fn new_scanner<'r>(engine: &'r Engine, cfg: &Config) -> yara_x::Scanner<'r> {
     let mut s = yara_x::Scanner::new(engine.rules());
     s.set_timeout(cfg.limits.time_budget);
@@ -230,7 +252,9 @@ fn new_scanner<'r>(engine: &'r Engine, cfg: &Config) -> yara_x::Scanner<'r> {
 
 /// Resolve the enabled rulesets: built-ins plus `extra_ruleset_dirs`, narrowed
 /// to `cfg.rulesets` when it names any, then to rulesets scoring an enabled
-/// category.
+/// category. [`config::load`] makes every directory absolute (relative to
+/// the config file that named it); `base` anchors a relative directory only
+/// in a configuration built by hand.
 pub fn resolve_rulesets(cfg: &Config, base: Option<&Path>) -> Result<Vec<Ruleset>, RiskGrepError> {
     let mut all = builtin_rulesets();
     for d in &cfg.extra_ruleset_dirs {
@@ -275,8 +299,9 @@ pub fn resolve_rulesets(cfg: &Config, base: Option<&Path>) -> Result<Vec<Ruleset
 
 impl RiskGrep {
     /// Opens the evidence cache and resolves the enabled rulesets; the rules
-    /// bundle is loaded on the first cache miss. `repo_root` anchors relative
-    /// `extra_ruleset_dirs`, the baseline, and suppression paths.
+    /// bundle is loaded on the first cache miss. `repo_root` anchors the
+    /// baseline and suppression paths (and, in a hand-built configuration,
+    /// relative `extra_ruleset_dirs`; see [`resolve_rulesets`]).
     pub fn new(cfg: Config, repo_root: Option<&Path>) -> Result<RiskGrep, RiskGrepError> {
         let dir = crate::paths::cache_dir();
         if dir.is_none() {
@@ -322,6 +347,7 @@ impl RiskGrep {
             cache,
             engine: EngineState::NotLoaded,
             meta: MetaState::NotLoaded,
+            sidecar_bad: false,
             baseline,
             rel_base: base,
             cwd,
@@ -334,7 +360,8 @@ impl RiskGrep {
     }
 
     /// Scan files and directories. Explicit paths follow symlinks; directory
-    /// walks do not, ignore `.gitignore`, and stop at `limits.walk_files`.
+    /// walks do not, ignore `.gitignore`, and stop at `limits.walk_files`
+    /// (the directory is then reported unscanned).
     pub fn scan_paths(&mut self, paths: &[PathBuf]) -> Report {
         let jobs = self.expand(paths);
         let mut raws = Vec::with_capacity(jobs.len());
@@ -344,7 +371,7 @@ impl RiskGrep {
             match self.prepare(job) {
                 Step::Done(r) => raws.push(r),
                 Step::Scan(p) => {
-                    first = Some(p);
+                    first = Some(*p);
                     break;
                 }
             }
@@ -360,7 +387,7 @@ impl RiskGrep {
             for job in jobs {
                 let raw = match self.prepare(job) {
                     Step::Done(r) => r,
-                    Step::Scan(p) => self.finish(engine.zip(scanner.as_mut()), p),
+                    Step::Scan(p) => self.finish(engine.zip(scanner.as_mut()), *p),
                 };
                 raws.push(raw);
             }
@@ -389,7 +416,8 @@ impl RiskGrep {
 
     /// Scan one git blob. `name` is its repository-relative path; results are
     /// cached by `blob_id`. With `only_lines`, evidence located outside those
-    /// lines is dropped before scoring.
+    /// lines is dropped before scoring, unless the blob was only partly read:
+    /// then line numbers of its tail are unknown and all evidence is kept.
     pub fn scan_blob(
         &mut self,
         name: &str,
@@ -399,7 +427,9 @@ impl RiskGrep {
     ) -> TargetReport {
         let mut raw = self.prepare_blob(name, blob_id, bytes);
         if let Some(only) = only_lines {
-            keep_lines(&mut raw.evidence, only);
+            if !matches!(raw.status, TargetStatus::Partial { .. }) {
+                keep_lines(&mut raw.evidence, only);
+            }
         }
         self.finalize(vec![raw]).remove(0)
     }
@@ -425,6 +455,10 @@ impl RiskGrep {
         }
         match classify::slice_for_scan(bytes, &class, &self.cfg.limits) {
             Err(e) => Raw::status(name.to_string(), unreadable(&e)),
+            Ok(Content {
+                unscanned: Some(reason),
+                ..
+            }) => Raw::status(name.to_string(), unscanned(&reason)),
             Ok(content) => self.scan_now(Pending {
                 target: name.to_string(),
                 rel: name.to_string(),
@@ -466,14 +500,14 @@ impl RiskGrep {
                 Err(e) => jobs.push(Job::Done(Raw::status(target, unreadable(&e)))),
                 Ok(m) if m.is_dir() => {
                     if walk(p, &mut jobs, &mut budget) {
+                        // An error, not a partial read: files were left out.
                         jobs.push(Job::Done(Raw::status(
                             target,
-                            TargetStatus::Partial {
-                                not_read: format!(
-                                    "directory walk stopped at {} files",
-                                    self.cfg.limits.walk_files
-                                ),
-                            },
+                            unscanned(&format!(
+                                "directory walk stopped at the limit of {} files \
+                                 (limits.walk_files)",
+                                self.cfg.limits.walk_files
+                            )),
                         )));
                     }
                 }
@@ -575,6 +609,9 @@ impl RiskGrep {
         if let Some(hook) = AFTER_READ.get() {
             hook(&real);
         }
+        if let Some(reason) = &content.unscanned {
+            return done(unscanned(reason));
+        }
         // A file that changed while being read still gets its evidence
         // cached: that row is content-addressed (keyed by the hash of the
         // bytes actually scanned), so it is correct for that content. Only
@@ -596,7 +633,7 @@ impl RiskGrep {
                 return hit(ev);
             }
         }
-        Ok(Step::Scan(Pending {
+        Ok(Step::Scan(Box::new(Pending {
             target: target.to_string(),
             rel,
             path_ext,
@@ -604,7 +641,7 @@ impl RiskGrep {
             content,
             hash,
             stat: stable.then_some((key, now)),
-        }))
+        })))
     }
 
     /// Run the engine over pending content and record the result in the
@@ -613,11 +650,14 @@ impl RiskGrep {
         let Some((engine, scanner)) = engine else {
             return Raw::status(p.target, unscanned("rule load failure"));
         };
-        let ev = match engine.scan_content(scanner, &p.path_ext, &p.content.bytes) {
+        let mut ev = match engine.scan_content(scanner, &p.path_ext, &p.content.bytes) {
             Ok(ev) => ev,
             Err(ScanError::Timeout) => return Raw::status(p.target, unscanned("timeout")),
             Err(ScanError::Yara(_)) => return Raw::status(p.target, unscanned("scan error")),
         };
+        if let Some(tail) = p.content.tail {
+            place_tail(&mut ev, tail);
+        }
         if let (Some(c), Some(h)) = (self.cache.as_ref(), p.hash) {
             c.put_evidence(h, &p.ekey, &ev);
             if let Some((k, examined)) = &p.stat {
@@ -636,8 +676,13 @@ impl RiskGrep {
             return;
         }
         let refs: Vec<&Ruleset> = self.rulesets.iter().collect();
+        let sidecar = if self.sidecar_bad {
+            Sidecar::Rewrite
+        } else {
+            Sidecar::IfMissing
+        };
         let loaded = match &self.cache_dir {
-            Some(d) => bundle::load_or_compile(&refs, d),
+            Some(d) => bundle::load_or_compile_keyed(&refs, d, &self.key, sidecar),
             None => bundle::compile_uncached(&refs),
         };
         let b = match loaded {
@@ -701,6 +746,7 @@ impl RiskGrep {
             self.meta = self.scoring_meta(m);
             return;
         }
+        self.sidecar_bad = self.cache_dir.is_some();
         self.load_engine();
         if matches!(self.meta, MetaState::NotLoaded) {
             self.meta = MetaState::Failed;

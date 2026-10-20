@@ -1,6 +1,8 @@
 use riskgrep_core::classify::{
-    classify, read_for_scan, safetensors_header_fits, FileClass, Known, Limits,
+    classify, read_for_scan, safetensors_header_fits, slice_for_scan, FileClass, Known, Limits,
+    Tail,
 };
+use riskgrep_core::synth;
 use std::fs::File;
 use std::io::Write;
 
@@ -211,6 +213,22 @@ fn text_over_cap_is_sampled() {
         c.partial.as_deref(),
         Some("bytes 1048576..8388608 not read")
     );
+    // Content from `at` onward is the file's last MiB.
+    assert_eq!(
+        c.tail,
+        Some(Tail {
+            at: mib as u64 + 1,
+            file_offset: (size - mib) as u64,
+        })
+    );
+}
+
+#[test]
+fn whole_text_has_no_tail() {
+    let (_t, f) = temp_with(b"hello\n");
+    let c = read_for_scan(&f, 6, &FileClass::Text, &Limits::default()).unwrap();
+    assert_eq!(c.tail, None);
+    assert_eq!(c.unscanned, None);
 }
 
 #[test]
@@ -326,7 +344,7 @@ fn npz_and_keystore_read_whole_up_to_cap() {
     let c = read_for_scan(
         &f,
         size,
-        &FileClass::KnownBinary(Known::Npz),
+        &FileClass::KnownBinary(Known::KeyStore),
         &Limits::default(),
     )
     .unwrap();
@@ -336,6 +354,120 @@ fn npz_and_keystore_read_whole_up_to_cap() {
         Some("bytes 8388608..8388708 not read")
     );
     drop(t);
+}
+
+/// An `.npz` over the text limit: one member of `big` floats (so the file
+/// is large) placed after `members`.
+fn big_npz(members: &[(&str, Vec<u8>)], big: u64) -> Vec<u8> {
+    let mut all: Vec<(&str, Vec<u8>)> = members.to_vec();
+    all.push(("zz_noise.npy", synth::npy("<f4", &[big])));
+    synth::npz(&all)
+}
+
+#[test]
+fn npz_over_limit_reads_member_headers_only() {
+    let limits = Limits {
+        text_max: 4096,
+        ..Limits::default()
+    };
+    let small = vec![
+        ("alice.npy", synth::npy("<f4", &[192])),
+        ("notes.txt", b"not an array".to_vec()),
+    ];
+    let data = big_npz(&small, 4096);
+    assert!(data.len() > 4096 * 4);
+    let c = slice_for_scan(&data, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
+    assert_eq!(c.partial, None);
+    assert_eq!(c.unscanned, None);
+    assert!(c.bytes.len() < data.len() / 2, "{}", c.bytes.len());
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(&c.bytes)).unwrap();
+    let names: Vec<String> = (0..z.len())
+        .map(|i| z.by_index(i).unwrap().name().to_string())
+        .collect();
+    assert_eq!(names, ["alice.npy", "zz_noise.npy"]);
+    // Each member keeps the first bytes of its array: the whole small one,
+    // and the header (plus a little data) of the large one.
+    let mut head = Vec::new();
+    std::io::Read::read_to_end(&mut z.by_index(0).unwrap(), &mut head).unwrap();
+    assert_eq!(head, small[0].1);
+    let mut head = Vec::new();
+    std::io::Read::read_to_end(&mut z.by_index(1).unwrap(), &mut head).unwrap();
+    assert_eq!(head.len(), 4096);
+    assert_eq!(head[..6], *b"\x93NUMPY");
+    // The same input gives the same bytes (the result is cached by hash).
+    let again = slice_for_scan(&data, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
+    assert_eq!(again, c);
+}
+
+#[test]
+fn npz_over_limit_reads_compressed_members() {
+    let limits = Limits {
+        text_max: 4096,
+        ..Limits::default()
+    };
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let emb = synth::npy("<f4", &[3, 256]);
+    for (name, bytes) in [
+        ("emb.npy", emb.clone()),
+        ("noise.npy", synth::npy("<f4", &[20_000])),
+    ] {
+        w.start_file(name, opts).unwrap();
+        std::io::Write::write_all(&mut w, &bytes).unwrap();
+    }
+    let data = w.finish().unwrap().into_inner();
+    assert!(data.len() > 4096);
+    let c = slice_for_scan(&data, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
+    assert_eq!(c.unscanned, None);
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(&c.bytes)).unwrap();
+    let mut head = Vec::new();
+    std::io::Read::read_to_end(&mut z.by_index(0).unwrap(), &mut head).unwrap();
+    assert_eq!(head, emb[..4096.min(emb.len())]);
+}
+
+#[test]
+fn npz_over_limit_without_directory_is_unscanned() {
+    let limits = Limits {
+        text_max: 4096,
+        ..Limits::default()
+    };
+    let mut data = synth::npz(&[("a.npy", synth::npy("<f4", &[4096]))]);
+    // Cut the central directory and end record off.
+    let cut = data.len() - 100;
+    data.truncate(cut);
+    let c = slice_for_scan(&data, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
+    assert!(c.bytes.is_empty());
+    assert_eq!(c.partial, None);
+    assert_eq!(
+        c.unscanned.as_deref(),
+        Some("npz central directory unreadable")
+    );
+    // A file of zeros: no end record anywhere.
+    let zeros = vec![0u8; 64 * 1024];
+    let c = slice_for_scan(&zeros, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
+    assert!(c.unscanned.is_some());
+}
+
+#[test]
+fn npz_directory_search_is_bounded() {
+    // A large file with no end record: the backward search stops at the
+    // directory budget instead of reading the whole file.
+    let size = 64 * 1024 * 1024u64;
+    let t = tempfile::NamedTempFile::new().unwrap();
+    t.as_file().set_len(size).unwrap();
+    let f = File::open(t.path()).unwrap();
+    let c = read_for_scan(
+        &f,
+        size,
+        &FileClass::KnownBinary(Known::Npz),
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        c.unscanned.as_deref(),
+        Some("npz central directory not read within 8388608 bytes")
+    );
 }
 
 #[test]
