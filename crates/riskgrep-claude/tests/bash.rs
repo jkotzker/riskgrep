@@ -105,16 +105,70 @@ fn absolute_path_is_tested_as_given() {
 }
 
 #[test]
-fn tilde_expands_with_home() {
-    // The only test that sets HOME; no fixture case uses `~`, so nothing else
-    // in this binary reads it.
+fn home_and_tilde_expand_with_home() {
+    // The only test that sets HOME; no fixture case uses `~` or `$HOME`, so
+    // nothing else in this binary reads it.
     let home = tempfile::tempdir().expect("home tempdir");
     populate(home.path(), &[".netrc".to_string()]);
     std::env::set_var("HOME", home.path());
     let cwd = tempfile::tempdir().expect("cwd tempdir");
-    let got = bash_targets("cat ~/.netrc", cwd.path());
     let want = std::fs::canonicalize(home.path().join(".netrc")).expect("canonical");
-    assert_eq!(got.files, vec![want]);
+    for command in [
+        "cat ~/.netrc",
+        "cat $HOME/.netrc",
+        "cat ${HOME}/.netrc",
+        "cat \"$HOME\"/.netrc",
+        "cat \"${HOME}/.netrc\"",
+        "cd /; cat ~/.netrc",
+    ] {
+        let got = bash_targets(command, cwd.path());
+        assert_eq!(got.files, vec![want.clone()], "{command}");
+        assert_eq!(got.unresolved, command.starts_with("cd"), "{command}");
+    }
+    for command in [
+        "HOME=/x cat $HOME/.netrc",
+        "HOME=/x; cat ~/.netrc",
+        "export HOME=/x; cat ~/.netrc",
+        "unset HOME; cat \"$HOME/.netrc\"",
+        "read -r HOME < f; cat $HOME/.netrc",
+        "for HOME in /x; do cat ~/.netrc; done",
+        "cat ~/.netrc; declare HOME=/x",
+        "source env.sh; cat ~/.netrc",
+        "env -i sh -c 'cat $HOME/.netrc'",
+        "su bob -c 'cat ~/.netrc'",
+        "cat ~bob/.netrc",
+        "cat ${HOME%/}/.netrc",
+    ] {
+        let got = bash_targets(command, cwd.path());
+        assert!(got.files.is_empty(), "{command}: {:?}", got.files);
+        assert!(got.unresolved, "{command}");
+    }
+    // HOME changes do not affect $PWD, and cd does not affect $HOME.
+    populate(cwd.path(), &["a.txt".to_string()]);
+    let got = bash_targets("export HOME=/x; cat \"$PWD/a.txt\"", cwd.path());
+    assert_eq!(got.files.len(), 1);
+    assert!(!got.unresolved);
+}
+
+#[test]
+fn unquoted_pwd_with_a_space_is_not_split() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path().join("my dir");
+    populate(&cwd, &["a.txt".to_string()]);
+    let got = bash_targets("cat $PWD/a.txt", &cwd);
+    assert!(got.files.is_empty());
+    assert!(got.unresolved);
+    let got = bash_targets("cat \"$PWD/a.txt\"", &cwd);
+    assert_eq!(got.files.len(), 1);
+    assert!(!got.unresolved);
+}
+
+#[test]
+fn unbounded_budget_does_not_panic() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    populate(tmp.path(), &["a.txt".to_string()]);
+    let got = bash_targets_within("cat a.txt", tmp.path(), Duration::MAX);
+    assert_eq!(got.files.len(), 1);
     assert!(!got.unresolved);
 }
 

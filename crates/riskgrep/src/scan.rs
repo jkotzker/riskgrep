@@ -148,14 +148,13 @@ pub fn scan(a: ScanArgs) -> Result<i32, CliError> {
     let report = merge(parts);
 
     let mut stdout = io::stdout().lock();
-    match a.format {
-        Format::Json => {
-            serde_json::to_writer_pretty(&mut stdout, &report).map_err(io::Error::from)?;
-            writeln!(stdout)?;
-        }
-        Format::Text => stdout.write_all(text::render(&report).as_bytes())?,
-    }
-    stdout.flush()?;
+    let written = match a.format {
+        Format::Json => serde_json::to_writer_pretty(&mut stdout, &report)
+            .map_err(io::Error::from)
+            .and_then(|()| writeln!(stdout)),
+        Format::Text => stdout.write_all(text::render(&report).as_bytes()),
+    };
+    crate::stdout_result(written.and_then(|()| stdout.flush()))?;
     Ok(exit_code(&report, &thresholds, on_error))
 }
 
@@ -238,12 +237,12 @@ pub fn baseline(a: BaselineArgs) -> Result<i32, CliError> {
     if root.is_none() {
         eprintln!("riskgrep: not in a git repository: scans apply a baseline only inside one");
     }
-    println!(
+    outln!(
         "wrote {} fingerprint{} to {}",
         b.fingerprints.len(),
         if b.fingerprints.len() == 1 { "" } else { "s" },
         out.display()
-    );
+    )?;
     Ok(EXIT_OK)
 }
 
