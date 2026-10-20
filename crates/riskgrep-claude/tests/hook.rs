@@ -313,6 +313,7 @@ fn grep_walk_limit_applies_on_error() {
     let (d, reason) = e.run("Grep", json!({ "pattern": "x" })).decision();
     assert_eq!(d, "ask");
     assert!(reason.contains("walk limit"), "{reason}");
+    assert!(reason.contains(&e.dir().display().to_string()), "{reason}");
 }
 
 #[test]
@@ -348,6 +349,48 @@ fn untrusted_repo_config_ignored() {
     let f = e.write("emb.safetensors", &embedding());
     let (d, _) = e.run("Read", json!({ "file_path": f })).decision();
     assert_eq!(d, "deny");
+}
+
+#[test]
+fn trusted_repo_config_is_read() {
+    // Positive control for the test above: once the repository is trusted,
+    // the same file changes the outcome (85 < 99 deny, but still >= 50 ask).
+    let e = Env::new();
+    e.git_init();
+    e.user_config(&format!(
+        "trusted_repos = [{:?}]\n",
+        e.dir().display().to_string()
+    ));
+    e.write(
+        ".riskgrep.toml",
+        b"[claude_code.thresholds.biometric]\ndeny = 99\n",
+    );
+    let f = e.write("emb.safetensors", &embedding());
+    let (d, _) = e.run("Read", json!({ "file_path": f })).decision();
+    assert_eq!(d, "ask");
+}
+
+#[test]
+fn nested_directory_finds_repo_root_and_worktree_file() {
+    // A subdirectory of a trusted repository, and a `.git` file as in
+    // worktrees: both identify the repository root without spawning git.
+    let e = Env::new();
+    e.write("repo/.git", b"gitdir: /nonexistent\n");
+    e.write(
+        "repo/.riskgrep.toml",
+        b"[claude_code.thresholds.biometric]\ndeny = 99\n",
+    );
+    e.user_config(&format!(
+        "trusted_repos = [{:?}]\n",
+        e.dir().join("repo").display().to_string()
+    ));
+    let f = e.write("repo/sub/emb.safetensors", &embedding());
+    let input = json!({
+        "hook_event_name": "PreToolUse", "tool_name": "Read",
+        "tool_input": {"file_path": f}, "cwd": e.dir().join("repo/sub"),
+    });
+    let (d, _) = e.run_raw(input.to_string().as_bytes()).decision();
+    assert_eq!(d, "ask");
 }
 
 #[test]
@@ -390,9 +433,16 @@ fn malformed_input_follows_on_error() {
 #[test]
 fn never_allows() {
     let e = Env::new();
-    let f = e.write("main.rs", synth::source_text(500, 1).as_bytes());
-    let out = e.run("Read", json!({ "file_path": f }));
-    assert!(!out.stdout.contains("allow"));
+    let clean = e.write("main.rs", synth::source_text(500, 1).as_bytes());
+    let secret = e.write("config.env", aws_file().as_bytes());
+    let emb = e.write("emb.safetensors", &embedding());
+    for f in [&clean, &secret, &emb] {
+        let out = e.run("Read", json!({ "file_path": f }));
+        assert!(!out.stdout.contains("allow"), "{}", out.stdout);
+    }
+    e.user_config("[claude_code]\non_error = \"allow\"\n");
+    let out = e.run_raw(b"not json");
+    assert!(!out.stdout.contains("allow"), "{}", out.stdout);
 }
 
 #[test]

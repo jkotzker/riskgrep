@@ -82,7 +82,12 @@ pub fn decide(report: &Report, unresolved: bool, cfg: &ClaudeCodeConfig) -> Deci
                     rules.push(&e.rule);
                 }
             }
+            let extra = rules.len().saturating_sub(RULES_NAMED);
             rules.truncate(RULES_NAMED);
+            let mut named = rules.join(", ");
+            if extra > 0 {
+                named.push_str(&format!(", and {extra} more"));
+            }
             let level = if sev == Sev::Deny { "deny" } else { "ask" };
             items.push(Item {
                 sev,
@@ -92,7 +97,7 @@ pub fn decide(report: &Report, unresolved: bool, cfg: &ClaudeCodeConfig) -> Deci
                     t.target,
                     cat.0,
                     score,
-                    rules.join(", "),
+                    named,
                     num(at)
                 ),
             });
@@ -201,6 +206,41 @@ mod tests {
         };
         let r = report(vec![target("/a", "secret", 89.9), skipped]);
         assert_eq!(decide(&r, true, &cfg), Decision::NoOpinion);
+    }
+
+    #[test]
+    fn highest_severity_wins_across_items() {
+        let mut cfg = Config::default().claude_code;
+        cfg.on_error = Action::Deny;
+        let mut bad = target("/u", "secret", 0.0);
+        bad.status = TargetStatus::Unscanned {
+            reason: "unreadable: PermissionDenied".into(),
+        };
+        let r = report(vec![target("/a", "secret", 95.0), bad]);
+        assert_eq!(
+            decide(&r, false, &cfg),
+            Decision::Deny("RiskGrep: could not scan /u (unreadable: PermissionDenied)".into())
+        );
+    }
+
+    #[test]
+    fn many_rule_ids_are_counted() {
+        let cfg = Config::default().claude_code;
+        let mut t = target("/a", "secret", 95.0);
+        let proto = t.evidence[0].clone();
+        t.evidence = (0..8)
+            .map(|i| Evidence {
+                rule: format!("r{i}"),
+                ..proto.clone()
+            })
+            .collect();
+        assert_eq!(
+            decide(&report(vec![t]), false, &cfg),
+            Decision::Ask(
+                "RiskGrep: /a scored secret 95.0 (r0, r1, r2, r3, r4, and 3 more). Threshold: ask at 90."
+                    .into()
+            )
+        );
     }
 
     #[test]

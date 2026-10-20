@@ -3,8 +3,9 @@
 //! Reads the hook input on stdin, finds the files the tool call would read,
 //! scans them, and prints an `ask` or `deny` decision when a category crosses
 //! its threshold. Prints nothing otherwise and never emits `allow`. The exit
-//! status is always 0: a non-zero exit with stderr output is a blocking error
-//! in Claude Code, and failures here should ask, not block.
+//! status is always 0: an exit other than 0 or 2 without a JSON decision is a
+//! non-blocking error that lets the call proceed (fail-open), and exit 2
+//! blocks. Failures here must ask, which only a JSON decision can do.
 
 use riskgrep_claude::bash::bash_targets_within;
 use riskgrep_claude::decide::{decide, error_decision, Decision};
@@ -16,7 +17,6 @@ use serde_json::json;
 use std::io::{Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -33,12 +33,15 @@ const WORKER_STACK: usize = 16 << 20;
 
 fn main() {
     let start = Instant::now();
-    if std::env::args().nth(1).as_deref() == Some("print-config") {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a == "print-config")
+    {
         print_config();
         return;
     }
-    // A panic must not print the default message: stderr output with a
-    // non-zero exit is a blocking error in Claude Code.
+    // A panic must not print the default message or end in a non-zero exit,
+    // which Claude Code treats as a non-blocking error (fail-open).
     panic::set_hook(Box::new(|_| {}));
     let decision = panic::catch_unwind(|| run(start)).unwrap_or_else(|_| {
         error_decision(
@@ -86,21 +89,23 @@ fn print_config() {
     );
 }
 
-/// `git rev-parse --show-toplevel` run in `cwd`.
+/// The nearest ancestor of `cwd` (itself included) holding a `.git` entry,
+/// a directory or, for worktrees and submodules, a file. The walk stops at
+/// `/` and before the parent of `$HOME`. It does not spawn git.
 fn repo_root(cwd: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let home_parent = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|h| h.parent().map(Path::to_path_buf));
+    for dir in cwd.ancestors() {
+        if home_parent.as_deref() == Some(dir) {
+            break;
+        }
+        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+            return Some(dir.to_path_buf());
+        }
     }
-    let s = String::from_utf8(out.stdout).ok()?;
-    let s = s.trim_end_matches('\n');
-    (!s.is_empty()).then(|| PathBuf::from(s))
+    None
 }
 
 fn run(start: Instant) -> Decision {

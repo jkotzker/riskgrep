@@ -216,3 +216,25 @@ fn first_error_disables_the_handle() {
     // The stat table is intact, but the handle no longer reads it.
     assert_eq!(c.content_hash_for(&k, later(1001)), None);
 }
+
+#[test]
+fn concurrent_first_open_all_succeed() {
+    for round in 0..5 {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let p = path.clone();
+                let b = barrier.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    Cache::open(&p).is_some()
+                })
+            })
+            .collect();
+        for h in handles {
+            assert!(h.join().unwrap(), "round {round}: a concurrent open failed");
+        }
+    }
+}

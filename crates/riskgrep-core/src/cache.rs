@@ -62,6 +62,20 @@ pub struct Cache {
     failed: Cell<bool>,
 }
 
+/// How long a first open waits for another process holding the database.
+const BUSY_WAIT: std::time::Duration = std::time::Duration::from_millis(2000);
+
+fn is_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, _)
+            if matches!(
+                f.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 fn hex(b: &[u8; 32]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
@@ -116,7 +130,20 @@ impl Cache {
         std::fs::set_permissions(&file, Permissions::from_mode(0o600))
             .map_err(|e| format!("database file mode: {e}"))?;
         let conn = Connection::open(&file).map_err(|e| format!("open: {e}"))?;
-        Self::init(&conn).map_err(|e| format!("schema: {e}"))?;
+        // Wait for other first-time openers. The busy handler does not cover
+        // every step of the WAL switch, so a busy error also retries the setup.
+        conn.busy_timeout(BUSY_WAIT)
+            .map_err(|e| format!("open: {e}"))?;
+        let started = std::time::Instant::now();
+        loop {
+            match Self::init(&conn) {
+                Ok(()) => break,
+                Err(e) if is_busy(&e) && started.elapsed() < BUSY_WAIT => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => return Err(format!("schema: {e}")),
+            }
+        }
         Ok(Cache {
             conn,
             failed: Cell::new(false),
@@ -136,7 +163,6 @@ impl Cache {
     }
 
     fn init(conn: &Connection) -> rusqlite::Result<()> {
-        conn.busy_timeout(std::time::Duration::from_millis(2000))?;
         // Reads the header first, so a non-database file fails here.
         conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
