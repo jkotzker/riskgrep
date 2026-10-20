@@ -352,6 +352,47 @@ fn rules_compile_reports_time() {
         .stdout(predicate::str::is_match(r"compiled \d+ rules from 2 rulesets in \d+ ms").unwrap());
 }
 
+/// Every `*.yxb` and `*.meta.json` file under `dir`.
+fn bundle_files(dir: &Path) -> (usize, usize) {
+    let (mut yxb, mut meta) = (0, 0);
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "yxb") {
+                yxb += 1;
+            } else if p.to_string_lossy().ends_with(".meta.json") {
+                meta += 1;
+            }
+        }
+    }
+    (yxb, meta)
+}
+
+#[test]
+fn rules_compile_warms_the_bundle_cache() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    assert_eq!(bundle_files(home.path()), (0, 0));
+    riskgrep_in(home.path(), cwd.path())
+        .args(["rules", "compile"])
+        .assert()
+        .code(0);
+    assert_eq!(
+        bundle_files(home.path()),
+        (1, 1),
+        "bundle and sidecar written"
+    );
+    // A second run reuses the cached bundle.
+    riskgrep_in(home.path(), cwd.path())
+        .args(["rules", "compile"])
+        .assert()
+        .code(0);
+    assert_eq!(bundle_files(home.path()), (1, 1));
+}
+
 #[test]
 fn rules_test_passes() {
     let dir = tempfile::tempdir().unwrap();

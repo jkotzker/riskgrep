@@ -122,6 +122,29 @@ fn schema_version_mismatch_recreates() {
 }
 
 #[test]
+fn schema_v1_rows_are_dropped() {
+    // Pre-release databases (user_version 1) may hold tensor names in their
+    // evidence rows; opening the database must discard them.
+    let d = tempfile::tempdir().unwrap();
+    {
+        let c = open(d.path());
+        c.put_evidence([2; 32], "b1", &[ev("r", [0; 32])]);
+    }
+    {
+        let conn = rusqlite::Connection::open(d.path().join("evidence.sqlite")).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+    }
+    let c = open(d.path());
+    assert!(c.evidence([2; 32], "b1").is_none());
+    drop(c);
+    let conn = rusqlite::Connection::open(d.path().join("evidence.sqlite")).unwrap();
+    let v: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(v, 2);
+}
+
+#[test]
 fn files_are_private() {
     use std::os::unix::fs::PermissionsExt;
     let d = tempfile::tempdir().unwrap();

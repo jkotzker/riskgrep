@@ -34,7 +34,7 @@ Time budget: one budget (`claude_code.time_budget_ms`, default 2000, capped at o
 
 ## Cold rules cache
 
-The first scan after install (or after any rules change) compiles the rules bundle and stores it in the cache directory. In a release build a cold call takes 0.58-0.9 s, inside the default 2 s budget, so the cache warms itself. A debug build took 13.5 s on the development machine, and a slow machine may also exceed the budget; the hook exits at the budget, so a compile that cannot finish is never cached and every call asks (`scan exceeded time budget`). In that case run `riskgrep scan <any file>` once with the same HOME before enabling the hook (`riskgrep rules compile` validates the rules but compiles without the cache, so it does not warm it). On macOS the cache is `~/Library/Caches/riskgrep` and `XDG_CACHE_HOME` is ignored.
+The first scan after install (or after any rules change) compiles the rules bundle and stores it in the cache directory. In a release build a cold call takes 0.58-0.9 s, inside the default 2 s budget, so the cache warms itself. A debug build took 13.5 s on the development machine, and a slow machine may also exceed the budget; the hook exits at the budget, so a compile that cannot finish is never cached and every call asks (`scan exceeded time budget`). In that case run `riskgrep rules compile` once with the same HOME before enabling the hook: it compiles the enabled rulesets and writes the bundle and its metadata to the cache. On macOS the cache is `~/Library/Caches/riskgrep` and `XDG_CACHE_HOME` is ignored.
 
 ## Verified against Claude Code 2.1.301
 

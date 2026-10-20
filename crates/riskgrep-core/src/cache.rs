@@ -17,7 +17,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: i64 = 1;
+/// Version 2 drops pre-release rows that could hold tensor names.
+const SCHEMA_VERSION: i64 = 2;
 const DB_NAME: &str = "evidence.sqlite";
 /// A stat entry written less than this long after the file's mtime may predate
 /// a further edit within the same timestamp granularity; it is not trusted.

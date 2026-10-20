@@ -4,7 +4,7 @@ use crate::cli::RulesCommand;
 use crate::scan::load_config;
 use crate::{spec, CliError};
 use include_dir::{include_dir, Dir};
-use riskgrep_core::bundle::{compile_uncached, Bundle};
+use riskgrep_core::bundle::{compile_uncached, load_or_compile, Bundle};
 use riskgrep_core::config::{Config, Overrides};
 use riskgrep_core::engine::Engine;
 use riskgrep_core::ruleset::Ruleset;
@@ -61,7 +61,17 @@ fn list() -> Result<i32, CliError> {
 fn compile() -> Result<i32, CliError> {
     let (_, sets) = enabled()?;
     let start = Instant::now();
-    let bundle = compile_all(&sets)?;
+    // Warm-up: write the bundle and its sidecar to the cache so the next scan
+    // and the Claude Code hook start without compiling. With no usable cache
+    // directory the rules are still validated, uncached.
+    let refs: Vec<&Ruleset> = sets.iter().collect();
+    let bundle = match riskgrep_core::paths::cache_dir() {
+        Some(dir) => load_or_compile(&refs, &dir).map_err(|e| CliError(format!("rules: {e}")))?,
+        None => compile_all(&sets)?,
+    };
+    if let Some(w) = &bundle.cache_warning {
+        eprintln!("riskgrep: {w}");
+    }
     let rules = bundle.meta.len();
     let engine = Engine::new(bundle).map_err(|e| CliError(format!("rules: {e}")))?;
     engine

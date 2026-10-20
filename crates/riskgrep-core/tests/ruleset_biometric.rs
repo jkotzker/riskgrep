@@ -425,6 +425,23 @@ fn banks_need_flat_keys_and_a_majority() {
 }
 
 #[test]
+fn flat_mlp_scores_below_deny() {
+    // 4 weights and 4 biases at hidden width 256: a documented false
+    // positive that must stay at ask (70), never reach the git block (75).
+    let f = fixture();
+    let mut mlp = vec![t("W1", "F32", &[784, 256]), t("b1", "F32", &[256])];
+    for l in 2..=4 {
+        mlp.push(t(&format!("W{l}"), "F32", &[256, 256]));
+        mlp.push(t(&format!("b{l}"), "F32", &[256]));
+    }
+    let st = biometric(&f, "m.safetensors", &st_header(&mlp)).expect("flagged at ask");
+    assert!(st < 75.0, "safetensors MLP scored {st}");
+    let npz: Vec<Tensor> = mlp.iter().map(|(n, _, s)| t(n, "<f4", s)).collect();
+    let nz = biometric(&f, "m.npz", &npz_headers(&npz)).expect("flagged at ask");
+    assert!(nz < 75.0, "npz MLP scored {nz}");
+}
+
+#[test]
 fn named_rule_ignores_jax_tf_and_rnn_parameters() {
     let f = fixture();
     for name in [
