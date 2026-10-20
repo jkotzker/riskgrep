@@ -1,8 +1,11 @@
 //! File classification and bounded reading. Decides what a file is and how
-//! much of it the scan engine sees; never interprets the content.
+//! much of it the scan engine sees. Reads container structure (an `.npz`
+//! archive's directory) only to choose what to read; never judges content.
 
+use crate::post::{NPZ_MAX_MEMBERS, NPZ_MEMBER_BYTES};
+use std::cell::Cell;
 use std::fs::File;
-use std::io;
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::time::Duration;
 
@@ -51,9 +54,49 @@ impl Default for Limits {
 pub struct Content {
     pub bytes: Vec<u8>,
     pub partial: Option<String>,
+    /// Set for a sampled text file: where its last bytes sit in `bytes`.
+    pub tail: Option<Tail>,
+    /// Set when the file could not be read well enough to scan; `bytes` is
+    /// then empty and the target is reported unscanned with this reason.
+    pub unscanned: Option<String>,
+}
+
+/// Content offsets from `at` onward hold the file's last bytes, which start
+/// at file offset `file_offset`. Content before `at - 1` is the file's first
+/// bytes at their own offsets; the byte at `at - 1` is an added newline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tail {
+    pub at: u64,
+    pub file_offset: u64,
+}
+
+impl Content {
+    fn whole(bytes: Vec<u8>, partial: Option<String>) -> Content {
+        Content {
+            bytes,
+            partial,
+            tail: None,
+            unscanned: None,
+        }
+    }
+
+    fn unscanned(reason: String) -> Content {
+        Content {
+            bytes: Vec::new(),
+            partial: None,
+            tail: None,
+            unscanned: Some(reason),
+        }
+    }
 }
 
 const SAFETENSORS_CAP: u64 = 104_857_600;
+/// Bytes an `.npz` over the text limit may read to find and parse its
+/// central directory (the end record is searched for backwards from the end).
+const NPZ_DIRECTORY_MAX: u64 = 8_388_608;
+/// Bytes read per `.npz` member: its local header and the first compressed
+/// bytes of its data (a deflate reader buffers 32 KiB).
+const NPZ_MEMBER_READ_MAX: u64 = 131_072;
 
 fn le_u64(head: &[u8]) -> Option<u64> {
     Some(u64::from_le_bytes(head.get(..8)?.try_into().ok()?))
@@ -184,10 +227,119 @@ fn read_prefix<S: Source + ?Sized>(
 ) -> io::Result<Content> {
     let n = want.min(size);
     let partial = (note_skip && n < size).then(|| format!("bytes {n}..{size} not read"));
-    Ok(Content {
-        bytes: src.range(0, n)?,
-        partial,
-    })
+    Ok(Content::whole(src.range(0, n)?, partial))
+}
+
+/// A seekable reader over a [`Source`] that reads at most `left` more bytes
+/// in total; past that every read fails and `over` is set.
+struct Budgeted<'a, S: ?Sized> {
+    src: &'a S,
+    size: u64,
+    pos: u64,
+    left: &'a Cell<u64>,
+    over: &'a Cell<bool>,
+}
+
+impl<S: Source + ?Sized> Read for Budgeted<'_, S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let want = (buf.len() as u64).min(self.size.saturating_sub(self.pos));
+        if want == 0 {
+            return Ok(0);
+        }
+        let n = want.min(self.left.get());
+        if n == 0 {
+            self.over.set(true);
+            return Err(io::Error::other("read budget exhausted"));
+        }
+        let bytes = self.src.range(self.pos, n)?;
+        buf[..bytes.len()].copy_from_slice(&bytes);
+        self.left.set(self.left.get() - n);
+        self.pos += n;
+        Ok(bytes.len())
+    }
+}
+
+impl<S: ?Sized> Seek for Budgeted<'_, S> {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let pos = match to {
+            SeekFrom::Start(p) => Some(p),
+            SeekFrom::End(d) => self.size.checked_add_signed(d),
+            SeekFrom::Current(d) => self.pos.checked_add_signed(d),
+        };
+        self.pos = pos.ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        Ok(self.pos)
+    }
+}
+
+/// An `.npz` too large to read whole: its central directory (located from
+/// the end), then for each of the first [`NPZ_MAX_MEMBERS`] entries named
+/// `*.npy` its first [`NPZ_MEMBER_BYTES`] uncompressed bytes, each read by
+/// offset under a byte budget. The result is a stored zip of those member
+/// prefixes in archive order: everything the `.npz` post-processor reads.
+/// Members whose data cannot be read are left out, as the post-processor
+/// skips them; a directory or member over its budget, or a directory that
+/// does not parse, makes the file unscanned. No member name is ever put in
+/// a reason (names may be personal data).
+fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
+    let left = Cell::new(NPZ_DIRECTORY_MAX);
+    let over = Cell::new(false);
+    let reader = BufReader::with_capacity(
+        8192,
+        Budgeted {
+            src,
+            size,
+            pos: 0,
+            left: &left,
+            over: &over,
+        },
+    );
+    let mut zip = match zip::ZipArchive::new(reader) {
+        Ok(z) if !over.get() => z,
+        _ if over.get() => {
+            return Content::unscanned(format!(
+                "npz central directory not read within {NPZ_DIRECTORY_MAX} bytes"
+            ))
+        }
+        _ => return Content::unscanned("npz central directory unreadable".into()),
+    };
+    let mut out = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for i in 0..zip.len().min(NPZ_MAX_MEMBERS) {
+        let Some(name) = zip
+            .name_for_index(i)
+            .filter(|n| n.ends_with(".npy"))
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        left.set(NPZ_MEMBER_READ_MAX);
+        let head = zip.by_index(i).ok().and_then(|member| {
+            let mut head = Vec::new();
+            member
+                .take(NPZ_MEMBER_BYTES)
+                .read_to_end(&mut head)
+                .ok()
+                .map(|_| head)
+        });
+        if over.get() {
+            return Content::unscanned(format!(
+                "npz member {i} not read within {NPZ_MEMBER_READ_MAX} bytes"
+            ));
+        }
+        let Some(head) = head else { continue };
+        let written = out
+            .start_file(name, stored)
+            .map_err(io::Error::other)
+            .and_then(|()| out.write_all(&head));
+        if written.is_err() {
+            return Content::unscanned("npz member headers could not be re-encoded".into());
+        }
+    }
+    match out.finish() {
+        Ok(c) => Content::whole(c.into_inner(), None),
+        Err(_) => Content::unscanned("npz member headers could not be re-encoded".into()),
+    }
 }
 
 /// Length of an npy header section (magic, version, length field, header text).
@@ -239,6 +391,11 @@ fn read_from<S: Source + ?Sized>(
             Ok(Content {
                 bytes,
                 partial: Some(format!("bytes {s}..{} not read", size - s)),
+                tail: Some(Tail {
+                    at: s + 1,
+                    file_offset: size - s,
+                }),
+                unscanned: None,
             })
         }
         FileClass::KnownBinary(Known::Npy) => {
@@ -250,12 +407,14 @@ fn read_from<S: Source + ?Sized>(
             let total = le_u64(&head).map_or(8, |n| n.saturating_add(8)).min(size);
             read_prefix(src, size.min(total), SAFETENSORS_CAP, true)
         }
+        FileClass::KnownBinary(Known::Npz) if size > limits.text_max => {
+            Ok(npz_member_headers(src, size))
+        }
         FileClass::KnownBinary(Known::Npz | Known::KeyStore) => {
             read_prefix(src, size, limits.text_max, true)
         }
-        FileClass::Archive(_) | FileClass::Image(_) | FileClass::UnknownBinary => Ok(Content {
-            bytes: Vec::new(),
-            partial: None,
-        }),
+        FileClass::Archive(_) | FileClass::Image(_) | FileClass::UnknownBinary => {
+            Ok(Content::whole(Vec::new(), None))
+        }
     }
 }

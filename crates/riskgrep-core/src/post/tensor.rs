@@ -10,9 +10,9 @@ use std::ops::Range;
 
 const NPY_MAGIC: &[u8] = b"\x93NUMPY";
 /// Bytes read from each `.npy` member of an archive.
-const NPZ_MEMBER_BYTES: u64 = 4096;
+pub(crate) const NPZ_MEMBER_BYTES: u64 = 4096;
 /// Archive members examined per file.
-const NPZ_MAX_MEMBERS: usize = 1024;
+pub(crate) const NPZ_MAX_MEMBERS: usize = 1024;
 /// Largest safetensors JSON header accepted.
 const SAFETENSORS_HEADER_MAX: u64 = 104_857_600;
 

@@ -25,26 +25,32 @@ pub struct Bundle {
     pub cache_warning: Option<String>,
 }
 
-/// Hex BLAKE3 over the yara-x version, platform, and every ruleset's id,
-/// version, and source bytes, with rulesets taken in id order.
+/// Hex BLAKE3 over the yara-x version, this riskgrep version, the platform,
+/// and every ruleset's id and [`Ruleset::digest`] (its manifest, sources,
+/// and stopword lists), with rulesets taken in id order. Also the evidence
+/// cache's key prefix, so any change to the engine or to what a rule's
+/// post-processors read gives new keys.
 pub fn bundle_key(rulesets: &[&Ruleset]) -> String {
+    bundle_key_for_version(env!("CARGO_PKG_VERSION"), rulesets)
+}
+
+/// [`bundle_key`] for riskgrep version `version`.
+#[doc(hidden)]
+pub fn bundle_key_for_version(version: &str, rulesets: &[&Ruleset]) -> String {
     let mut sorted: Vec<&&Ruleset> = rulesets.iter().collect();
     sorted.sort_by(|a, b| a.id.cmp(&b.id));
     let mut h = blake3::Hasher::new();
-    let mut field = |s: &str| {
+    let mut field = |s: &[u8]| {
         h.update(&(s.len() as u64).to_le_bytes());
-        h.update(s.as_bytes());
+        h.update(s);
     };
-    field(YARA_X_VERSION);
-    field(std::env::consts::OS);
-    field(std::env::consts::ARCH);
+    field(YARA_X_VERSION.as_bytes());
+    field(version.as_bytes());
+    field(std::env::consts::OS.as_bytes());
+    field(std::env::consts::ARCH.as_bytes());
     for rs in sorted {
-        field(&rs.id);
-        field(&rs.version);
-        for (name, src) in &rs.sources {
-            field(name);
-            field(src);
-        }
+        field(rs.id.as_bytes());
+        field(rs.digest());
     }
     h.finalize().to_hex().to_string()
 }
@@ -80,7 +86,7 @@ fn compile(rulesets: &[&Ruleset]) -> Result<yara_x::Rules> {
     for rs in rulesets {
         c.new_namespace(&rs.id);
         for (file, src) in &rs.sources {
-            c.add_source(src.as_str())
+            c.add_source(src.as_ref())
                 .map_err(|e| err(format!("ruleset {} ({file}): {e}", rs.id)))?;
         }
     }
@@ -216,8 +222,47 @@ fn add_warning(b: &mut Bundle, msg: String) {
     });
 }
 
+/// True when `file` is a private regular file owned by the current user.
+fn private_file(file: &Path) -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    fs::symlink_metadata(file)
+        .is_ok_and(|m| m.file_type().is_file() && m.uid() == euid && m.mode() & 0o077 == 0)
+}
+
+/// What [`load_or_compile_keyed`] does with the rule-metadata sidecar of a
+/// bundle read from the cache (a compiled bundle always writes one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sidecar {
+    /// Parse it and rewrite it when it does not load.
+    Validate,
+    /// Rewrite it only when it is missing (or not a private file); used by
+    /// callers that have not found it unusable, so it is not parsed again.
+    IfMissing,
+    /// Rewrite it: the caller tried it and could not use it.
+    Rewrite,
+}
+
+/// Load the bundle for `rulesets` from `cache_dir`, compiling and caching it
+/// on a miss; validates the sidecar. See [`load_or_compile_keyed`].
 pub fn load_or_compile(rulesets: &[&Ruleset], cache_dir: &Path) -> Result<Bundle> {
-    let hash = bundle_key(rulesets);
+    load_or_compile_keyed(
+        rulesets,
+        cache_dir,
+        &bundle_key(rulesets),
+        Sidecar::Validate,
+    )
+}
+
+/// [`load_or_compile`] with the bundle key already computed (it must be
+/// [`bundle_key`] of `rulesets`) and a choice of sidecar handling.
+pub fn load_or_compile_keyed(
+    rulesets: &[&Ruleset],
+    cache_dir: &Path,
+    key: &str,
+    sidecar: Sidecar,
+) -> Result<Bundle> {
+    let hash = key.to_string();
     let stopwords = merge_stopwords(rulesets)?;
     let dir = cache_dir.join("bundles");
     let file = dir.join(format!("{hash}.yxb"));
@@ -233,7 +278,12 @@ pub fn load_or_compile(rulesets: &[&Ruleset], cache_dir: &Path) -> Result<Bundle
                 compiled: false,
                 cache_warning: None,
             };
-            if load_meta_sidecar(cache_dir, &b.hash).is_none() {
+            let rewrite = match sidecar {
+                Sidecar::Validate => load_meta_sidecar(cache_dir, &b.hash).is_none(),
+                Sidecar::IfMissing => !private_file(&sidecar_path(&dir, &b.hash)),
+                Sidecar::Rewrite => true,
+            };
+            if rewrite {
                 if let Err(e) = write_sidecar(&dir, &b.hash, &b.meta) {
                     add_warning(&mut b, format!("rule metadata not written: {e}"));
                 }

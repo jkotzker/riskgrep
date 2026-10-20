@@ -132,6 +132,24 @@ fn baseline_drops_fully_known_and_structural_evidence() {
 }
 
 #[test]
+fn location_free_evidence_is_keyed_by_its_content_digest() {
+    let structural = |content: &[u8]| {
+        let mut e = ev("path_biometric_name", &[]);
+        e.count = 1;
+        e.fingerprints = vec![*blake3::hash(content).as_bytes()];
+        e
+    };
+    let base = Baseline::create(&[target("speaker.txt", vec![structural(b"one")])], ident).unwrap();
+    let mut same = [target("speaker.txt", vec![structural(b"one")])];
+    apply(&mut same, &IgnoreRules::default(), Some(&base), ident);
+    assert!(same[0].evidence.is_empty());
+    let mut changed = [target("speaker.txt", vec![structural(b"two")])];
+    apply(&mut changed, &IgnoreRules::default(), Some(&base), ident);
+    assert_eq!(changed[0].evidence.len(), 1);
+    assert_eq!(changed[0].suppressed, 0);
+}
+
+#[test]
 fn fingerprint_stable_across_line_moves() {
     let s = fake_secret("github_pat", 7);
     let digest = *blake3::hash(s.as_bytes()).as_bytes();

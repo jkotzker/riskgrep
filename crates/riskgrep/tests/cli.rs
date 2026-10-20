@@ -412,6 +412,35 @@ fn rules_compile_warms_the_bundle_cache() {
 }
 
 /// Runs `git` in `dir` with a clean environment, for fixtures.
+#[test]
+fn walk_limit_follows_on_error() {
+    let repo = tempfile::tempdir().unwrap();
+    fs::create_dir_all(repo.path().join(".git")).unwrap();
+    fs::write(
+        repo.path().join(".riskgrep.toml"),
+        "[limits]\nwalk_files = 2\n",
+    )
+    .unwrap();
+    let dir = repo.path().join("d");
+    fs::create_dir(&dir).unwrap();
+    for i in 0..4 {
+        fs::write(dir.join(format!("f{i}.txt")), "clean\n").unwrap();
+    }
+    let run = |extra: &[&str]| {
+        let mut c = riskgrep(repo.path());
+        c.env("GIT_CEILING_DIRECTORIES", repo.path().parent().unwrap())
+            .args(["scan", "d"])
+            .args(extra);
+        c.assert()
+    };
+    run(&["--on-error", "block"])
+        .code(2)
+        .stdout(predicate::str::contains(
+            "unscanned: directory walk stopped at the limit of 2 files",
+        ));
+    run(&["--on-error", "allow"]).code(0);
+}
+
 fn git_in(dir: &Path, args: &[&str]) {
     let st = std::process::Command::new("git")
         .args(args)

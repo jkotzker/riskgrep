@@ -288,6 +288,75 @@ fn weight_override_errors() {
 }
 
 #[test]
+fn relative_paths_resolve_against_the_declaring_config() {
+    let user = "extra_ruleset_dirs = [\"r\", \"/abs/rules\"]\ntrusted_repos = [\"proj\"]\n";
+    let e = env(Some(user), None);
+    let user_dir = e.home.path().join(".config/riskgrep");
+    let c = load(Mode::Cli, None, Overrides::default()).unwrap();
+    assert_eq!(
+        c.extra_ruleset_dirs,
+        vec![user_dir.join("r"), Path::new("/abs/rules").to_path_buf()]
+    );
+    assert_eq!(c.trusted_repos, vec![user_dir.join("proj")]);
+    drop(e);
+
+    let e = env(None, Some("extra_ruleset_dirs = [\"rules\"]\n"));
+    let c = load(Mode::Git, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!(c.extra_ruleset_dirs, vec![e.root().join("rules")]);
+}
+
+/// A ruleset directory with one `secret` rule of `weight` matching `text`.
+fn rule_dir(dir: &Path, id: &str, weight: i32, text: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("ruleset.toml"),
+        format!(
+            "id = \"{id}\"\nversion = \"1\"\nlicence = \"MIT\"\ndescription = \"t\"\n\
+             categories = [\"secret\"]\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("a.yar"),
+        format!(
+            "rule {id}_rule {{ meta:\n category = \"secret\"\n weight = {weight}\n \
+             strings: $hit = \"{text}\"\n condition: $hit }}\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn claude_mode_never_resolves_user_paths_in_an_untrusted_repo() {
+    let e = env(Some("extra_ruleset_dirs = [\"r\"]\n"), None);
+    // The untrusted repository supplies `r/` with a rule that would cancel
+    // every secret finding.
+    rule_dir(&e.root().join("r"), "planted", -100, "AKIA");
+    std::fs::create_dir(e.root().join(".git")).unwrap();
+    rule_dir(
+        &e.home.path().join(".config/riskgrep/r"),
+        "user_extra",
+        10,
+        "riskgrep-user-extra-probe",
+    );
+    let cfg = load(Mode::ClaudeCode, Some(e.root()), Overrides::default()).unwrap();
+    let ids: Vec<String> = riskgrep_core::scanner::resolve_rulesets(&cfg, Some(e.root()))
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert!(ids.contains(&"user_extra".to_string()), "{ids:?}");
+    assert!(!ids.contains(&"planted".to_string()), "{ids:?}");
+    let cache = tempfile::tempdir().unwrap();
+    let mut g =
+        riskgrep_core::RiskGrep::with_cache_dir(cfg, Some(e.root()), Some(cache.path().into()))
+            .unwrap();
+    let key = riskgrep_core::synth::fake_secret("aws_access_key", 5);
+    let r = g.scan_bytes("k.txt", format!("id = \"{key}\"\n").as_bytes());
+    assert_eq!(r.targets[0].scores[&cat("secret")], 95.0);
+}
+
+#[test]
 fn load_records_mode() {
     let _e = env(None, None);
     for mode in [Mode::Cli, Mode::Git, Mode::ClaudeCode] {
