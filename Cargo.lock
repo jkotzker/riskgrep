@@ -1616,6 +1616,7 @@ dependencies = [
  "clap",
  "include_dir",
  "predicates",
+ "regex",
  "riskgrep-core",
  "serde",
  "serde_json",
