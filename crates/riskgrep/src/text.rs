@@ -61,6 +61,10 @@ fn evidence_text(e: &Evidence) -> String {
         .collect();
     lines.sort_unstable();
     lines.dedup();
+    // Line 0: a finding in the tail sample of a partly read file, whose
+    // line is not known.
+    let unknown = lines.iter().any(|&(a, b)| a == 0 || b == 0);
+    lines.retain(|&(a, b)| a != 0 && b != 0);
     if !lines.is_empty() {
         let shown: Vec<String> = lines
             .iter()
@@ -75,6 +79,9 @@ fn evidence_text(e: &Evidence) -> String {
             .collect();
         let more = if lines.len() > MAX_LINES { ",…" } else { "" };
         let _ = write!(s, ", lines {}{more}", shown.join(","));
+    }
+    if unknown {
+        s.push_str(", line unknown");
     }
     s
 }
@@ -145,6 +152,14 @@ mod tests {
         assert_eq!(evidence_text(&ev("path_rule", vec![])), "path_rule ×1");
         let many = ev("m", (1..=8).map(|n| loc(n, n)).collect());
         assert_eq!(evidence_text(&many), "m ×8, lines 1,2,3,4,5,…");
+    }
+
+    #[test]
+    fn line_0_is_unknown() {
+        let tail = ev("t", vec![loc(0, 0)]);
+        assert_eq!(evidence_text(&tail), "t ×1, line unknown");
+        let mixed = ev("m", vec![loc(4, 4), loc(0, 0)]);
+        assert_eq!(evidence_text(&mixed), "m ×2, lines 4, line unknown");
     }
 
     #[test]

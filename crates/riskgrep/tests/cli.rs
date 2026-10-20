@@ -277,6 +277,43 @@ fn text_format_line() {
 }
 
 #[test]
+fn tail_line_is_unknown_in_text_and_0_in_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 12);
+    let mut text = synth::source_text((8 << 20) + 4096, 3);
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&format!("id = \"{key}\"\n"));
+    fs::write(dir.path().join("big.txt"), text).unwrap();
+    let out = riskgrep(dir.path())
+        .args(["scan", "big.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("big.txt  secret 95.0  [aws_access_token ×1, line unknown]"),
+        "{out}"
+    );
+    assert!(!out.contains("lines 0"), "{out}");
+    assert!(!out.contains(&key));
+    let out = riskgrep(dir.path())
+        .args(["scan", "big.txt", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let loc = &v["targets"][0]["evidence"][0]["locations"][0];
+    assert_eq!(loc["line_start"], 0);
+    assert_eq!(loc["line_end"], 0);
+}
+
+#[test]
 fn text_omits_clean_targets() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.txt"), "nothing here\n").unwrap();

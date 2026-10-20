@@ -214,6 +214,26 @@ fn new_file_with_secret_past_text_limit_is_blocked() {
 }
 
 #[test]
+fn tail_secret_line_is_shown_as_unknown() {
+    // Lines in the tail sample of a partly read file are not counted.
+    let r = Repo::new();
+    let mut text = big_text();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&format!("id = \"{}\"\n", key(42)));
+    r.write("tail.txt", &text);
+    r.stage("tail.txt");
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "tail.txt: secret 95.0 (aws_access_token, line unknown)",
+        ))
+        .stderr(predicate::str::contains("line 0").not());
+}
+
+#[test]
 fn deletions_only_allowed() {
     let r = Repo::new();
     r.write("conf.txt", keyed_text(&key(5)));

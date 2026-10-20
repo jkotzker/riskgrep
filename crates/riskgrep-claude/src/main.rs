@@ -250,7 +250,13 @@ fn scan(
     } else {
         let mut rg =
             RiskGrep::new(cfg, root).map_err(|e| format!("could not start scanner ({})", e.0))?;
-        rg.scan_paths(&files)
+        let report = rg.scan_paths(&files);
+        // Close the evidence cache normally (the SQLite close checkpoints
+        // the WAL), then skip the rules and scanner destructors: the process
+        // exits right after the decision and the OS reclaims their memory.
+        rg.close_cache();
+        std::mem::forget(rg);
+        report
     };
     if let Some(dir) = limit_hit {
         use riskgrep_core::{TargetReport, TargetStatus};

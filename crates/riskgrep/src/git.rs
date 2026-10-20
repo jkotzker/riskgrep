@@ -314,10 +314,16 @@ fn offences(path: &str, t: &TargetReport, git_cfg: &GitConfig) -> Vec<String> {
             at.extend(e.locations.iter().map(|l| l.line_start));
         }
         let mut detail = rules.into_iter().collect::<Vec<_>>().join(", ");
+        // Line 0: a finding in the tail sample of a partly read file, whose
+        // line is not known.
+        let unknown = at.remove(&0);
         if !at.is_empty() {
             let shown: Vec<String> = at.iter().take(MAX_LINES).map(u32::to_string).collect();
             let more = if at.len() > MAX_LINES { ", …" } else { "" };
             let _ = write!(detail, ", line {}{more}", shown.join(", "));
+        }
+        if unknown {
+            detail.push_str(", line unknown");
         }
         lines.push(format!(
             "riskgrep: {path}: {} {:.1} ({detail})",
