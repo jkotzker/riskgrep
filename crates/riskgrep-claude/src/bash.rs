@@ -54,38 +54,55 @@ pub fn bash_targets(command: &str, cwd: &Path) -> BashTargets {
     bash_targets_within(command, cwd, DEFAULT_BUDGET)
 }
 
-/// Like [`bash_targets`], but stops and reports unresolved once `budget` has
-/// elapsed. A single parse cannot be interrupted; it is bounded by
-/// [`MAX_COMMAND_BYTES`] instead.
+/// Like [`bash_targets`], but bounded by `budget` of wall-clock time.
+///
+/// The analysis runs on a worker thread; this function waits for it for at
+/// most `budget`. If the worker has not answered by then, the result is the
+/// whitespace-split catch-all over the raw command (at most
+/// [`FALLBACK_TIME`] more), marked unresolved, and the worker is abandoned.
+/// A hook process exits right after, so that costs nothing there; a caller
+/// in a long-lived process may keep a runaway worker (and its reserved
+/// stack) until it finishes on its own.
 pub fn bash_targets_within(command: &str, cwd: &Path, budget: Duration) -> BashTargets {
     run_isolated(command, cwd, budget, true)
 }
 
-/// Runs the analysis on a thread with [`ANALYSIS_STACK_BYTES`] of stack.
-/// `shortcut` enables the nesting estimate (disabled only by the stress
-/// test, which must reach the parser).
+/// Time the catch-all fallback may take after the budget is spent.
+const FALLBACK_TIME: Duration = Duration::from_millis(30);
+
+/// Runs the analysis on a thread with [`ANALYSIS_STACK_BYTES`] of stack and
+/// waits at most `budget` for it. `shortcut` enables the size and nesting
+/// shortcuts (disabled only by the stress test, which must reach the
+/// parser).
 fn run_isolated(command: &str, cwd: &Path, budget: Duration, shortcut: bool) -> BashTargets {
-    let deadline = Instant::now() + budget;
+    let start = Instant::now();
+    // The worker stops itself a little before the wait ends, so a worker
+    // that stops cooperatively still delivers its partial result.
+    let margin = (budget / 10).min(Duration::from_millis(20));
+    let deadline = start + budget - margin;
     let owned_command = command.to_string();
     let owned_cwd = cwd.to_path_buf();
-    let worker = std::thread::Builder::new()
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
         .name("riskgrep-bash".to_string())
         .stack_size(ANALYSIS_STACK_BYTES)
         .spawn(move || {
             let mut st = State::new(&owned_cwd, deadline);
             st.shortcut = shortcut;
             analyze(&owned_command, 0, &mut st);
-            st.finish()
+            // The receiver may have given up; nothing to do then.
+            let _ = tx.send(st.finish());
         });
-    match worker.map(|handle| handle.join()) {
-        Ok(Ok(targets)) => targets,
-        // The thread could not start or panicked: whitespace split only.
-        _ => {
-            let mut st = State::new(cwd, deadline);
-            st.fallback(command);
-            st.finish()
+    if spawned.is_ok() {
+        // A worker that panics drops its sender, which ends the wait early.
+        if let Ok(targets) = rx.recv_timeout(budget.saturating_sub(start.elapsed())) {
+            return targets;
         }
     }
+    // No thread, a panic, or out of time: whitespace split only.
+    let mut st = State::new(cwd, Instant::now() + FALLBACK_TIME);
+    st.fallback(command);
+    st.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -641,23 +658,289 @@ const RG_OPTS: OptSpec = OptSpec {
     ..NO_OPTIONS
 };
 
+const SETSID_OPTS: OptSpec = OptSpec {
+    short_flags: "cfw",
+    long_flags: &["--ctty", "--fork", "--wait"],
+    ..NO_OPTIONS
+};
+const FLOCK_OPTS: OptSpec = OptSpec {
+    short_flags: "sxeunoFv",
+    short_values: "wEc",
+    long_flags: &[
+        "--shared",
+        "--exclusive",
+        "--unlock",
+        "--nonblock",
+        "--close",
+        "--no-fork",
+        "--verbose",
+    ],
+    long_values: &["--timeout", "--conflict-exit-code", "--command"],
+    ..NO_OPTIONS
+};
+const SCRIPT_OPTS: OptSpec = OptSpec {
+    short_flags: "adeFfkpqr",
+    short_values: "tTcE",
+    long_flags: &["--append", "--flush", "--quiet", "--return", "--force"],
+    long_values: &[
+        "--command",
+        "--echo",
+        "--log-out",
+        "--log-in",
+        "--log-io",
+        "--log-timing",
+    ],
+    ..NO_OPTIONS
+};
+const CHROOT_OPTS: OptSpec = OptSpec {
+    long_flags: &["--skip-chdir"],
+    long_values: &["--userspec", "--groups"],
+    ..NO_OPTIONS
+};
+const UNSHARE_OPTS: OptSpec = OptSpec {
+    short_flags: "muinpUCTrfc",
+    short_values: "RwSG",
+    long_flags: &[
+        "--mount",
+        "--uts",
+        "--ipc",
+        "--net",
+        "--pid",
+        "--user",
+        "--cgroup",
+        "--time",
+        "--fork",
+        "--map-root-user",
+        "--map-current-user",
+        "--mount-proc",
+        "--kill-child",
+    ],
+    long_values: &[
+        "--propagation",
+        "--setgroups",
+        "--root",
+        "--wd",
+        "--setuid",
+        "--setgid",
+    ],
+    ..NO_OPTIONS
+};
+const IONICE_OPTS: OptSpec = OptSpec {
+    short_flags: "t",
+    short_values: "cnpPu",
+    long_flags: &["--ignore"],
+    long_values: &["--class", "--classdata", "--pid", "--pgid", "--uid"],
+    ..NO_OPTIONS
+};
+const TASKSET_OPTS: OptSpec = OptSpec {
+    short_flags: "acp",
+    long_flags: &["--all-tasks", "--cpu-list", "--pid"],
+    ..NO_OPTIONS
+};
+const CHRT_OPTS: OptSpec = OptSpec {
+    short_flags: "abdfiorRpmv",
+    short_values: "TPD",
+    long_flags: &[
+        "--all-tasks",
+        "--batch",
+        "--deadline",
+        "--fifo",
+        "--idle",
+        "--other",
+        "--rr",
+        "--reset-on-fork",
+        "--pid",
+        "--max",
+        "--verbose",
+    ],
+    long_values: &["--sched-runtime", "--sched-period", "--sched-deadline"],
+    ..NO_OPTIONS
+};
+const SYSTEMD_RUN_OPTS: OptSpec = OptSpec {
+    short_flags: "tPGqSr",
+    short_values: "uMpEH",
+    long_flags: &[
+        "--user",
+        "--system",
+        "--scope",
+        "--pty",
+        "--pipe",
+        "--wait",
+        "--collect",
+        "--quiet",
+        "--remain-after-exit",
+        "--no-block",
+        "--same-dir",
+        "--shell",
+        "--send-sighup",
+    ],
+    long_values: &[
+        "--unit",
+        "--property",
+        "--description",
+        "--slice",
+        "--setenv",
+        "--working-directory",
+        "--machine",
+        "--host",
+        "--uid",
+        "--gid",
+        "--nice",
+        "--service-type",
+        "--on-calendar",
+    ],
+    ..NO_OPTIONS
+};
+const RUNUSER_OPTS: OptSpec = OptSpec {
+    short_flags: "lmpfP",
+    short_values: "ugGswc",
+    long_flags: &["--login", "--preserve-environment", "--pty"],
+    long_values: &[
+        "--user",
+        "--group",
+        "--supp-group",
+        "--shell",
+        "--command",
+        "--whitelist-environment",
+    ],
+    ..NO_OPTIONS
+};
+
+/// How a wrapper command finds the command it runs.
+struct Wrapper {
+    opts: &'static OptSpec,
+    /// Operands between the options and the command (`flock FILE cmd`,
+    /// `taskset MASK cmd`).
+    skip_operands: usize,
+    /// Options whose value is a shell command line (`flock -c CMD`).
+    payload: &'static [&'static str],
+    /// The command runs in a context the analysis cannot follow (another
+    /// root, another user's environment, a service manager).
+    always_unresolved: bool,
+}
+
+const fn wrapper(opts: &'static OptSpec) -> Wrapper {
+    Wrapper {
+        opts,
+        skip_operands: 0,
+        payload: &[],
+        always_unresolved: false,
+    }
+}
+
 /// Wrapper commands that run the command named after their options.
-fn wrapper_spec(name: &str) -> Option<&'static OptSpec> {
+fn wrapper_spec(name: &str) -> Option<Wrapper> {
     Some(match name {
-        "env" => &ENV_OPTS,
-        "sudo" => &SUDO_OPTS,
-        "doas" => &DOAS_OPTS,
-        "nice" => &NICE_OPTS,
-        "timeout" => &TIMEOUT_OPTS,
-        "exec" => &EXEC_OPTS,
-        "command" => &COMMAND_OPTS,
-        "builtin" | "nohup" => &NO_OPTIONS,
-        "stdbuf" => &STDBUF_OPTS,
-        "time" => &TIME_OPTS,
-        "caffeinate" => &CAFFEINATE_OPTS,
-        "xargs" => &XARGS_OPTS,
+        "env" => wrapper(&ENV_OPTS),
+        "sudo" => wrapper(&SUDO_OPTS),
+        "doas" => wrapper(&DOAS_OPTS),
+        "nice" => wrapper(&NICE_OPTS),
+        "timeout" => wrapper(&TIMEOUT_OPTS),
+        "exec" => wrapper(&EXEC_OPTS),
+        "command" => wrapper(&COMMAND_OPTS),
+        "builtin" | "nohup" | "busybox" => wrapper(&NO_OPTIONS),
+        "stdbuf" => wrapper(&STDBUF_OPTS),
+        "time" => wrapper(&TIME_OPTS),
+        "caffeinate" => wrapper(&CAFFEINATE_OPTS),
+        "xargs" => wrapper(&XARGS_OPTS),
+        "setsid" => wrapper(&SETSID_OPTS),
+        "ionice" => wrapper(&IONICE_OPTS),
+        "flock" => Wrapper {
+            skip_operands: 1,
+            payload: &["-c", "--command"],
+            ..wrapper(&FLOCK_OPTS)
+        },
+        "script" => Wrapper {
+            skip_operands: 1,
+            payload: &["-c", "--command"],
+            ..wrapper(&SCRIPT_OPTS)
+        },
+        "taskset" => Wrapper {
+            skip_operands: 1,
+            ..wrapper(&TASKSET_OPTS)
+        },
+        "chrt" => Wrapper {
+            skip_operands: 1,
+            ..wrapper(&CHRT_OPTS)
+        },
+        "chroot" => Wrapper {
+            skip_operands: 1,
+            always_unresolved: true,
+            ..wrapper(&CHROOT_OPTS)
+        },
+        "unshare" => Wrapper {
+            always_unresolved: true,
+            ..wrapper(&UNSHARE_OPTS)
+        },
+        "systemd-run" => Wrapper {
+            always_unresolved: true,
+            ..wrapper(&SYSTEMD_RUN_OPTS)
+        },
+        "runuser" => Wrapper {
+            payload: &["-c", "--command"],
+            always_unresolved: true,
+            ..wrapper(&RUNUSER_OPTS)
+        },
         _ => return None,
     })
+}
+
+/// `arch` options are whole words (`-arm64`, `-arch x86_64`). Returns the
+/// index after them, or `None` for an option it does not know.
+fn skip_arch_options(words: &[Word]) -> Option<usize> {
+    let mut i = 0;
+    while let Some(arg) = literal(words.get(i)) {
+        match arg.as_str() {
+            "-arm64" | "-arm64e" | "-x86_64" | "-x86_64h" | "-i386" | "-32" | "-64" | "-c"
+            | "-h" => i += 1,
+            "-arch" | "-d" | "-e" => i += 2,
+            a if a.starts_with('-') => return None,
+            _ => break,
+        }
+    }
+    Some(i.min(words.len()))
+}
+
+/// Commands known to run nothing else, so the class rule in [`classify`]
+/// (shell names and `-c` anywhere in the arguments) does not apply:
+/// `head -c 1 f` and `echo sh` stay resolved.
+const PLAIN: &[&str] = &[
+    "cat", "head", "tail", "wc", "cut", "ls", "du", "echo", "printf", "stat", "file", "cp", "mv",
+    "rm", "mkdir", "touch", "chmod", "ln", "tee", "cmp", "diff", "basename", "dirname", "realpath",
+    "readlink", "true", "false", "test", "[",
+];
+
+/// Programs with their own scripting language that can read any file.
+const SCRIPTED: &[&str] = &["sed", "gsed", "awk", "gawk", "mawk", "nawk", "perl"];
+
+fn is_interpreter(name: &str) -> bool {
+    name.starts_with("python") || INTERPRETERS.contains(&name) || SCRIPTED.contains(&name)
+}
+
+/// The class rule for a command this module does not otherwise know: a
+/// shell name among its arguments, or `-c`/`--command` followed by a word,
+/// is a command line it may run (analysed, unresolved); an interpreter name
+/// among its arguments is unresolved.
+fn executor_scan(args: &[Word], depth: usize, st: &mut State) {
+    for (k, word) in args.iter().enumerate() {
+        let Some(text) = literal(Some(word)) else {
+            continue;
+        };
+        let name = base_name(&text);
+        let payload = match text.as_str() {
+            "-c" | "--command" => literal(args.get(k + 1)),
+            _ => text.strip_prefix("--command=").map(str::to_string),
+        };
+        if let Some(payload) = payload {
+            st.unresolved = true;
+            analyze(&payload, depth + 1, st);
+        } else if SHELLS.contains(&name) {
+            st.unresolved = true;
+            shell_invocation(&args[k + 1..], depth, st);
+        } else if is_interpreter(name) {
+            st.unresolved = true;
+        }
+    }
 }
 
 /// Options found by [`parse_options`].
@@ -758,43 +1041,59 @@ fn parse_options(words: &[Word], spec: &OptSpec, permute: bool) -> Option<Parsed
     Some(parsed)
 }
 
-/// Commands whose first operand is a pattern, filter or script rather than
-/// a path, so `jq . f` or `grep . f` is not a directory argument.
-const PATTERN_FIRST: &[&str] = &[
-    "grep", "egrep", "fgrep", "rg", "ag", "ack", "ugrep", "jq", "yq", "sed", "awk", "gawk",
-];
+const JQ_OPTS: OptSpec = OptSpec {
+    short_flags: "rcnsejaCMSRhVt",
+    long_flags: &[
+        "--raw-output",
+        "--compact-output",
+        "--null-input",
+        "--slurp",
+        "--exit-status",
+        "--join-output",
+        "--ascii-output",
+        "--color-output",
+        "--monochrome-output",
+        "--sort-keys",
+        "--raw-input",
+        "--tab",
+        "--seq",
+        "--stream",
+    ],
+    long_values: &["--indent"],
+    ..NO_OPTIONS
+};
 
-/// Index of a command's pattern operand, if it has one: the first word
-/// after the name that is not an option, unless the pattern was given with
-/// `-e`/`-f`.
-fn pattern_position(words: &[Word]) -> Option<usize> {
+/// Index (in `words`) of the operand that is a pattern or filter rather
+/// than a path (`grep . f`, `jq . f`), derived from the command's option
+/// table. `None` when the pattern came from `-e`/`-f`, the command has no
+/// such operand, or its options cannot be parsed; every operand is then
+/// treated as a possible path.
+fn pattern_operand(words: &[Word]) -> Option<usize> {
     let name = literal(words.first())?;
-    if !PATTERN_FIRST.contains(&base_name(&name)) {
+    let spec = match base_name(&name) {
+        "grep" | "egrep" | "fgrep" => &GREP_OPTS,
+        "rg" => &RG_OPTS,
+        "ag" | "ack" | "ugrep" => &NO_OPTIONS,
+        "jq" | "yq" => &JQ_OPTS,
+        _ => return None,
+    };
+    let parsed = parse_options(&words[1..], spec, true)?;
+    let is_jq = std::ptr::eq(spec, &JQ_OPTS);
+    let pattern_by_option = !is_jq
+        && parsed
+            .opts
+            .iter()
+            .any(|(k, _)| matches!(k.as_str(), "-e" | "-f" | "--regexp" | "--file"));
+    if pattern_by_option {
         return None;
     }
-    let mut position = None;
-    for (i, w) in words.iter().enumerate().skip(1) {
-        let text = literal(Some(w))?;
-        if matches!(
-            text.as_str(),
-            "-e" | "-f" | "--regexp" | "--file" | "--expression"
-        ) || text.starts_with("--regexp=")
-            || text.starts_with("--file=")
-            || text.starts_with("--expression=")
-        {
-            return None;
-        }
-        if position.is_none() && !text.starts_with('-') {
-            position = Some(i);
-        }
-    }
-    position
+    parsed.operands.first().map(|i| i + 1)
 }
 
 fn handle_simple(cmd: &Simple, depth: usize, st: &mut State) {
     let is_dd = cmd.is_command && literal(cmd.words.first()).as_deref() == Some("dd");
     let pattern_at = if cmd.is_command {
-        pattern_position(&cmd.words)
+        pattern_operand(&cmd.words)
     } else {
         None
     };
@@ -877,15 +1176,63 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
             return;
         };
         let name = base_name(&name).to_string();
+        if name == "arch" {
+            match skip_arch_options(&words[i + 1..]) {
+                Some(n) => {
+                    i += 1 + n;
+                    continue;
+                }
+                None => {
+                    st.unresolved = true;
+                    executor_scan(&words[i + 1..], depth, st);
+                    return;
+                }
+            }
+        }
         let Some(spec) = wrapper_spec(&name) else {
             break;
         };
-        let Some(parsed) = parse_options(&words[i + 1..], spec, false) else {
+        let Some(parsed) = parse_options(&words[i + 1..], spec.opts, false) else {
             // An option not in the table: the command word is unknown.
             st.unresolved = true;
+            executor_scan(&words[i + 1..], depth, st);
             return;
         };
         let mut next = i + 1 + parsed.next;
+        for (key, value) in &parsed.opts {
+            if spec.payload.contains(&key.as_str()) {
+                st.unresolved = true;
+                if let Some(value) = value {
+                    analyze(value, depth + 1, st);
+                }
+            }
+        }
+        if spec.always_unresolved {
+            st.unresolved = true;
+            executor_scan(&words[next..], depth, st);
+        }
+        if spec.skip_operands > 0 {
+            for _ in 0..spec.skip_operands {
+                if literal(words.get(next)).is_some() {
+                    next += 1;
+                }
+            }
+            // Options may also follow the operand (`flock FILE -c CMD`).
+            let Some(after) = parse_options(&words[next..], spec.opts, false) else {
+                st.unresolved = true;
+                executor_scan(&words[next..], depth, st);
+                return;
+            };
+            for (key, value) in &after.opts {
+                if spec.payload.contains(&key.as_str()) {
+                    st.unresolved = true;
+                    if let Some(value) = value {
+                        analyze(value, depth + 1, st);
+                    }
+                }
+            }
+            next += after.next;
+        }
         match name.as_str() {
             "env" => {
                 for (key, value) in &parsed.opts {
@@ -1000,6 +1347,20 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
             let at = skip_options(rest, |o| {
                 matches!(o, "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace")
             });
+            for k in 0..at {
+                let option = literal(rest.get(k)).unwrap_or_default();
+                if option == "-c" {
+                    // A config override can define aliases, pagers, hooks
+                    // and helpers that run programs.
+                    st.unresolved = true;
+                    let setting = literal(rest.get(k + 1)).unwrap_or_default();
+                    if let Some((_, command)) = setting.split_once("=!") {
+                        analyze(command, depth + 1, st);
+                    }
+                } else if option.starts_with("--exec-path") || option.starts_with("--config-env") {
+                    st.unresolved = true;
+                }
+            }
             if literal(rest.get(at)).is_some_and(|sub| GIT_READERS.contains(&sub.as_str())) {
                 st.unresolved = true;
             }
@@ -1035,13 +1396,13 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
                 _ => st.unresolved = true,
             }
         }
-        n if n.starts_with("python")
-            || INTERPRETERS.contains(&n)
+        n if is_interpreter(n)
             || (n == "uv" && literal(rest.first()).as_deref() == Some("run")) =>
         {
             st.unresolved = true;
         }
-        _ => {}
+        n if PLAIN.contains(&n) => {}
+        _ => executor_scan(rest, depth, st),
     }
 }
 
@@ -1427,13 +1788,106 @@ fn decode_ansi_c(s: &str) -> String {
     out
 }
 
+/// Bodies of the `$(...)` and backquote substitutions in `text`, found by a
+/// linear scan; `$((` arithmetic is scanned through. `None` when one is not
+/// closed. Nested substitutions stay inside their body and are found when
+/// the body is analysed.
+fn substitution_bodies(text: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut bodies = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '`' => {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '`' {
+                    j += if chars[j] == '\\' { 2 } else { 1 };
+                }
+                if j >= chars.len() {
+                    return None;
+                }
+                let body: String = chars[i + 1..j].iter().collect();
+                bodies.push(unescape_backquoted(&body));
+                i = j + 1;
+            }
+            '$' if chars.get(i + 1) == Some(&'(') && chars.get(i + 2) != Some(&'(') => {
+                let end = closing_paren(&chars, i + 2)?;
+                bodies.push(chars[i + 2..end].iter().collect());
+                i = end + 1;
+            }
+            _ => i += 1,
+        }
+    }
+    Some(bodies)
+}
+
+/// Index of the `)` that closes a command substitution whose body starts at
+/// `start`, counting parentheses and skipping escapes, quoted text and
+/// comments. `None` when it is not closed.
+fn closing_paren(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut i = start;
+    let mut word_start = true;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' => {
+                i += 2;
+                word_start = false;
+                continue;
+            }
+            '\'' | '"' => {
+                i += 1;
+                while i < chars.len() && chars[i] != c {
+                    i += if c == '"' && chars[i] == '\\' { 2 } else { 1 };
+                }
+                if i >= chars.len() {
+                    return None;
+                }
+            }
+            '#' if word_start => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        word_start = c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(');
+        i += 1;
+    }
+    None
+}
+
+/// Inside backquotes, `\\`, `` \` `` and `\$` stand for the bare character.
+fn unescape_backquoted(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && matches!(chars.peek(), Some('\\' | '`' | '$')) {
+            out.push(chars.next().unwrap_or('\\'));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Front-end: brush-parser.
 
 mod front {
     use super::{
-        decode_ansi_c, home_dir, remove_line_continuations, CandBuf, Ir, Simple, Word,
-        MAX_BRACE_WORDS, MAX_TOTAL_BRACE_WORDS,
+        decode_ansi_c, home_dir, remove_line_continuations, substitution_bodies,
+        unescape_backquoted, CandBuf, Ir, Simple, Word, MAX_BRACE_WORDS, MAX_TOTAL_BRACE_WORDS,
     };
     use brush_parser::ast::{
         self, Command, CommandPrefixOrSuffixItem as Item, CompoundCommand, CompoundList,
@@ -1563,7 +2017,7 @@ mod front {
         fn compound(&mut self, c: &CompoundCommand) {
             match c {
                 CompoundCommand::Arithmetic(a) => {
-                    self.arithmetic_substitutions(&a.expr.value);
+                    self.embedded_substitutions(&a.expr.value);
                     // Bash reads `((` as arithmetic only when the command
                     // also closes with an unbroken `))`; `((cat x) )` and
                     // `( ( cat x ) )` are nested subshells. brush-parser
@@ -1588,7 +2042,7 @@ mod front {
                 CompoundCommand::ArithmeticForClause(f) => {
                     let parts = [&f.initializer, &f.condition, &f.updater];
                     for expr in parts.into_iter().flatten() {
-                        self.arithmetic_substitutions(&expr.value);
+                        self.embedded_substitutions(&expr.value);
                     }
                     self.list(&f.body.list);
                 }
@@ -1704,10 +2158,7 @@ mod front {
                     // The body is text, not a file read; only substitutions
                     // in an unquoted body run.
                     if doc.requires_expansion {
-                        if let Ok(pieces) = word::parse_heredoc(&doc.doc.value, &self.options) {
-                            let mut buf = CandBuf::default();
-                            self.pieces(&pieces, false, Mode::BodiesOnly, &mut buf);
-                        }
+                        self.embedded_substitutions(&doc.doc.value);
                     }
                 }
                 IoRedirect::HereString(_, w) => {
@@ -1791,7 +2242,7 @@ mod front {
                         known = false
                     }
                     WordPiece::ArithmeticExpression(expr) => {
-                        self.arithmetic_substitutions(&expr.value);
+                        self.embedded_substitutions(&expr.value);
                         known = false;
                     }
                     WordPiece::CommandSubstitution(body) => {
@@ -1827,23 +2278,19 @@ mod front {
             }
         }
 
-        /// Records the bodies of `$(...)` and backquote substitutions inside
-        /// an arithmetic expression (they run), marking the result
-        /// unresolved when there are any.
-        fn arithmetic_substitutions(&mut self, expr: &str) {
-            if !expr.contains("$(") && !expr.contains('`') {
+        /// Records the bodies of `$(...)` and backquote substitutions in
+        /// text that is expanded but not split into words (an unquoted
+        /// here-document body, an arithmetic expression), and marks the
+        /// result unresolved when there are any. A linear scan
+        /// ([`substitution_bodies`]) rather than brush-parser's word parser,
+        /// which is exponential on unclosed `$(`.
+        fn embedded_substitutions(&mut self, text: &str) {
+            if !text.contains("$(") && !text.contains('`') {
                 return;
             }
-            let before = self.ir.nested.len();
-            match word::parse_heredoc(expr, &self.options) {
-                Ok(pieces) => {
-                    let mut buf = CandBuf::default();
-                    self.pieces(&pieces, false, Mode::BodiesOnly, &mut buf);
-                }
-                Err(_) => self.ir.unresolved = true,
-            }
-            if self.ir.nested.len() > before {
-                self.ir.unresolved = true;
+            self.ir.unresolved = true;
+            if let Some(bodies) = substitution_bodies(text) {
+                self.ir.nested.extend(bodies);
             }
         }
     }
@@ -1917,20 +2364,6 @@ mod front {
                 .collect();
         }
         Some(acc)
-    }
-
-    /// Inside backquotes, `\\`, `` \` `` and `\$` stand for the bare character.
-    fn unescape_backquoted(body: &str) -> String {
-        let mut out = String::with_capacity(body.len());
-        let mut chars = body.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\\' && matches!(chars.peek(), Some('\\' | '`' | '$')) {
-                out.push(chars.next().unwrap_or('\\'));
-            } else {
-                out.push(c);
-            }
-        }
-        out
     }
 }
 

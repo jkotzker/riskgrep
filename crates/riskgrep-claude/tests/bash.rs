@@ -254,12 +254,62 @@ fn oversized_command_scans_its_head_and_is_unresolved() {
 }
 
 #[test]
-fn spent_budget_stops_work() {
+fn spent_budget_returns_unresolved() {
     let tmp = tempfile::tempdir().expect("tempdir");
     populate(tmp.path(), &["a.txt".to_string()]);
     let got = bash_targets_within("cat a.txt", tmp.path(), Duration::ZERO);
     assert!(got.unresolved);
-    assert!(got.files.is_empty());
+}
+
+/// The wall-clock bound holds even while the worker is inside one parse:
+/// 63,000 bytes take longer to parse than the 20 ms budget.
+#[test]
+fn hard_time_bound_during_a_parse() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let command = "cat x; ".repeat(9_000);
+    let budget = Duration::from_millis(20);
+    let start = Instant::now();
+    let got = bash_targets_within(&command, tmp.path(), budget);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed <= budget + Duration::from_millis(50),
+        "took {elapsed:?}"
+    );
+    assert!(got.unresolved);
+}
+
+/// `cat <<E` + `$(`×k + `E` + `cat id_rsa`: brush-parser's here-doc word
+/// parser is exponential in k, so here-doc bodies are scanned linearly.
+fn unclosed_heredoc_substitutions(k: usize) -> String {
+    format!("cat <<E\n{}\nE\ncat id_rsa", "$(".repeat(k))
+}
+
+fn assert_heredoc_within_budget(k: usize) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    populate(tmp.path(), &["id_rsa".to_string()]);
+    let budget = Duration::from_millis(500);
+    let start = Instant::now();
+    let got = bash_targets_within(&unclosed_heredoc_substitutions(k), tmp.path(), budget);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed <= budget + Duration::from_millis(50),
+        "took {elapsed:?}"
+    );
+    assert!(got.unresolved);
+}
+
+#[test]
+fn unclosed_heredoc_substitutions_stay_within_budget() {
+    assert_heredoc_within_budget(12);
+}
+
+/// The 55-byte input from review (k = 17), in release:
+/// `cargo test --release -p riskgrep-claude --test bash -- --ignored`.
+#[test]
+#[ignore]
+fn unclosed_heredoc_substitutions_55_bytes_release() {
+    assert_eq!(unclosed_heredoc_substitutions(17).len(), 55);
+    assert_heredoc_within_budget(17);
 }
 
 #[test]

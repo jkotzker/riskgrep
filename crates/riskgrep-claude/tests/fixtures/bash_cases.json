@@ -220,7 +220,7 @@
     "expect_files": [
       "awk_nf.txt"
     ],
-    "expect_unresolved": false
+    "expect_unresolved": true
   },
   {
     "name": "sensitive-canary: command in a while condition",
@@ -814,7 +814,7 @@
     "expect_files": [
       "data.csv"
     ],
-    "expect_unresolved": false
+    "expect_unresolved": true
   },
   {
     "name": "jq filter then file",
@@ -1389,7 +1389,7 @@
     "expect_files": [
       "in_heredoc.txt"
     ],
-    "expect_unresolved": false
+    "expect_unresolved": true
   },
   {
     "name": "compound command input redirection",
@@ -2368,5 +2368,291 @@
       "a.gz"
     ],
     "expect_unresolved": false
+  },
+  {
+    "name": "here-doc substitution with a comment",
+    "command": "cat <<E\n$(#)\ncat secret.env)\nE",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "here-doc with unclosed substitutions",
+    "command": "cat <<E\n$($($($($($($($($($($($($($($($($(\nE\ncat id_rsa",
+    "cwd_files": [
+      "id_rsa"
+    ],
+    "expect_files": [
+      "id_rsa"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "here-doc with a backquote substitution",
+    "command": "cat <<E\n`cat secret.env`\nE",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "quoted here-doc delimiter keeps substitutions as text",
+    "command": "cat <<'E'\n$(cat secret.env)\nE",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [],
+    "expect_unresolved": false
+  },
+  {
+    "name": "grep -rePATTERN with a directory",
+    "command": "grep -rePASSWORD sub",
+    "cwd_files": [
+      "sub/a"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "grep -ePATTERN -r with a directory",
+    "command": "grep -ePASSWORD -r sub",
+    "cwd_files": [
+      "sub/a"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "rg -eTOKEN with a directory",
+    "command": "rg -eTOKEN sub",
+    "cwd_files": [
+      "sub/a"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "rg -tpy -eTOKEN with a directory",
+    "command": "rg -tpy -eTOKEN sub",
+    "cwd_files": [
+      "sub/a"
+    ],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "rg -fpats with a directory",
+    "command": "rg -fpats sub",
+    "cwd_files": [
+      "pats",
+      "sub/a"
+    ],
+    "expect_files": [
+      "pats"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "setsid sh -c",
+    "command": "setsid sh -c 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "busybox sh -c",
+    "command": "busybox sh -c 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "flock FILE -c",
+    "command": "flock /tmp/l -c 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "arch -arm64 sh -c",
+    "command": "arch -arm64 sh -c 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "script -q /dev/null sh -c",
+    "command": "script -q /dev/null sh -c 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "git -c alias running a shell command",
+    "command": "git -c alias.z='!cat secret.env' z",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "git --exec-path",
+    "command": "git --exec-path=/tmp status",
+    "cwd_files": [],
+    "expect_files": [],
+    "expect_unresolved": true
+  },
+  {
+    "name": "unknown command running sh -c",
+    "command": "mytool sh -c 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "unknown command with --command",
+    "command": "mytool --command 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "unknown command naming an interpreter",
+    "command": "mytool python3 a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "head -c is not a shell payload",
+    "command": "head -c 1 a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "chroot",
+    "command": "chroot /tmp cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "wrapper with an unknown option still scans for payloads",
+    "command": "setsid --weird sh -c 'cat secret.env'",
+    "cwd_files": [
+      "secret.env"
+    ],
+    "expect_files": [
+      "secret.env"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "taskset mask then command",
+    "command": "taskset 0x1 cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "ionice -c",
+    "command": "ionice -c 3 cat a.txt",
+    "cwd_files": [
+      "a.txt"
+    ],
+    "expect_files": [
+      "a.txt"
+    ],
+    "expect_unresolved": false
+  },
+  {
+    "name": "sed r command reads a file",
+    "command": "sed '1r secret.env' x",
+    "cwd_files": [
+      "secret.env",
+      "x"
+    ],
+    "expect_files": [
+      "x"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "awk getline reads a file",
+    "command": "awk '{ while ((getline line < \"secret.env\") > 0) print line }' x",
+    "cwd_files": [
+      "secret.env",
+      "x"
+    ],
+    "expect_files": [
+      "x"
+    ],
+    "expect_unresolved": true
+  },
+  {
+    "name": "perl is unresolved",
+    "command": "perl -ne 'print' x",
+    "cwd_files": [
+      "x"
+    ],
+    "expect_files": [
+      "x"
+    ],
+    "expect_unresolved": true
   }
 ]
