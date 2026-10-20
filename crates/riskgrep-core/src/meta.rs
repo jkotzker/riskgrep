@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use yara_x::MetaValue;
 
+/// `PostSpec::Span` group value for `secret_group = "first_nonempty"`:
+/// gitleaks' default secret, the first capture group that took part in the
+/// match and is non-empty, else the whole match.
+pub const FIRST_NONEMPTY_GROUP: usize = usize::MAX;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetaError(pub String);
 
@@ -152,6 +157,19 @@ impl<'a> Raw<'a> {
         }
     }
 
+    /// `secret_group`: a capture group index (default 0, the whole match) or
+    /// `"first_nonempty"` ([`FIRST_NONEMPTY_GROUP`]).
+    fn secret_group(&self) -> Result<usize, MetaError> {
+        match self.get("secret_group") {
+            None => Ok(0),
+            Some(MetaValue::Integer(i)) if *i >= 0 => Ok(*i as usize),
+            Some(MetaValue::String("first_nonempty")) => Ok(FIRST_NONEMPTY_GROUP),
+            Some(_) => {
+                Err(self.err("`secret_group` must be an integer >= 0 or \"first_nonempty\""))
+            }
+        }
+    }
+
     fn need<T>(&self, v: Option<T>, key: &str, post: &str) -> Result<T, MetaError> {
         v.ok_or_else(|| self.err(format_args!("post `{post}` requires key `{key}`")))
     }
@@ -206,7 +224,7 @@ impl RuleMeta {
         Ok(match name {
             "span" => PostSpec::Span {
                 regex: raw.need(raw.string("span_regex")?, "span_regex", name)?,
-                group: raw.uint("secret_group")?.unwrap_or(0) as usize,
+                group: raw.secret_group()?,
             },
             "entropy" => PostSpec::Entropy {
                 min: raw.need(raw.number("min_entropy")?, "min_entropy", name)?,
@@ -250,5 +268,49 @@ impl RuleMeta {
             },
             other => return Err(raw.err(format_args!("unknown post-processor `{other}`"))),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(secret_group: &str) -> Result<RuleMeta, MetaError> {
+        let src = format!(
+            "rule r {{ meta: category = \"secret\" weight = 80 post = \"span\" \
+             span_regex = \"k=([0-9]+)\"{secret_group} condition: true }}"
+        );
+        let rules = yara_x::compile(src.as_str()).unwrap();
+        let rule = rules.iter().next().unwrap();
+        RuleMeta::from_yara(&rule)
+    }
+
+    fn group(m: &RuleMeta) -> usize {
+        match &m.post[0] {
+            PostSpec::Span { group, .. } => *group,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn secret_group_integer_or_first_nonempty() {
+        assert_eq!(group(&parse("").unwrap()), 0);
+        assert_eq!(group(&parse(" secret_group = 2").unwrap()), 2);
+        assert_eq!(
+            group(&parse(" secret_group = \"first_nonempty\"").unwrap()),
+            FIRST_NONEMPTY_GROUP
+        );
+    }
+
+    #[test]
+    fn secret_group_rejects_other_values() {
+        for bad in [
+            " secret_group = -1",
+            " secret_group = \"first\"",
+            " secret_group = 1.5",
+        ] {
+            let e = parse(bad).unwrap_err();
+            assert!(e.0.contains("secret_group"), "{bad}: {e}");
+        }
     }
 }

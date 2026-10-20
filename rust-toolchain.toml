@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned to the release the project is built and tested with; raise it
+# deliberately (new lints and formatting can change between releases).
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]

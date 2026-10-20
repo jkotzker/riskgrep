@@ -9,7 +9,11 @@
 // Parameter names never count: PyTorch (`weight`, `bias`, `running_mean`),
 // JAX/Flax/TF (`kernel`, `scale`, `gamma`, `beta`, `moving_mean`), RWKV
 // (`time_mix`, `time_decay`, `time_first`), Mamba (`mixer`, `A_log`,
-// `dt_bias`, `conv1d`), ViT (`cls`), and model-embedding names. The unnamed
+// `dt_bias`, `conv1d`), ViT (`cls`), and model-embedding names. `weight(s)`,
+// `bias(es)`, `token(s)`, `patch(es)`, `wte`, `wpe`, and `lm_head` count as
+// parameter names only as whole tokens (between non-alphanumeric characters
+// or the ends of the name), so `qkv_bias` and `mask_token` are parameters
+// while the identities `tobias`, `abiasi`, and `patchett` are not. The unnamed
 // and bank rules also ignore hierarchical names: a layer or block segment
 // (`layers`, `blocks`, `encoder`, `encoderblock_0`, `transformer`,
 // `backbone`, `model`) or an index segment between separators. The
@@ -55,7 +59,7 @@ rule npz_embedding_tensor {
     post = "npz_members"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
+    exclude_name_regex = "(?i)((^|[^a-z0-9])(weights?|bias(es)?|tokens?|patch(es)?|wte|wpe|lm_head)($|[^a-z0-9])|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|time_embed|class_embed|cls_token|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
   strings:
     $hdr = { 50 4B 03 04 }
   condition:
@@ -72,7 +76,7 @@ rule npz_embedding_bank {
     post = "npz_members"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[./][0-9]+[./])"
+    exclude_name_regex = "(?i)((^|[^a-z0-9])(weights?|bias(es)?|tokens?|patch(es)?|wte|wpe|lm_head)($|[^a-z0-9])|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|time_embed|class_embed|cls_token|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[./][0-9]+[./])"
     min_bank = 3
     min_bank_share = 50
   strings:
@@ -107,7 +111,7 @@ rule safetensors_named_embedding {
     post = "safetensors_header"
     min_dim = 1
     name_regex = "(?i)(^|[._/-])(embeddings?|speakers?|voices?|voiceprints?|faces?|xvectors?|dvectors?|ecapa|spk_emb)($|[._/-])"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/]))"
+    exclude_name_regex = "(?i)((^|[^a-z0-9])(weights?|bias(es)?|tokens?|patch(es)?|wte|wpe|lm_head)($|[^a-z0-9])|running_(mean|var)|in_proj|pos(ition(al)?)?_?embed|word_embed|time_embed|class_embed|cls_token|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/]))"
   strings:
     $hdr = { 7B 22 }
   condition:
@@ -127,7 +131,7 @@ rule safetensors_embedding_tensor {
     post = "safetensors_header"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
+    exclude_name_regex = "(?i)((^|[^a-z0-9])(weights?|bias(es)?|tokens?|patch(es)?|wte|wpe|lm_head)($|[^a-z0-9])|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|time_embed|class_embed|cls_token|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
   strings:
     $hdr = { 7B 22 }
   condition:
@@ -145,7 +149,7 @@ rule safetensors_embedding_bank {
     post = "safetensors_header"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[./][0-9]+[./])"
+    exclude_name_regex = "(?i)((^|[^a-z0-9])(weights?|bias(es)?|tokens?|patch(es)?|wte|wpe|lm_head)($|[^a-z0-9])|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|time_embed|class_embed|cls_token|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[./][0-9]+[./])"
     min_bank = 3
     min_bank_share = 50
   strings:

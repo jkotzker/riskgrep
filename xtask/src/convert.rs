@@ -192,6 +192,114 @@ pub fn defang(re: &str) -> Option<String> {
     Some(out)
 }
 
+/// Classes this small give at most 11^4 = 14,641 four-byte atoms, within
+/// YARA-X's 16,384 per regex, so YARA-X can take its atoms from them.
+const MAX_ATOM_CLASS: u32 = 11;
+/// Repetitions this long or longer give four-byte atoms.
+const ATOM_RUN: u32 = 4;
+
+/// Keeps YARA-X from choosing its atoms (the literals it searches for before
+/// running a regex) inside a run of digits.
+///
+/// YARA-X ranks a four-digit atom above a literal of letters (bytes outside
+/// `a-z`/`A-Z` score higher), so for `ntn_[0-9]{11}` it searches for every
+/// four-digit string instead of `ntn_`, and runs the regex at nearly every
+/// offset of digit-dense text (measured: 0.8 MB of printed numbers took
+/// about 1 s with the secrets ruleset). Each repetition of at least
+/// [`ATOM_RUN`] over a class of at most [`MAX_ATOM_CLASS`] bytes, none of
+/// them letters, becomes `(?:RUN|$^)`. `$^` needs one position to be both
+/// the start and the end of the input, so it can only match an empty input;
+/// a regex that cannot match the empty string matches exactly what it did
+/// before, and the rewrite is only made for such regexes. With the run
+/// wrapped, YARA-X 1.21 takes its atoms from the regex's other literals
+/// (measured by scan time; `eval/README.md`, round 6). Only the YARA-X anchor is rewritten; `span_regex`
+/// keeps the original.
+pub fn steer_atoms(re: &str) -> String {
+    use regex_syntax::ast::{parse::Parser, Ast, RepetitionKind, RepetitionRange};
+    let Ok(ast) = Parser::new().parse(re) else {
+        return re.to_string();
+    };
+    let nonempty = regex_syntax::ParserBuilder::new()
+        .unicode(false)
+        .utf8(false)
+        .build()
+        .parse(re)
+        .is_ok_and(|h| h.properties().minimum_len().is_some_and(|n| n > 0));
+    if !nonempty {
+        return re.to_string();
+    }
+
+    fn is_impossible(a: &Ast) -> bool {
+        use regex_syntax::ast::AssertionKind::{EndLine, StartLine};
+        match a {
+            Ast::Concat(c) => matches!(
+                c.asts.as_slice(),
+                [Ast::Assertion(e), Ast::Assertion(s)] if e.kind == EndLine && s.kind == StartLine
+            ),
+            _ => false,
+        }
+    }
+    fn small_class(src: &str) -> bool {
+        let Ok(h) = regex_syntax::ParserBuilder::new()
+            .unicode(false)
+            .utf8(false)
+            .build()
+            .parse(src)
+        else {
+            return false;
+        };
+        let regex_syntax::hir::HirKind::Class(regex_syntax::hir::Class::Bytes(c)) = h.kind() else {
+            return false;
+        };
+        let size: u32 = c
+            .ranges()
+            .iter()
+            .map(|r| u32::from(r.end() - r.start()) + 1)
+            .sum();
+        size <= MAX_ATOM_CLASS
+            && c.ranges()
+                .iter()
+                .all(|r| (r.start()..=r.end()).all(|b| !b.is_ascii_alphabetic()))
+    }
+    fn walk(a: &Ast, re: &str, out: &mut Vec<(usize, usize)>) {
+        match a {
+            Ast::Repetition(r) => {
+                let min = match &r.op.kind {
+                    RepetitionKind::Range(
+                        RepetitionRange::Exactly(n)
+                        | RepetitionRange::AtLeast(n)
+                        | RepetitionRange::Bounded(n, _),
+                    ) => *n,
+                    _ => 0,
+                };
+                let inner = r.ast.span();
+                let class = matches!(*r.ast, Ast::ClassBracketed(_) | Ast::ClassPerl(_));
+                if min >= ATOM_RUN
+                    && class
+                    && small_class(&re[inner.start.offset..inner.end.offset])
+                {
+                    out.push((r.span.start.offset, r.span.end.offset));
+                } else {
+                    walk(&r.ast, re, out);
+                }
+            }
+            Ast::Group(g) => walk(&g.ast, re, out),
+            Ast::Alternation(alt) if alt.asts.iter().any(is_impossible) => {}
+            Ast::Alternation(alt) => alt.asts.iter().for_each(|a| walk(a, re, out)),
+            Ast::Concat(c) => c.asts.iter().for_each(|a| walk(a, re, out)),
+            _ => {}
+        }
+    }
+    let mut runs = Vec::new();
+    walk(&ast, re, &mut runs);
+    let mut out = re.to_string();
+    for (s, e) in runs.into_iter().rev() {
+        out.insert_str(e, "|$^)");
+        out.insert_str(s, "(?:");
+    }
+    out
+}
+
 /// Copies a character class starting at `c[start] == '['`; returns the index
 /// after its closing `]`.
 fn copy_class(c: &[char], start: usize, out: &mut String) -> usize {
@@ -463,6 +571,34 @@ fn has_fixed_prefix(hir: &Hir, group: usize) -> bool {
     seq.is_finite() && seq.min_literal_len().is_some_and(|n| n >= MIN_PREFIX)
 }
 
+/// Which part of a match is the secret.
+#[derive(Clone, Copy)]
+enum SecretGroup {
+    /// A capture group (0: the whole match).
+    Index(usize),
+    /// gitleaks' default with this many capture groups: the first non-empty
+    /// group, else the whole match.
+    FirstNonEmpty(usize),
+}
+
+impl SecretGroup {
+    fn meta_value(self) -> String {
+        match self {
+            SecretGroup::Index(g) => g.to_string(),
+            SecretGroup::FirstNonEmpty(_) => "\"first_nonempty\"".into(),
+        }
+    }
+
+    /// True when every secret this selects starts with a fixed prefix: for
+    /// the first non-empty group, every group and the whole match must.
+    fn has_fixed_prefix(self, hir: &Hir) -> bool {
+        match self {
+            SecretGroup::Index(g) => has_fixed_prefix(hir, g),
+            SecretGroup::FirstNonEmpty(n) => (0..=n).all(|g| has_fixed_prefix(hir, g)),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Class {
     FixedPrefix,
@@ -707,32 +843,27 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
         let allow =
             translate_allowlists(r.allowlist.iter().chain(&r.allowlists), &r.id, &mut skipped)?;
 
-        let mut group = 0usize;
+        let mut group = SecretGroup::Index(0);
         let mut hir = None;
         if let Some(re) = &r.regex {
             let compiled = check_regex(&r.id, "regex", re)?;
             let explicit = compiled.captures_len() - 1;
-            group = match r.secret_group {
-                Some(g) if g > explicit => {
-                    return Err(format!("{}: secretGroup {g} > {explicit} groups", r.id))
-                }
-                Some(g) => g,
-                None => usize::from(explicit > 0),
-            };
             let parsed = parse_hir(&r.id, re)?;
             let group1_nonempty = find_capture(&parsed, 1)
                 .is_some_and(|g| g.properties().minimum_len().is_some_and(|n| n > 0))
                 && always_participates(&parsed, 1);
-            if r.secret_group.is_none() && explicit >= 1 && !group1_nonempty {
-                skipped.push((
-                    r.id.clone(),
-                    format!(
-                        "secret group: gitleaks takes the first non-empty of {explicit} group(s), \
-                         else the whole match; the span uses group 1, which can be empty or absent, \
-                         so those matches are dropped"
-                    ),
-                ));
-            }
+            // gitleaks without `secretGroup`: the first non-empty capture
+            // group, else the whole match. When group 1 always takes part and
+            // is never empty, that is group 1.
+            group = match r.secret_group {
+                Some(g) if g > explicit => {
+                    return Err(format!("{}: secretGroup {g} > {explicit} groups", r.id))
+                }
+                Some(g) => SecretGroup::Index(g),
+                None if explicit == 0 => SecretGroup::Index(0),
+                None if group1_nonempty => SecretGroup::Index(1),
+                None => SecretGroup::FirstNonEmpty(explicit),
+            };
             hir = Some(parsed);
         }
         for p in allow.paths.iter().chain(&r.path) {
@@ -746,7 +877,7 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
             Class::PrivateKey
         } else if r.id.starts_with("generic") {
             Class::Generic
-        } else if hir.as_ref().is_some_and(|h| has_fixed_prefix(h, group)) {
+        } else if hir.as_ref().is_some_and(|h| group.has_fixed_prefix(h)) {
             Class::FixedPrefix
         } else {
             Class::Contextual
@@ -812,7 +943,7 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
                 }
                 meta.push(format!("post = {}", yara_str(&post.join(","))));
                 meta.push(format!("span_regex = {}", yara_str(re)));
-                meta.push(format!("secret_group = {group}"));
+                meta.push(format!("secret_group = {}", group.meta_value()));
                 if let Some(e) = entropy {
                     meta.push(format!("min_entropy = {}", number(e)));
                 }
@@ -822,7 +953,8 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
                 if !allow_res.is_empty() {
                     meta.push(format!("allow_regex = {}", yara_str(&alt)));
                 }
-                let y = yara_regex(&lazy_to_greedy(re)).map_err(|e| format!("{}: {e}", r.id))?;
+                let y = yara_regex(&steer_atoms(&lazy_to_greedy(re)))
+                    .map_err(|e| format!("{}: {e}", r.id))?;
                 strings.push(format!("$re = {y}"));
             }
             for (j, k) in keywords.iter().enumerate() {
@@ -935,7 +1067,8 @@ fn upstream_md(
         s,
         "- Each rule becomes one YARA-X rule named after the gitleaks id with `-` replaced by `_` (and `_` prepended to an id starting with a digit).\n\
          - Regexes are read with Go (RE2) syntax: a `{{` that does not start a repetition is escaped for Rust and YARA-X; nothing else changes.\n\
-         - The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The original regex is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret (`secretGroup`, else the first capture group, else the whole match).\n\
+         - The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The original regex is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret: `secretGroup` when the rule sets it, otherwise as gitleaks does, the first capture group that matched non-empty, else the whole match (`secret_group = \"first_nonempty\"`; `secret_group = 1` when group 1 always takes part and is never empty, which selects the same text).\n\
+         - In `$re` only, a repetition of 4 or more over a class of at most 11 characters with no letters (`[0-9]{{11}}`, `\\d{{15,16}}`) is written `(?:RUN|$^)`. YARA-X otherwise searches for every 4-digit string in place of the rule's literal prefix, which made digit-dense text scan as slowly as 0.8 MB/s. `$^` matches only an empty input and no converted regex matches the empty string, so `$re` matches exactly what it did.\n\
          - Keywords are `nocase` literals `$kw0..n`; the rule needs one of them and `$re`.\n\
          - `entropy` becomes the `entropy` post-processor on the secret. gitleaks drops a secret whose entropy is at most the threshold; the post-processor drops one below it.\n\
          - Allowlist stopwords become `stopwords/secrets_core_<rule>.txt` (rule and global stopwords) or `stopwords/secrets_core_global.txt` (global only).\n\

@@ -46,8 +46,8 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 ### Unnamed tensors with parameter-like or hierarchical names are not treated as embeddings
 
 - **Not covered:** a single embedding saved in safetensors or `.npz` under a name containing a parameter word (`kernel`, `scale`, `beta`, …) or a layer or index segment (`encoder.0.out`, `vec_1_a`).
-- **Why:** the same name exclusions that keep model checkpoints out apply to the single-tensor rules.
-- **How it shows up:** the file scores 25 (safetensors) or 30 (`.npz`) instead of 70; it is not flagged.
+- **Why:** the same name exclusions that keep model checkpoints out apply to the single-tensor rules. The parameter words count only as whole tokens: `weight(s)`, `bias(es)`, `token(s)`, `patch(es)`, `wte`, `wpe`, and `lm_head` between non-alphanumeric characters (`.`, `_`, `/`, `-`, `:`) or the ends of the name; `kernel`, `scale`, `gamma`, `beta`, and the other JAX, RWKV, and Mamba names between `.`, `_`, `/`, or the ends. So `qkv_bias` and `mask_token` are excluded, while identities that contain such a word inside a longer word (`tobias`, `abiasi`, `patchett`) are not: `tobias_embedding` [192] scores 85 and a bank keyed `tobias`, `patchett`, `abiasi`, `dave` scores 94 (unit tests pin both).
+- **How it shows up:** the file scores 25 (safetensors) or 30 (`.npz`) instead of 70; it is not flagged. An identity name that is itself one of the words as a token (`bias_2`, `token.alice`) is excluded the same way.
 - **Planned fix:** none decided.
 
 ### Single embeddings under underscore-indexed identity keys
@@ -89,7 +89,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 - **Not covered (false positive):** ordinary numeric arrays in `.npy`, `.npz`, or safetensors files whose last dimension happens to be an embedding width, such as benchmark or test data, a Gaussian mixture's `means` [8, 192], or a small numpy MLP's flat-named biases (`b1` [256]).
 - **Why:** an unnamed array of an embedding width cannot be told apart from an embedding by its header.
-- **How it shows up:** a score of 70 (ask in Claude Code; below the git hook's block threshold of 75). In the evaluation's 55,876 public-repository files, 4 such files were flagged; the evaluation's flat-MLP probe scores 70 (ask), never deny, in all 10 files.
+- **How it shows up:** a score of 70 (ask in Claude Code; below the git hook's block threshold of 75). In the evaluation's 55,877 scanned public-repository files, 4 such files were flagged; the evaluation's flat-MLP probe scores 70 (ask), never deny, in all 10 files.
 - **Planned fix:** none decided.
 
 ### Printed float arrays of an embedding width in test code
@@ -113,11 +113,18 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** a score of 30, below every default threshold. It adds to other evidence by noisy-or.
 - **Planned fix:** none decided.
 
-### Safetensors and `.npz` header recognition
+### Safetensors header recognition
 
 - **Not covered:** a safetensors file whose JSON header starts with whitespace, or declares a header of 4 GiB or more (classified as unknown binary), and the part of a safetensors file beyond the first 100 MiB.
 - **Why:** classification checks for `{"` at byte 8 and a declared length below 2^32 so that arbitrary text is not taken for a model file; reads are capped at 100 MiB.
 - **How it shows up:** the file is skipped as a binary of unknown format (no score).
+- **Planned fix:** none decided.
+
+### Only the first 1,024 members of an `.npz` archive are inspected
+
+- **Not covered:** `.npy` members of an `.npz` archive after the first 1,024 entries of its directory.
+- **Why:** a bound on the work per archive (`NPZ_MAX_MEMBERS` in `crates/riskgrep-core/src/post/tensor.rs`).
+- **How it shows up:** an embedding or bank member past entry 1,024 is not seen, and the bank share is computed over the first 1,024 entries only, so an archive with more members can score lower than its content warrants.
 - **Planned fix:** none decided.
 
 ### Every zip-based file triggers the `.npz` rule's cheap check
@@ -147,7 +154,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 - **Not covered (false positive):** credential-named assignments with placeholder or test values in test code, test configuration, and documentation (for example `api_key = "..."` in a test fixture or a tutorial).
 - **Why:** the generic rule sees a credential-named key with a random-looking value and cannot tell a test value from a real one.
-- **How it shows up:** a score of 80 (blocked by the git hook; below Claude Code's ask threshold of 90). In the evaluation's 55,876 public-repository files, 21 such files were flagged, most of the 25 secret false positives (0.45 per 1,000).
+- **How it shows up:** a score of 80 (blocked by the git hook; below Claude Code's ask threshold of 90). In the evaluation's 55,877 scanned public-repository files, 21 such files were flagged, most of the 25 secret false positives (0.45 per 1,000).
 - **Planned fix:** none decided.
 
 ### Paths on gitleaks' global allowlist are skipped by the converted secret rules
@@ -157,19 +164,19 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** no evidence from the converted rules for a secret placed in such a path, including a real one in a file named like a lockfile or inside `node_modules/`. A path containing `gitleaks.toml` is skipped wherever it is.
 - **Planned fix:** none decided; the exclusions could be made configurable per ruleset.
 
-### The `true|false|null` value allowlist drops any value containing `false`
+### The `true|false|null` value allowlist drops any secret containing `false`
 
-- **Not covered:** a generic-rule value that contains the text `false` (or starts with `true`, or ends with `null`).
-- **Why:** gitleaks' allowlist is written `(?:(?i)^true|false|null$)`. The alternation binds looser than the anchors, so it reads "starts with `true`, or contains `false`, or ends with `null`" rather than "is exactly `true`, `false`, or `null`". The converter keeps the expression.
-- **How it shows up:** a random-looking value that happens to contain `false` (case-insensitive) is not reported by the rules that carry this allowlist.
+- **Not covered:** a secret that contains the text `false` (or starts with `true`, or ends with `null`), for 221 of the 222 converted rules: every converted rule with a regex, provider-specific ones included. Only `pkcs12_file`, which matches on the path alone, does not carry it.
+- **Why:** the expression is in gitleaks' global allowlist, which applies to every rule's secret, and is written `(?:(?i)^true|false|null$)`. The alternation binds looser than the anchors, so it reads "starts with `true`, or contains `false`, or ends with `null`" rather than "is exactly `true`, `false`, or `null`". The converter keeps the expression.
+- **How it shows up:** a secret that happens to contain `false` (case-insensitive; also the matching forms of `true` and `null`) is not reported. In a random 32-character alphanumeric value this is rare (the five letters must occur in sequence), but a deliberately chosen value can contain the word.
 - **Planned fix:** none decided; anchoring the three alternatives is a local change to the converter.
 
-### DER private keys in some layouts are not matched
+### DER private keys with a short header are skipped before the rule runs
 
-- **Not covered:** PKCS#8 keys with a one-byte long-form length (`30 81 ?? 02 01 00`), PKCS#8 Ed25519 keys (`30 2e 02 01 00`), PKCS#8 EC keys without the public key (a one-byte short-form length, for example `30 41 02 01 00`), and X25519 keys (`30 2e`), in `.der` and `.key` files. The rule recognises PKCS#1 and PKCS#8 with a two-byte length, SEC1 EC keys, and the PKCS#12 header. The first two forms were found in review; the last two are read from the header pattern, not measured against real key files.
-- **Why:** the header pattern in `rulesets/secrets-core/keystores.yar` lists the layouts that were checked; these were not.
-- **How it shows up:** the file is a binary of unknown format and is skipped. PEM-encoded versions of the same keys are found.
-- **Planned fix:** none decided; adding the header forms is a small rule change.
+- **Not covered:** DER private keys in `.der` and `.key` files whose outer length is one byte other than `0x77`: SEC1 EC keys on P-224 (`30 68`), secp256k1 (`30 74`), and brainpoolP256r1 (`30 78`), a P-256 key without its public key (`30 31`), and PKCS#8 Ed25519, X25519 (`30 2e`), and Ed448 (`30 47`) keys. Also not covered: encrypted PKCS#8 keys (`EncryptedPrivateKeyInfo`, which starts SEQUENCE, SEQUENCE like a certificate) and key formats that are not DER (OpenSSH's binary format, JKS key stores).
+- **Why:** the `der_key_file` rule (`rulesets/secrets-core/keystores.yar`) matches any SEC1, PKCS#1, PKCS#8, or RFC 5958 version 2 header with a one-byte, `81`, or `82` length (a unit test pins each kind above, built with OpenSSL 3.5's header bytes and random key material), but a file reaches the rule only when classification reads it as a key store, and classification accepts only `30 82` (also `.p12`, `.pfx`), `30 77`, and `30 81` headers for `.der` and `.key`.
+- **How it shows up:** the file is a binary of unknown format and is skipped (`on_skipped` applies: allow by default). PEM-encoded versions of the same keys are found by `private_key`. PKCS#1 and PKCS#8 keys with a two-byte length (RSA), SEC1 P-256 (`30 77`) and P-384 (`30 81`), and PKCS#8 P-256 (`30 81`) keys are found.
+- **Planned fix:** accept any `30` header for `.der` and `.key` in classification and let the rule decide.
 
 ### Generic and weight-80 secrets never prompt in Claude Code by default
 
@@ -181,22 +188,29 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 ### Embedding names with a parameter suffix are not flagged by name
 
 - **Not covered:** a tensor whose name contains an embedding word and also a parameter word (for example `speaker_embedding.weight`, `face_embedding.bias`).
-- **Why:** the named safetensors rule ignores parameter-like names anywhere (`weight`, `bias`, `running_mean`, `in_proj`, and others) so that model layers named like embeddings are not flagged; the exclusion wins over the embedding word.
+- **Why:** the named safetensors rule ignores parameter-like names (`weight` and `bias` as whole tokens, `running_mean`, `in_proj`, and others) so that model layers named like embeddings are not flagged; the exclusion wins over the embedding word.
 - **How it shows up:** the file scores 25 (the generic float-tensor rule) instead of 85.
 - **Planned fix:** none decided.
 
 ### Provider coverage is gitleaks v8.30.1 plus local key-store rules
 
 - **Not covered:** credential formats gitleaks does not define or that were added after v8.30.1, internal token formats of the user's own services, and secrets that are encoded, split across lines, built at run time, or stored encrypted.
-- **Why:** the 222 provider rules are converted from one pinned gitleaks release (`rulesets/secrets-core/UPSTREAM.md`); rules are not written by hand except key stores. Two local changes (a stricter generic key name and a higher generic weight) differ from upstream and are listed there.
+- **Why:** the 222 rules converted from one pinned gitleaks release (`rulesets/secrets-core/UPSTREAM.md`: 221 regex rules, among them the generic `generic-api-key`, and the path rule `pkcs12-file`) are the only credential rules besides the two hand-written key-store rules. Two local changes (a stricter generic key name and a higher generic weight) differ from upstream and are listed there.
 - **How it shows up:** no evidence for such a credential unless the generic rule happens to match.
 - **Planned fix:** the pin is updated by regenerating from a newer release; no schedule.
+
+### A few matches differ from gitleaks
+
+- **Not covered:** a small share of the matches gitleaks reports. Sampled agreement over 5,206 generated matches of the 217 converted rules that have a regex and no path condition: 5,203 agree, 3 are missed, and 1 is reported that gitleaks drops.
+- **Why:** the 3 misses (2 for `contentful_delivery_api_token`, 1 for `discord_client_secret`) were traced in review to YARA-X reporting one match where a regex's alternatives overlap at different offsets: the match YARA-X keeps is not the one gitleaks reports, so the post-processor never sees the secret. The extra one is a `curl_auth_header` value whose entropy equals the rule's threshold exactly: gitleaks drops a secret whose entropy is at most the threshold, the `entropy` post-processor one below it.
+- **How it shows up:** no evidence for the missed forms; one extra hit at the entropy boundary.
+- **Planned fix:** none decided.
 
 ### Provider-specific false positives
 
 - **Not covered (false positive):** `hashicorp_tf_password` fires on a dummy 10-character password with entropy 2.9 in Terraform test data; `curl_auth_user` fires when the user value is two shell variable references, as in `prometheus/scripts/sync_repo_files.sh`.
 - **Why:** both rules match a credential-shaped assignment or option without checking that the value is a placeholder or an expansion; they are upstream rules and not changed locally.
-- **How it shows up:** 3 and 1 files in the 55,876-file evaluation.
+- **How it shows up:** 3 and 1 files in the evaluation's 55,877 scanned public-repository files.
 - **Planned fix:** none decided; a local allowlist could be added to the converter.
 
 ### Provider-specific rules match test keys
@@ -213,6 +227,13 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **Not covered:** the middle of a text file above 8 MiB. Only the first and last 1 MiB are read, and the report says `partial`.
 - **Why:** bounds scan time and memory; both limits (`limits.text_max`, `limits.sample`) are configurable.
 - **How it shows up:** a `partial` status with the unread byte range; a secret inside that range is not found.
+- **Planned fix:** none decided.
+
+### A scan that runs past the time budget leaves the file unscanned
+
+- **Not covered:** the content of a file whose scan takes longer than `limits.time_budget_ms` (2,000 ms by default), in the command line and the git hook as in the Claude Code hook.
+- **Why:** a bound on time per file. Dense hexadecimal text is the slowest ordinary input, because `sourcegraph_access_token` (converted unchanged from gitleaks) accepts any 40-character hex string, so every such run is checked. Measured on an Apple M4 Max with the release binary and `--no-cache` (whole command, including compiling the rules): 8 MB of 40-character hex lines 1.36 s, 8 MB of printed floats 0.76 s. Before the converter kept YARA-X from searching digit runs, digit-dense data files of 1.2 to 1.9 MB timed out under load.
+- **How it shows up:** the file is reported `unscanned` with reason `timeout` (so `on_error` applies: ask in the Claude Code hook, block in the git hook). On a slower or busy machine, a file near 8 MiB of dense hex text can reach the budget.
 - **Planned fix:** none decided.
 
 ### Archives, images, and unknown binaries are not scanned

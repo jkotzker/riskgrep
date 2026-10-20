@@ -16,15 +16,20 @@ rule pkcs12_keystore {
     $hdr at 0 and path matches /\.p(12|fx)$/i
 }
 
-// DER-encoded private keys (.der, .key): a SEQUENCE whose first element is
-// the version INTEGER, 0 for PKCS#1 and PKCS#8, 1 for SEC1 EC keys. An X.509
-// certificate starts SEQUENCE, SEQUENCE and does not match.
+// DER-encoded private keys (.der, .key): a SEQUENCE (with a one-byte, `81`,
+// or `82` length) whose first element is the version INTEGER, followed by
+//   PKCS#1 RSA (and DSA) keys:          02 01 00 02  (version 0, an INTEGER)
+//   PKCS#8 PrivateKeyInfo:              02 01 00 30  (version 0, AlgorithmIdentifier)
+//   RFC 5958 OneAsymmetricKey v2:       02 01 01 30  (version 1, AlgorithmIdentifier)
+//   SEC1 ECPrivateKey (any curve):      02 01 01 04  (version 1, OCTET STRING)
+// X.509 certificates, certificate requests, public keys, and signatures start
+// SEQUENCE, SEQUENCE or SEQUENCE, INTEGER of another length, and do not match.
 rule der_key_file {
   meta:
     category = "secret"
     weight = 90
   strings:
-    $hdr = { 30 ( 82 ?? ?? 02 01 00 | 77 02 01 01 | 81 ?? 02 01 01 ) }
+    $hdr = { 30 ( 0? | 1? | 2? | 3? | 4? | 5? | 6? | 7? | 81 ?? | 82 ?? ?? ) 02 01 ( 00 ( 02 | 30 ) | 01 ( 04 | 30 ) ) }
   condition:
     $hdr at 0 and path matches /\.(der|key)$/i
 }

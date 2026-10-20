@@ -6,6 +6,8 @@ Each subdirectory with a `ruleset.toml` is a ruleset, embedded into the binary a
 
 `id` (a YARA identifier; it becomes the namespace, so rules are keyed `<id>:<rule>`), `version`, `licence`, `description`, `categories`.
 
+Stopword lists are merged by name across the selected rulesets. Two rulesets that ship a list with the same name and different words fail the bundle compile (`stopword list ... differs between rulesets`), so give lists a ruleset-specific name (`secrets_core_*` in `secrets-core`).
+
 ## Rule metadata
 
 Every rule needs these `meta:` keys:
@@ -14,16 +16,18 @@ Every rule needs these `meta:` keys:
 |---|---|
 | `category` | Score category the rule contributes to |
 | `weight` | -100..=100; positive weights combine by noisy-or, negative weights dampen |
-| `tiers` | Optional `"count:weight,..."` (ascending counts); replaces `weight` by match count |
+| `tiers` | Optional `"count:weight,..."` (ascending counts); replaces `weight` by match count, so a `weight_overrides` entry for a tiered rule has no effect |
 | `family` | Optional group name; weights in a family combine first |
-| `family_cap` | Optional 0..=100 ceiling for the family's combined weight |
+| `family_cap` | Optional 0..=100 ceiling for the family's combined weight. Give every rule of a family the same cap: when the rules that fired carry different caps, the cap of the last of them in evidence order applies (a rule without a cap leaves the family's cap unchanged) |
 | `post` | Optional comma-separated post-processors, applied in order |
+
+Keys not listed here and in the post-processor table below are ignored without a warning, so a misspelt optional key (`min_entorpy`) silently leaves the default in place; a misspelt required key fails the load.
 
 Post-processors and their arguments:
 
 | `post` | Arguments |
 |---|---|
-| `span` | `span_regex` (required), `secret_group` (capture group, default 0): narrows the match to the group |
+| `span` | `span_regex` (required), `secret_group` (a capture group index, default 0 for the whole match, or `"first_nonempty"`: the first group that took part in the match and is non-empty, else the whole match, as gitleaks does without `secretGroup`): narrows the match to that part |
 | `entropy` | `min_entropy` (required): drops matches below the Shannon entropy |
 | `stopwords` | `stopwords` (required): list name; drops matches containing a listed word |
 | `allow_regex` | `allow_regex` (required): drops matches the regex accepts |
@@ -45,6 +49,8 @@ Pattern identifiers starting with `$re`, `$hdr`, or `$hit` are evidence anchors:
 
 `path` holds the path being scanned, for path heuristics (`path matches /.../i`).
 
+Header conditions that read integers (`uint32(0)`, `uint32(4)`) must guard against short files and unrelated data themselves: the safetensors rules check `uint32(4) == 0` (a header length below 2^32), `uint32(0) > 1`, and `uint32(0) + 8 <= filesize` before the post-processor parses the header.
+
 Regexes are compiled without Unicode, so use `(?i)` for ASCII case folding; YARA-X regexes have no lookaround.
 
 ## Rule tests (`tests.toml`)
@@ -58,7 +64,7 @@ A ruleset directory may hold a `tests.toml`; `riskgrep rules test` runs it again
 | `expect` | A score: the rule must fire and the rule's category must score that (to 0.1). `"none"`: the rule must not fire |
 | `path` | Optional. Sample file name, relative to a scratch directory that is the working directory for the scan; this is the path that path rules see. Default `sample.txt` |
 
-Samples are generated at run time from fixed seeds, so nothing sensitive is stored. Positive cases count towards the "rules have a passing positive case" figure that `rules test` prints; the secrets ruleset's generated gitleaks rules are covered only where a generator below can produce a matching sample.
+Samples are generated at run time from fixed seeds, so nothing sensitive is stored. A sample also passes through file classification, so a case whose content classification skips (an unknown binary) has no evidence at all: a `"none"` case passes vacuously for any rule, and a positive case fails. Check that a negative case's content is scanned (for example with `riskgrep scan --format json`, status `scanned`) before relying on it. Positive cases count towards the "rules have a passing positive case" figure that `rules test` prints; the secrets ruleset's generated gitleaks rules are covered only where a generator below can produce a matching sample.
 
 ### Generator specs
 

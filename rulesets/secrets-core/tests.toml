@@ -61,15 +61,38 @@ path = "certs/client.p12"
 expect = 90
 
 [[case]]
+# PKCS#8 PrivateKeyInfo (RSA): SEQUENCE, INTEGER 0, SEQUENCE.
 rule = "der_key_file"
-synth = "der:3082012c020100"
+synth = "der:3082012c02010030"
 path = "keys/server.der"
 expect = 90
 
 [[case]]
+# PKCS#1 RSAPrivateKey: SEQUENCE, INTEGER 0, INTEGER.
 rule = "der_key_file"
-synth = "der:3077020101"
+synth = "der:3082012c02010002"
+path = "keys/server.der"
+expect = 90
+
+[[case]]
+# SEC1 ECPrivateKey (P-256): SEQUENCE, INTEGER 1, OCTET STRING.
+rule = "der_key_file"
+synth = "der:307702010104"
 path = "keys/server.key"
+expect = 90
+
+[[case]]
+# SEC1 ECPrivateKey (P-384), two-byte length form.
+rule = "der_key_file"
+synth = "der:3081a402010104"
+path = "keys/server.key"
+expect = 90
+
+[[case]]
+# PKCS#8 PrivateKeyInfo (P-256), two-byte length form.
+rule = "der_key_file"
+synth = "der:30818702010030"
+path = "keys/server.der"
 expect = 90
 
 # Hard negatives: each names the rule that must stay silent.

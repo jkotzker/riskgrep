@@ -10,7 +10,7 @@ Licensed under MIT or Apache-2.0, at your option.
 
 ## Install
 
-RiskGrep is built from source with a stable Rust toolchain. Nothing is published to a registry yet.
+RiskGrep is built from source with the stable Rust release pinned in `rust-toolchain.toml` (rustup installs it on first use). Nothing is published to a registry yet.
 
 ```sh
 cargo install --path crates/riskgrep
@@ -79,7 +79,7 @@ The cache (compiled rules and per-file evidence, with no file content) is in `~/
 
 ## Accuracy
 
-`cargo xtask eval` measures the shipped release binary against a generated corpus and 55,876 files from 13 pinned public repositories. The release bar is at most 1 flagged file per 1,000 ordinary files per category, 100% recall for provider-specific secrets and biometric file formats, and at least 90% for generic secrets; the current numbers meet it, and the measurements, corpus, and caveats are in [`eval/README.md`](eval/README.md). The recall figures on generated positives are circular by construction, and the public-repository figures are the better estimate of false positives.
+`cargo xtask eval` measures the shipped release binary against a generated corpus and 13 pinned public repositories (55,877 files scanned in the 2026-10-20 run; files whose scan times out are listed by the run and not counted). The release bar is at most 1 flagged file per 1,000 ordinary files per category, 100% recall on the generated positives for provider-specific secrets and biometric file formats, and at least 90% for generic secrets; the current numbers meet it. The 100% recall figures cover only the generated formats: AWS, GitHub, Anthropic, Stripe, Slack, npm, and OpenAI tokens, PEM private keys, PKCS#12 files, and DER private-key headers for secrets, and `.npy`, `.npz`, safetensors (named, unnamed, and banks), and printed float arrays at the listed embedding widths for biometrics. Most of the 222 rules converted from gitleaks have no generated positive in the evaluation, and formats outside these lists are not measured at all. The measurements, corpus, and caveats are in [`eval/README.md`](eval/README.md), and the measurements, corpus, and caveats are in [`eval/README.md`](eval/README.md). The recall figures on generated positives are circular by construction, and the public-repository figures are the better estimate of false positives.
 
 Latency is checked by `cargo xtask bench` against the targets in [`bench/targets.toml`](bench/targets.toml) (for example, a cached hook call under 5 ms at the 95th percentile) and against a stored baseline per OS. The local run is the gate. CI runs the same benchmark on hosted runners as an informational step that cannot fail the build, because shared runners are slower and noisier than the reference machine the targets were set on.
 

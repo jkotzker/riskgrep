@@ -23,8 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # rust-toolchain.toml selects the toolchain (stable with clippy and
-      # rustfmt); this installs it so later steps do not do so implicitly.
+      # rust-toolchain.toml selects the toolchain (a pinned stable release
+      # with clippy and rustfmt); this installs it so later steps do not do
+      # so implicitly.
       - name: Install Rust toolchain
         run: rustup toolchain install
 

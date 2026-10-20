@@ -54,6 +54,20 @@ path = "store.safetensors"
 expect = 94
 
 [[case]]
+# An identity containing a parameter word (`bias`) is still a named embedding.
+rule = "safetensors_named_embedding"
+synth = "safetensors:tobias_embedding=F32@192"
+path = "store.safetensors"
+expect = 85
+
+[[case]]
+# Identities containing `bias` and `patch` still form a bank.
+rule = "safetensors_embedding_bank"
+synth = "safetensors:tobias=F32@192;patchett=F32@192;abiasi=F32@192;dave=F32@192"
+path = "store.safetensors"
+expect = 94
+
+[[case]]
 rule = "safetensors_float_tensor"
 synth = "safetensors:layer.0.weight=F32@768x768"
 path = "w.safetensors"

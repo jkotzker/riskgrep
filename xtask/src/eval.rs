@@ -253,15 +253,19 @@ fn provider_secrets(out: &mut Vec<Sample>) {
         let bytes = der(&[0x30, 0x82, 0x01, 0x2c], 2000 + i as u64);
         out.push(sample(Group::Provider, "pkcs12", name.into(), bytes));
     }
-    // DER private keys: PKCS#1/#8 (INTEGER 0) and SEC1 EC keys (INTEGER 1).
-    let prefixes: [&[u8]; 3] = [
-        &[0x30, 0x82, 0x01, 0x2c, 0x02, 0x01, 0x00],
-        &[0x30, 0x77, 0x02, 0x01, 0x01],
-        &[0x30, 0x81, 0x87, 0x02, 0x01, 0x01],
+    // DER private keys: PKCS#1 (INTEGER 0, INTEGER), PKCS#8 (INTEGER 0,
+    // SEQUENCE), and SEC1 EC keys (INTEGER 1, OCTET STRING), with one- and
+    // two-byte length forms.
+    let prefixes: [&[u8]; 5] = [
+        &[0x30, 0x82, 0x01, 0x2c, 0x02, 0x01, 0x00, 0x02],
+        &[0x30, 0x82, 0x01, 0x2c, 0x02, 0x01, 0x00, 0x30],
+        &[0x30, 0x77, 0x02, 0x01, 0x01, 0x04],
+        &[0x30, 0x81, 0xa4, 0x02, 0x01, 0x01, 0x04],
+        &[0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30],
     ];
     for i in 0..PER_FORMAT {
         let name = if i % 2 == 0 { "server.der" } else { "tls.key" };
-        let bytes = der(prefixes[i % 3], 3000 + i as u64);
+        let bytes = der(prefixes[i % prefixes.len()], 3000 + i as u64);
         out.push(sample(Group::Provider, "der_key", name.into(), bytes));
     }
 }
@@ -1588,6 +1592,8 @@ pub struct Target {
     pub target: String,
     pub status: String,
     #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
     pub scores: BTreeMap<String, f64>,
     #[serde(default)]
     pub evidence: Vec<Ev>,
@@ -1633,6 +1639,49 @@ impl Target {
             }
         }
         out
+    }
+}
+
+/// A file the scan could not read or finish (status `unscanned`, for
+/// example a scan that ran past the time budget).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unscanned {
+    /// `<repo>/<path>`.
+    pub path: String,
+    pub reason: String,
+}
+
+/// The unscanned targets of one repository's report.
+pub fn unscanned(report: &ScanReport, repo: &str) -> Vec<Unscanned> {
+    report
+        .targets
+        .iter()
+        .filter(|t| t.status == "unscanned")
+        .map(|t| Unscanned {
+            path: format!("{repo}/{}", t.target),
+            reason: t.reason.clone().unwrap_or_default(),
+        })
+        .collect()
+}
+
+impl Unscanned {
+    /// The scan ran past the time budget: this depends on machine load, so
+    /// the file may be scanned in another run.
+    pub fn timed_out(&self) -> bool {
+        self.reason == "timeout"
+    }
+}
+
+/// `files.oss.unscanned` (every unscanned file, including archives, which
+/// are never scanned), `files.oss.timed_out`, and one
+/// `timed_out.oss.<repo>/<path>` key per timed-out file (value 1), so the
+/// baseline lists them. All are informational: neither gated nor compared.
+pub fn record_unscanned(list: &[Unscanned], metrics: &mut BTreeMap<String, f64>) {
+    metrics.insert("files.oss.unscanned".into(), list.len() as f64);
+    let timed_out: Vec<&Unscanned> = list.iter().filter(|u| u.timed_out()).collect();
+    metrics.insert("files.oss.timed_out".into(), timed_out.len() as f64);
+    for u in timed_out {
+        metrics.insert(format!("timed_out.oss.{}", u.path), 1.0);
     }
 }
 
@@ -2176,13 +2225,23 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// True when the checkout differs from its commit: modified, staged, or
+/// untracked (not ignored) files. An untracked file would be scanned as if it
+/// were part of the pinned repository.
+fn has_local_changes(dir: &Path) -> Result<bool, String> {
+    Ok(!git(dir, &["status", "--porcelain", "--untracked-files=all"])?.is_empty())
+}
+
 /// A clean shallow checkout of `r` at its pinned commit under `oss`.
 fn ensure_clone(oss: &Path, r: &Repo) -> Result<PathBuf, String> {
     let dir = oss.join(&r.name);
     if dir.join(".git").exists() {
         if git(&dir, &["rev-parse", "HEAD"]).ok().as_deref() == Some(r.commit.as_str()) {
-            if !git(&dir, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
-                return Err(format!("{}: checkout has local changes", dir.display()));
+            if has_local_changes(&dir)? {
+                return Err(format!(
+                    "{}: checkout has local changes or untracked files",
+                    dir.display()
+                ));
             }
             return Ok(dir);
         }
@@ -2233,6 +2292,7 @@ fn oss(ctx: &Ctx, metrics: &mut BTreeMap<String, f64>) -> Result<(), String> {
     let mut total: BTreeMap<String, Tally> = BTreeMap::new();
     let mut excluded_n: BTreeMap<String, u64> = BTreeMap::new();
     let mut flagged_lines = Vec::new();
+    let mut not_scanned: Vec<Unscanned> = Vec::new();
     let mut files = 0u64;
     println!("\nOSS repositories");
     for r in &repos {
@@ -2253,11 +2313,14 @@ fn oss(ctx: &Ctx, metrics: &mut BTreeMap<String, f64>) -> Result<(), String> {
             &entries,
             &ctx.out_dir.join(format!("oss-{}.json", r.name)),
         )?;
-        let (mut scanned, mut other) = (0u64, 0u64);
+        let (mut scanned, mut skipped) = (0u64, 0u64);
+        let repo_unscanned = unscanned(&report, &r.name);
         let mut repo_flags: BTreeMap<String, u64> = BTreeMap::new();
         for t in &report.targets {
             if !t.content_scanned() {
-                other += 1;
+                if t.status != "unscanned" {
+                    skipped += 1;
+                }
                 continue;
             }
             scanned += 1;
@@ -2290,19 +2353,29 @@ fn oss(ctx: &Ctx, metrics: &mut BTreeMap<String, f64>) -> Result<(), String> {
         files += scanned;
         let flags: Vec<String> = repo_flags.iter().map(|(c, n)| format!("{c} {n}")).collect();
         println!(
-            "  {:<16} {:<10} {:>6} files scanned, {:>5} not scanned  flagged: {}",
+            "  {:<16} {:<10} {:>6} files scanned, {:>5} skipped, {:>2} unscanned  flagged: {}",
             r.name,
             r.language,
             scanned,
-            other,
+            skipped,
+            repo_unscanned.len(),
             if flags.is_empty() {
                 "none".into()
             } else {
                 flags.join(", ")
             }
         );
+        not_scanned.extend(repo_unscanned);
     }
-    println!("\nOSS: {files} files (false positives per 1,000, known findings excluded)");
+    println!(
+        "\nOSS: {files} files scanned, {} unscanned, {} of them timed out (false positives per 1,000 scanned files, known findings excluded)",
+        not_scanned.len(),
+        not_scanned.iter().filter(|u| u.timed_out()).count()
+    );
+    for u in &not_scanned {
+        println!("  unscanned  {}  ({})", u.path, u.reason);
+    }
+    record_unscanned(&not_scanned, metrics);
     for (cat, t) in &total {
         let mut labels = vec!["flag".to_string()];
         labels.extend(ctx.thresholds[cat].iter().map(|(l, _)| l.clone()));
@@ -2465,9 +2538,55 @@ mod tests {
         Target {
             target: "src/a.py".into(),
             status: "scanned".into(),
+            reason: None,
             scores: BTreeMap::from([(SECRET.into(), 95.0)]),
             evidence,
         }
+    }
+
+    #[test]
+    fn unscanned_targets_are_listed_with_their_reason() {
+        let report: ScanReport = serde_json::from_str(
+            r#"{"targets": [
+                {"target": "a.txt", "status": "scanned"},
+                {"target": "big.txt", "status": "partial"},
+                {"target": "x.bin", "status": "skipped", "reason": "binary file of unknown format"},
+                {"target": "slow.txt", "status": "unscanned", "reason": "timeout"},
+                {"target": "a.tgz", "status": "unscanned", "reason": "gzip not scanned in v1"}
+            ]}"#,
+        )
+        .unwrap();
+        let list = unscanned(&report, "repo");
+        assert_eq!(
+            list,
+            vec![
+                Unscanned {
+                    path: "repo/slow.txt".into(),
+                    reason: "timeout".into()
+                },
+                Unscanned {
+                    path: "repo/a.tgz".into(),
+                    reason: "gzip not scanned in v1".into()
+                }
+            ]
+        );
+        let mut metrics = BTreeMap::new();
+        record_unscanned(&list, &mut metrics);
+        assert_eq!(metrics["files.oss.unscanned"], 2.0);
+        assert_eq!(metrics["files.oss.timed_out"], 1.0);
+        assert_eq!(metrics["timed_out.oss.repo/slow.txt"], 1.0);
+        assert!(!metrics.contains_key("timed_out.oss.repo/a.tgz"));
+        // Informational: neither gated nor compared.
+        assert!(regressions(&metrics, &m(&[("files.oss.unscanned", 0.0)])).is_empty());
+    }
+
+    #[test]
+    fn untracked_files_count_as_local_changes() {
+        let d = tempfile::tempdir().unwrap();
+        git(d.path(), &["init", "-q"]).unwrap();
+        assert!(!has_local_changes(d.path()).unwrap());
+        fs::write(d.path().join("planted.txt"), "x").unwrap();
+        assert!(has_local_changes(d.path()).unwrap());
     }
 
     fn ev(rule: &str, cat: &str, weight: f64, lines: &[u32]) -> Ev {

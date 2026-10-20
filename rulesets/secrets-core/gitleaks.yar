@@ -342,7 +342,7 @@ rule asana_client_id {
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
-    $re = /(?i)[\w.-]{0,50}(?:asana)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([0-9]{16})(?:[\x60'"\s;]|\\[nr]|$)/
+    $re = /(?i)[\w.-]{0,50}(?:asana)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}((?:[0-9]{16}|$^))(?:[\x60'"\s;]|\\[nr]|$)/
     $kw0 = "asana" nocase
   condition:
     any of ($kw*) and
@@ -376,7 +376,7 @@ rule atlassian_api_token {
     weight = 80
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "(?i)[\\w.-]{0,50}?(?:(?-i:ATLASSIAN|[Aa]tlassian)|(?-i:CONFLUENCE|[Cc]onfluence)|(?-i:JIRA|[Jj]ira))(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{20}[a-f0-9]{4})(?:[\\x60'\"\\s;]|\\\\[nr]|$)|\\b(ATATT3[A-Za-z0-9_\\-=]{186})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
-    secret_group = 1
+    secret_group = "first_nonempty"
     min_entropy = 3.5
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -838,7 +838,7 @@ rule curl_auth_header {
     weight = 80
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\bcurl\\b(?:.*?|.*?(?:[\\r\\n]{1,2}.*?){1,5})[ \\t\\n\\r](?:-H|--header)(?:=|[ \\t]{0,5})(?:\"(?i)(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))\"|'(?i)(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))')(?:\\B|\\s|\\z)"
-    secret_group = 1
+    secret_group = "first_nonempty"
     min_entropy = 2.75
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -1019,7 +1019,7 @@ rule discord_client_id {
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
-    $re = /(?i)[\w.-]{0,50}(?:discord)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([0-9]{18})(?:[\x60'"\s;]|\\[nr]|$)/
+    $re = /(?i)[\w.-]{0,50}(?:discord)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}((?:[0-9]{18}|$^))(?:[\x60'"\s;]|\\[nr]|$)/
     $kw0 = "discord" nocase
   condition:
     any of ($kw*) and
@@ -1255,7 +1255,7 @@ rule facebook_access_token {
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
-    $re = /(?i)\b(\d{15,16}(\||%)[0-9a-z\-_]{27,40})(?:[\x60'"\s;]|\\[nr]|$)/
+    $re = /(?i)\b((?:\d{15,16}|$^)(\||%)[0-9a-z\-_]{27,40})(?:[\x60'"\s;]|\\[nr]|$)/
     $kw0 = "facebook" nocase
   condition:
     any of ($kw*) and
@@ -2382,7 +2382,7 @@ rule jwt_base64 {
     weight = 95
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\bZXlK(?:(?P<alg>aGJHY2lPaU)|(?P<apu>aGNIVWlPaU)|(?P<apv>aGNIWWlPaU)|(?P<aud>aGRXUWlPaU)|(?P<b64>aU5qUWlP)|(?P<crit>amNtbDBJanBi)|(?P<cty>amRIa2lPaU)|(?P<epk>bGNHc2lPbn)|(?P<enc>bGJtTWlPaU)|(?P<jku>cWEzVWlPaU)|(?P<jwk>cWQyc2lPb)|(?P<iss>cGMzTWlPaU)|(?P<iv>cGRpSTZJ)|(?P<kid>cmFXUWlP)|(?P<key_ops>clpYbGZiM0J6SWpwY)|(?P<kty>cmRIa2lPaUp)|(?P<nonce>dWIyNWpaU0k2)|(?P<p2c>d01tTWlP)|(?P<p2s>d01uTWlPaU)|(?P<ppt>d2NIUWlPaU)|(?P<sub>emRXSWlPaU)|(?P<svt>emRuUWlP)|(?P<tag>MFlXY2lPaU)|(?P<typ>MGVYQWlPaUp)|(?P<url>MWNtd2l)|(?P<use>MWMyVWlPaUp)|(?P<ver>MlpYSWlPaU)|(?P<version>MlpYSnphVzl1SWpv)|(?P<x>NElqb2)|(?P<x5c>NE5XTWlP)|(?P<x5t>NE5YUWlPaU)|(?P<x5ts256>NE5YUWpVekkxTmlJNkl)|(?P<x5u>NE5YVWlPaU)|(?P<zip>NmFYQWlPaU))[a-zA-Z0-9\\/\\\\_+\\-\\r\\n]{40,}={0,2}"
-    secret_group = 1
+    secret_group = "first_nonempty"
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2421,7 +2421,7 @@ rule kubernetes_secret_yaml {
     weight = 80
     post = "span,stopwords,allow_regex"
     span_regex = "(?i)(?:\\bkind:[ \\t]*[\"']?\\bsecret\\b[\"']?(?s:.){0,200}?\\bdata:(?s:.){0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:[\"']?[a-z0-9+/]{10,}={0,3}[\"']?|\\{\\{[ \\t\\w\"|$:=,.-]+}}|\"\"|''))|\\bdata:(?s:.){0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:[\"']?[a-z0-9+/]{10,}={0,3}[\"']?|\\{\\{[ \\t\\w\"|$:=,.-]+}}|\"\"|''))(?s:.){0,200}?\\bkind:[ \\t]*[\"']?\\bsecret\\b[\"']?)"
-    secret_group = 1
+    secret_group = "first_nonempty"
     stopwords = "secrets_core_global"
     allow_regex = "(?:[\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:\\{\\{[ \\t\\w\"|$:=,.-]+}}|\"\"|''))|(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
@@ -2960,7 +2960,7 @@ rule notion_api_token {
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
-    $re = /\b(ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\x60'"\s;]|\\[nr]|$)/
+    $re = /\b(ntn_(?:[0-9]{11}|$^)[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\x60'"\s;]|\\[nr]|$)/
     $kw0 = "ntn_" nocase
   condition:
     any of ($kw*) and
@@ -3831,7 +3831,7 @@ rule slack_bot_token {
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
-    $re = /xoxb-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*/
+    $re = /xoxb-(?:[0-9]{10,13}|$^)-(?:[0-9]{10,13}|$^)[a-zA-Z0-9-]*/
     $kw0 = "xoxb" nocase
   condition:
     any of ($kw*) and
@@ -3892,7 +3892,7 @@ rule slack_legacy_bot_token {
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
-    $re = /xoxb-[0-9]{8,14}-[a-zA-Z0-9]{18,26}/
+    $re = /xoxb-(?:[0-9]{8,14}|$^)-[a-zA-Z0-9]{18,26}/
     $kw0 = "xoxb" nocase
   condition:
     any of ($kw*) and
@@ -3954,7 +3954,7 @@ rule slack_user_token {
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
-    $re = /xox[pe](?:-[0-9]{10,13}){3}-[a-zA-Z0-9-]{28,34}/
+    $re = /xox[pe](?:-(?:[0-9]{10,13}|$^)){3}-[a-zA-Z0-9-]{28,34}/
     $kw0 = "xoxp-" nocase
     $kw1 = "xoxe-" nocase
   condition:
@@ -4157,7 +4157,7 @@ rule telegram_bot_api_token {
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
-    $re = /(?i)[\w.-]{0,50}(?:telegr)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([0-9]{5,16}:(?-i:A)[a-z0-9_\-]{34})(?:[\x60'"\s;]|\\[nr]|$)/
+    $re = /(?i)[\w.-]{0,50}(?:telegr)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}((?:[0-9]{5,16}|$^):(?-i:A)[a-z0-9_\-]{34})(?:[\x60'"\s;]|\\[nr]|$)/
     $kw0 = "telegr" nocase
   condition:
     any of ($kw*) and
@@ -4253,7 +4253,7 @@ rule twitter_access_token {
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
-    $re = /(?i)[\w.-]{0,50}(?:twitter)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([0-9]{15,25}-[a-zA-Z0-9]{20,40})(?:[\x60'"\s;]|\\[nr]|$)/
+    $re = /(?i)[\w.-]{0,50}(?:twitter)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}((?:[0-9]{15,25}|$^)-[a-zA-Z0-9]{20,40})(?:[\x60'"\s;]|\\[nr]|$)/
     $kw0 = "twitter" nocase
   condition:
     any of ($kw*) and

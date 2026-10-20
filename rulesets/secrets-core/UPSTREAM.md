@@ -22,7 +22,8 @@ cargo xtask convert-gitleaks --config xtask/upstream/gitleaks.toml --tag v8.30.1
 
 - Each rule becomes one YARA-X rule named after the gitleaks id with `-` replaced by `_` (and `_` prepended to an id starting with a digit).
 - Regexes are read with Go (RE2) syntax: a `{` that does not start a repetition is escaped for Rust and YARA-X; nothing else changes.
-- The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The original regex is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret (`secretGroup`, else the first capture group, else the whole match).
+- The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The original regex is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret: `secretGroup` when the rule sets it, otherwise as gitleaks does, the first capture group that matched non-empty, else the whole match (`secret_group = "first_nonempty"`; `secret_group = 1` when group 1 always takes part and is never empty, which selects the same text).
+- In `$re` only, a repetition of 4 or more over a class of at most 11 characters with no letters (`[0-9]{11}`, `\d{15,16}`) is written `(?:RUN|$^)`. YARA-X otherwise searches for every 4-digit string in place of the rule's literal prefix, which made digit-dense text scan as slowly as 0.8 MB/s. `$^` matches only an empty input and no converted regex matches the empty string, so `$re` matches exactly what it did.
 - Keywords are `nocase` literals `$kw0..n`; the rule needs one of them and `$re`.
 - `entropy` becomes the `entropy` post-processor on the secret. gitleaks drops a secret whose entropy is at most the threshold; the post-processor drops one below it.
 - Allowlist stopwords become `stopwords/secrets_core_<rule>.txt` (rule and global stopwords) or `stopwords/secrets_core_global.txt` (global only).
@@ -53,14 +54,10 @@ Applied by the converter (`LOCAL_CHANGES` in `xtask/src/convert.rs`) before tran
 
 | Rule | What |
 |---|---|
-| `atlassian-api-token` | secret group: gitleaks takes the first non-empty of 2 group(s), else the whole match; the span uses group 1, which can be empty or absent, so those matches are dropped |
-| `curl-auth-header` | secret group: gitleaks takes the first non-empty of 8 group(s), else the whole match; the span uses group 1, which can be empty or absent, so those matches are dropped |
 | `generic-api-key` | allowlist 1: 1 regexes with regexTarget = "match" |
 | `generic-api-key` | allowlist 2: 2 regexes with regexTarget = "line" |
 | `generic-api-key` | allowlist 3: condition AND over 4 paths, 3 regexes (target line), 0 stopwords |
-| `jwt-base64` | secret group: gitleaks takes the first non-empty of 34 group(s), else the whole match; the span uses group 1, which can be empty or absent, so those matches are dropped |
 | `kubernetes-secret-yaml` | allowlist 1: 1 regexes with regexTarget = "match" |
-| `kubernetes-secret-yaml` | secret group: gitleaks takes the first non-empty of 2 group(s), else the whole match; the span uses group 1, which can be empty or absent, so those matches are dropped |
 
 ## Licence
 

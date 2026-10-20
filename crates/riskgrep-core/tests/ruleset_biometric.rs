@@ -255,6 +255,57 @@ fn npz_headers(members: &[Tensor]) -> Vec<u8> {
 }
 
 #[test]
+fn identity_names_containing_parameter_words() {
+    // `tobias` contains `bias`, `patchett` `patch`, `abiasi` `bias`: the
+    // parameter words count only as whole tokens.
+    let f = fixture();
+    let named = st_header(&[t("tobias_embedding", "F32", &[192])]);
+    assert_score(biometric(&f, "t.safetensors", &named), 85.0);
+    let names = ["tobias", "patchett", "abiasi", "dave"];
+    let bank: Vec<Tensor> = names.iter().map(|n| t(n, "F32", &[192])).collect();
+    assert_score(biometric(&f, "s.safetensors", &st_header(&bank)), 94.0);
+    let bank: Vec<Tensor> = names.iter().map(|n| t(n, "<f4", &[192])).collect();
+    assert_score(biometric(&f, "s.npz", &npz_headers(&bank)), 94.0);
+    // One flat identity vector: the unnamed single-tensor rules.
+    let one = st_header(&[t("tobias", "F32", &[192])]);
+    assert_score(biometric(&f, "o.safetensors", &one), 70.0);
+    let one = npz_headers(&[t("patchett", "<f4", &[192])]);
+    assert_score(biometric(&f, "o.npz", &one), 70.0);
+}
+
+#[test]
+fn parameter_words_as_tokens_still_do_not_count() {
+    let f = fixture();
+    for name in [
+        "weight",
+        "fc.weight",
+        "conv.weight_g",
+        "bias",
+        "attn.qkv_bias",
+        "encoder.bias_ih",
+        "cls_token",
+        "mask_token",
+        "register_tokens",
+        "token_embedding",
+        "patch_embed",
+        "patches",
+        "transformer.wte",
+        "transformer.wpe",
+        "lm_head",
+        "lm_head.weight",
+        "dense/bias:0",
+    ] {
+        for (file, data) in [
+            ("m.safetensors", st_header(&[t(name, "F32", &[1, 768])])),
+            ("m.npz", npz_headers(&[t(name, "<f4", &[1, 768])])),
+        ] {
+            let score = biometric(&f, file, &data).unwrap_or(0.0);
+            assert!(score < 50.0, "{name} in {file}: {score}");
+        }
+    }
+}
+
+#[test]
 fn foreign_checkpoint_layouts_stay_below_ask() {
     let f = fixture();
     // Mamba: `backbone.layers.N.mixer.D` [1536] in every layer.

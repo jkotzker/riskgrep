@@ -4,7 +4,7 @@ use riskgrep_core::bundle::load_or_compile;
 use riskgrep_core::ruleset::Ruleset;
 use std::fs;
 use std::path::{Path, PathBuf};
-use xtask::{convert_gitleaks, lazy_to_greedy, PINNED_TAG};
+use xtask::{convert_gitleaks, lazy_to_greedy, steer_atoms, PINNED_TAG};
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
@@ -145,6 +145,50 @@ fn defang_wraps_the_last_literal_character() {
         Some(r"(?i)a[b](?P<n>[x])")
     );
     assert_eq!(defang(r"[a-z]+\w{4}"), None);
+}
+
+#[test]
+fn digit_runs_are_kept_out_of_atom_selection() {
+    // A run of 4 or more from a class of at most 11 digits or symbols is
+    // wrapped with an alternative that cannot match a non-empty input.
+    assert_eq!(steer_atoms(r"ntn_[0-9]{11}x"), r"ntn_(?:[0-9]{11}|$^)x");
+    assert_eq!(
+        steer_atoms(r"\b(\d{15,16}(\||%)[0-9a-z]{27,40})"),
+        r"\b((?:\d{15,16}|$^)(\||%)[0-9a-z]{27,40})"
+    );
+    assert_eq!(
+        steer_atoms(r"(?i)tw([0-9]{4,})"),
+        r"(?i)tw((?:[0-9]{4,}|$^))"
+    );
+    // Short runs, letter classes, and large classes are left alone.
+    for re in [
+        r"ntn_[0-9]{3}x",
+        r"key[a-f]{8}",
+        r"key[a-z0-9]{32}",
+        r"(?i)key[A-Fa-f0-9]{40}",
+        r"key[0-9a-f]{4}",
+    ] {
+        assert_eq!(steer_atoms(re), re);
+    }
+    // Only when the regex cannot match the empty string: then `$^` (start
+    // and end of the input at one position) never takes part in a match.
+    assert_eq!(steer_atoms(r"(?:[0-9]{4})?"), r"(?:[0-9]{4})?");
+}
+
+#[test]
+fn generated_digit_runs_are_wrapped() {
+    let d = convert_to_temp();
+    let yar = fs::read_to_string(d.path().join("gitleaks.yar")).unwrap();
+    let wrapped = yar.matches("|$^)").count();
+    assert!(wrapped >= 7, "{wrapped} wrapped runs");
+    for line in yar
+        .lines()
+        .filter(|l| l.trim_start().starts_with("$re = /"))
+    {
+        let re = &line.trim_start()["$re = /".len()..line.trim_start().len() - 1];
+        let re = re.replace("\\/", "/");
+        assert_eq!(steer_atoms(&re), re, "not idempotent: {line}");
+    }
 }
 
 #[test]

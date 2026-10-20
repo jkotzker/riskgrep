@@ -230,12 +230,17 @@ fn der_with(prefix: &[u8], seed: u64) -> Vec<u8> {
 
 #[test]
 fn der_key_file() {
-    // PKCS#1 / PKCS#8 (`SEQUENCE { INTEGER 0, ...`) and SEC1 EC keys
-    // (`SEQUENCE { INTEGER 1, ...` with a one- or two-byte length form).
+    // PKCS#1 (`SEQUENCE { INTEGER 0, INTEGER ...`), PKCS#8
+    // (`SEQUENCE { INTEGER 0, SEQUENCE ...`), and SEC1 EC keys
+    // (`SEQUENCE { INTEGER 1, OCTET STRING ...`), with one-byte and long-form
+    // lengths. `der_private_key_kinds` covers whole keys.
     for (n, prefix) in [
-        &[0x30, 0x82, 0x01, 0x2c, 0x02, 0x01, 0x00][..],
-        &[0x30, 0x77, 0x02, 0x01, 0x01],
-        &[0x30, 0x81, 0x87, 0x02, 0x01, 0x01],
+        &[0x30, 0x82, 0x01, 0x2c, 0x02, 0x01, 0x00, 0x02][..],
+        &[0x30, 0x82, 0x01, 0x2c, 0x02, 0x01, 0x00, 0x30],
+        &[0x30, 0x77, 0x02, 0x01, 0x01, 0x04],
+        &[0x30, 0x81, 0x87, 0x02, 0x01, 0x01, 0x04],
+        &[0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30],
+        &[0x30, 0x2e, 0x02, 0x01, 0x00, 0x30],
     ]
     .into_iter()
     .enumerate()
@@ -248,12 +253,207 @@ fn der_key_file() {
     }
 }
 
+/// A DER length.
+fn der_len(n: usize) -> Vec<u8> {
+    match n {
+        0..=127 => vec![n as u8],
+        128..=255 => vec![0x81, n as u8],
+        _ => vec![0x82, (n >> 8) as u8, n as u8],
+    }
+}
+
+/// A DER tag-length-value.
+fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    out.extend(der_len(body.len()));
+    out.extend_from_slice(body);
+    out
+}
+
+fn random_bytes(n: usize, seed: u64) -> Vec<u8> {
+    let mut b = vec![0u8; n];
+    synth::Rng::new(seed).fill(&mut b);
+    b
+}
+
+const OID_P256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+const OID_P384: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x22];
+const OID_P224: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x21];
+const OID_SECP256K1: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x0a];
+const OID_BRAINPOOL_P256R1: &[u8] = &[0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07];
+const OID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+const OID_RSA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+const OID_X25519: &[u8] = &[0x2b, 0x65, 0x6e];
+const OID_ED25519: &[u8] = &[0x2b, 0x65, 0x70];
+const OID_ED448: &[u8] = &[0x2b, 0x65, 0x71];
+
+/// SEC1 `ECPrivateKey` (RFC 5915) with random key bytes: version 1, the
+/// private scalar, the curve, and optionally the public point.
+fn sec1_key(curve: Option<&[u8]>, scalar: usize, point: Option<usize>, seed: u64) -> Vec<u8> {
+    let mut body = vec![0x02, 0x01, 0x01];
+    body.extend(tlv(0x04, &random_bytes(scalar, seed)));
+    if let Some(oid) = curve {
+        body.extend(tlv(0xa0, &tlv(0x06, oid)));
+    }
+    if let Some(n) = point {
+        let mut bits = vec![0x00, 0x04];
+        bits.extend(random_bytes(n - 1, seed + 1));
+        body.extend(tlv(0xa1, &tlv(0x03, &bits)));
+    }
+    tlv(0x30, &body)
+}
+
+/// PKCS #8 `PrivateKeyInfo` (version 0), or RFC 5958 `OneAsymmetricKey`
+/// version 1 with a public key, around `key`.
+fn pkcs8_key(alg: &[u8], params: Option<&[u8]>, key: &[u8], public: Option<usize>) -> Vec<u8> {
+    let mut algid = tlv(0x06, alg);
+    match params {
+        Some([]) => algid.extend([0x05, 0x00]),
+        Some(p) => algid.extend(tlv(0x06, p)),
+        None => {}
+    }
+    let mut body = vec![0x02, 0x01, u8::from(public.is_some())];
+    body.extend(tlv(0x30, &algid));
+    body.extend(tlv(0x04, key));
+    if let Some(n) = public {
+        let mut bits = vec![0x00];
+        bits.extend(random_bytes(n, 99));
+        body.extend(tlv(0x81, &bits));
+    }
+    tlv(0x30, &body)
+}
+
+/// PKCS #1 `RSAPrivateKey` (version 0, then the modulus and other integers).
+fn pkcs1_rsa(bits: usize, seed: u64) -> Vec<u8> {
+    let mut body = vec![0x02, 0x01, 0x00];
+    let mut modulus = vec![0x00];
+    modulus.extend(random_bytes(bits / 8, seed));
+    body.extend(tlv(0x02, &modulus));
+    body.extend(tlv(0x02, &[0x01, 0x00, 0x01]));
+    for i in 0..6 {
+        body.extend(tlv(0x02, &random_bytes(bits / 16, seed + 10 + i)));
+    }
+    tlv(0x30, &body)
+}
+
+/// DER private keys of the kinds OpenSSL writes, with random key bytes: the
+/// header bytes and total lengths match OpenSSL 3.5's output for each kind.
+fn der_private_keys() -> Vec<(&'static str, Vec<u8>)> {
+    let raw = |n: usize, seed: u64| tlv(0x04, &random_bytes(n, seed));
+    vec![
+        ("pkcs1 rsa 2048", pkcs1_rsa(2048, 1)),
+        (
+            "pkcs8 rsa 2048",
+            pkcs8_key(OID_RSA, Some(&[]), &pkcs1_rsa(2048, 2), None),
+        ),
+        ("sec1 p-256", sec1_key(Some(OID_P256), 32, Some(65), 3)),
+        (
+            "sec1 p-256 without public key",
+            sec1_key(Some(OID_P256), 32, None, 4),
+        ),
+        ("sec1 p-384", sec1_key(Some(OID_P384), 48, Some(97), 5)),
+        ("sec1 p-224", sec1_key(Some(OID_P224), 28, Some(57), 6)),
+        (
+            "sec1 secp256k1",
+            sec1_key(Some(OID_SECP256K1), 32, Some(65), 7),
+        ),
+        (
+            "sec1 brainpoolP256r1",
+            sec1_key(Some(OID_BRAINPOOL_P256R1), 32, Some(65), 8),
+        ),
+        (
+            "pkcs8 p-256",
+            pkcs8_key(
+                OID_EC_PUBLIC_KEY,
+                Some(OID_P256),
+                &sec1_key(None, 32, Some(65), 9),
+                None,
+            ),
+        ),
+        (
+            "pkcs8 ed25519",
+            pkcs8_key(OID_ED25519, None, &raw(32, 10), None),
+        ),
+        (
+            "pkcs8 x25519",
+            pkcs8_key(OID_X25519, None, &raw(32, 11), None),
+        ),
+        (
+            "pkcs8 ed448",
+            pkcs8_key(OID_ED448, None, &raw(57, 12), None),
+        ),
+        (
+            "pkcs8 v2 ed25519 with public key",
+            pkcs8_key(OID_ED25519, None, &raw(32, 13), Some(32)),
+        ),
+    ]
+}
+
+#[test]
+fn der_private_key_kinds() {
+    // Header bytes as OpenSSL 3.5 writes them (checked against its output).
+    let keys = der_private_keys();
+    let head = |name: &str| keys.iter().find(|(n, _)| *n == name).unwrap().1[..7].to_vec();
+    assert_eq!(head("sec1 p-224")[..2], [0x30, 0x68]);
+    assert_eq!(head("sec1 secp256k1")[..2], [0x30, 0x74]);
+    assert_eq!(head("sec1 brainpoolP256r1")[..2], [0x30, 0x78]);
+    assert_eq!(head("sec1 p-256 without public key")[..2], [0x30, 0x31]);
+    assert_eq!(head("sec1 p-384")[..3], [0x30, 0x81, 0xa4]);
+    assert_eq!(head("pkcs8 ed25519")[..2], [0x30, 0x2e]);
+    assert_eq!(head("pkcs8 ed448")[..2], [0x30, 0x47]);
+    assert_eq!(head("pkcs8 p-256")[..3], [0x30, 0x81, 0x87]);
+    for (name, key) in &keys {
+        for path in ["keys/server.der", "keys/server.key", "KEYS/SERVER.KEY"] {
+            let ev = scan(path, key);
+            assert_eq!(rule_ids(&ev), vec!["der_key_file"], "{name} at {path}");
+            assert_score(&ev, 90.0);
+        }
+        // The rule needs the extension.
+        assert!(scan("keys/server.bin", key).is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn der_structures_that_are_not_private_keys() {
+    let spki = {
+        let mut algid = tlv(0x06, OID_EC_PUBLIC_KEY);
+        algid.extend(tlv(0x06, OID_P256));
+        let mut body = tlv(0x30, &algid);
+        let mut bits = vec![0x00, 0x04];
+        bits.extend(random_bytes(64, 20));
+        body.extend(tlv(0x03, &bits));
+        tlv(0x30, &body)
+    };
+    let rsa_public = {
+        let mut modulus = vec![0x00];
+        modulus.extend(random_bytes(256, 21));
+        let mut body = tlv(0x02, &modulus);
+        body.extend(tlv(0x02, &[0x01, 0x00, 0x01]));
+        tlv(0x30, &body)
+    };
+    let ecdsa_signature = {
+        let mut body = tlv(0x02, &random_bytes(32, 22));
+        body.extend(tlv(0x02, &random_bytes(32, 23)));
+        tlv(0x30, &body)
+    };
+    let certificate = der_with(&[0x30, 0x82, 0x03, 0x1c, 0x30, 0x82, 0x02, 0x04], 24);
+    for (name, der) in [
+        ("subjectPublicKeyInfo", spki),
+        ("pkcs1 rsa public key", rsa_public),
+        ("ecdsa signature", ecdsa_signature),
+        ("x.509 certificate", certificate),
+    ] {
+        let ev = scan("keys/server.der", &der);
+        assert!(ev.is_empty(), "{name}: rules {:?}", rule_ids(&ev));
+    }
+}
+
 #[test]
 fn ec_key_file_end_to_end() {
     use riskgrep_core::classify::{classify, read_for_scan, FileClass, Known, Limits};
     use std::io::Write;
     let mut f = tempfile::Builder::new().suffix(".key").tempfile().unwrap();
-    f.write_all(&der_with(&[0x30, 0x77, 0x02, 0x01, 0x01], 9))
+    f.write_all(&der_with(&[0x30, 0x77, 0x02, 0x01, 0x01, 0x04], 9))
         .unwrap();
     f.flush().unwrap();
     let file = std::fs::File::open(f.path()).unwrap();
@@ -618,6 +818,7 @@ fn samples() -> Vec<Sample> {
         content: format!("key_sha256 = \"{random}\"\n").into_bytes(),
         expect_hit: true,
     });
+    out.extend(secret_group_samples());
     out.push(Sample {
         path: "src/plain.rs".into(),
         content: filler.into_bytes(),
@@ -629,6 +830,137 @@ fn samples() -> Vec<Sample> {
         expect_hit: true,
     });
     out
+}
+
+/// `n` characters drawn from `alphabet`.
+fn random_from(rng: &mut synth::Rng, alphabet: &[u8], n: usize) -> String {
+    (0..n)
+        .map(|_| alphabet[(rng.next_u64() % alphabet.len() as u64) as usize] as char)
+        .collect()
+}
+
+const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+/// Standard base64 with padding.
+fn base64(data: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// base64url without padding, as JWT segments are written.
+fn base64url(data: &[u8]) -> String {
+    base64(data)
+        .trim_end_matches('=')
+        .replace('+', "-")
+        .replace('/', "_")
+}
+
+/// Rules without `secretGroup` whose secret can be in a capture group other
+/// than group 1 (gitleaks takes the first non-empty group): current Atlassian
+/// tokens, curl `Authorization: Bearer` headers in both quote styles, a
+/// base64-encoded JWT whose header starts with `typ` or `kid`, and a
+/// Kubernetes Secret with `data:` before `kind:`.
+fn secret_group_samples() -> Vec<Sample> {
+    let mut rng = synth::Rng::new(41);
+    let mut out = Vec::new();
+    let mut push = |path: &str, text: String| {
+        out.push(Sample {
+            path: path.into(),
+            content: text.into_bytes(),
+            expect_hit: true,
+        })
+    };
+    let atl = format!(
+        "ATATT3{}",
+        random_from(
+            &mut rng,
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-=",
+            186
+        )
+    );
+    push("deploy/.env", format!("export SERVICE_TOKEN={atl}\n"));
+    let bearer = random_from(&mut rng, ALNUM, 40);
+    push(
+        "scripts/call.sh",
+        format!(
+            "curl -s -H \"Authorization: Bearer {bearer}\" https://api.example.test/v1/items\n"
+        ),
+    );
+    let bearer = random_from(&mut rng, ALNUM, 40);
+    push(
+        "scripts/call.sh",
+        format!("curl -s -H 'Authorization: Bearer {bearer}' https://api.example.test/v1/items\n"),
+    );
+    for header in [
+        r#"{"typ":"JWT","alg":"HS256"}"#.to_string(),
+        format!(
+            r#"{{"kid":"{}","alg":"RS256"}}"#,
+            random_from(&mut rng, ALNUM, 16)
+        ),
+    ] {
+        let payload = format!(
+            r#"{{"sub":"{}","iat":1700000000}}"#,
+            random_from(&mut rng, ALNUM, 12)
+        );
+        let mut sig = vec![0u8; 32];
+        rng.fill(&mut sig);
+        let jwt = format!(
+            "{}.{}.{}",
+            base64url(header.as_bytes()),
+            base64url(payload.as_bytes()),
+            base64url(&sig)
+        );
+        push(
+            "config/settings.json",
+            format!("{{\"session\": \"{}\"}}\n", base64(jwt.as_bytes())),
+        );
+    }
+    let mut value = vec![0u8; 24];
+    rng.fill(&mut value);
+    push(
+        "deploy/app-secret.yaml",
+        format!(
+            "apiVersion: v1\ndata:\n  password: {}\nkind: Secret\nmetadata:\n  name: app\ntype: Opaque\n",
+            base64(&value)
+        ),
+    );
+    out
+}
+
+#[test]
+fn secret_group_forms_are_reported() {
+    // Each sample is reported by the rule gitleaks reports it with.
+    let want = [
+        "atlassian_api_token",
+        "curl_auth_header",
+        "curl_auth_header",
+        "jwt_base64",
+        "jwt_base64",
+        "kubernetes_secret_yaml",
+    ];
+    let samples = secret_group_samples();
+    assert_eq!(samples.len(), want.len());
+    for (s, rule) in samples.iter().zip(want) {
+        let ev = scan(&s.path, &s.content);
+        assert!(
+            rule_ids(&ev).contains(&rule),
+            "{}: {rule} not reported; rules {:?}",
+            s.path,
+            rule_ids(&ev)
+        );
+    }
 }
 
 #[test]

@@ -14,6 +14,7 @@ cargo xtask eval --keep-corpus DIR  # also keep the synthetic corpus in DIR (an 
 - It builds the release binary (`cargo build --release -p riskgrep`) and runs `riskgrep scan --no-cache --format json`, so it measures the shipped artefact, not a debug build of the library. `HOME` points at an empty temporary directory, so no user configuration or cache is involved; that home's config only raises `limits.walk_files` so whole repositories fit in one walk.
 - Scores come from the JSON report (rounded to 0.1). A file is **flagged** for a category when its score is at or above the lowest default threshold for that category across integrations: secret ≥ 80 (`git.block_at`), biometric ≥ 50 (`claude_code.ask`). Results are also printed at every default threshold (`claude_code.ask`, `claude_code.deny`, `git.block_at`); the thresholds are read from `Config::default()`.
 - Raw reports (rule ids, paths, lines, scores; no file content) are kept in `target/eval/` for analysis; the latest metrics are in `target/eval/metrics.json`.
+- The OSS checkouts must match their pinned commits exactly: a modified, staged, or untracked file in a checkout stops the run (an untracked file would be scanned as part of the repository).
 - `baseline-metrics.json` changes only with `--write-baseline`; without it, a run prints the changes it would write. The exit status reports the bar and regressions either way.
 
 ## Synthetic corpus
@@ -22,7 +23,7 @@ Generated deterministically at run time into a temporary directory (`xtask/src/e
 
 | Group | Formats | Files |
 |---|---|---|
-| Provider-specific secrets | `aws_access_key`, `github_pat`, `anthropic_key`, `pem_private_key`, `stripe_key`, `slack_bot_token`, `npm_token`, `openai_key` (each in 7 file types; PEM in 4 containers), `pkcs12`, `der_key` | 20 each, 200 |
+| Provider-specific secrets | `aws_access_key`, `github_pat`, `anthropic_key`, `pem_private_key`, `stripe_key`, `slack_bot_token`, `npm_token`, `openai_key` (each in 7 file types; PEM in 4 containers), `pkcs12`, `der_key` (PKCS#1, PKCS#8, and SEC1 headers with one- and two-byte lengths that classification reads as key stores) | 20 each, 200 |
 | Generic secrets | `generic_api_key` assignments in 7 file types and key names | 50 |
 | Biometric formats | `npy`, `npz`, `safetensors_named` (tensor name matches the embedding regex), `safetensors_unnamed`, printed floats in python, numpy, and JSON styles; widths 128 to 3072; embedding banks as safetensors and as npz (3, 5, 20, or 109 identically shaped vectors keyed `p225…` VCTK-style or `person_NNN`), and the same banks keyed with an underscore-delimited number (`spk_N_emb`, `speaker_N_vec`, LibriSpeech-style `19_198_NNNN`) | 20 each, 220 |
 | Hard negatives (generated) | sensor CSVs (plain float matrices and timestamped logs), model-weight safetensors, header-only model checkpoints (7 single parameters named or shaped like embeddings: timm `pos_embed`/`cls_token`, BERT `word_embeddings`, HF ViT `position_embeddings`, OpenCLIP `positional_embedding`/`visual.class_embedding`, diffusers `time_embedding`; and a reduced 4-tensor OpenCLIP checkpoint, BERT-base, CLIP ViT-B/32, SD UNet, timm ViT-B, Mamba-130m, RWKV-4 169M, Flax BERT-base, and TF BERT-base layouts, and a Google ViT-B/16 `.npz`), two reference-vector `.npz` archives in the style of scipy's FFT test data (`dct_K_N`/`dst_K_N` at 14 lengths, so each embedding width repeats 8 times), integer `.npy`, example and placeholder keys, low-entropy assignments, UUID lists, hex hashes, base64 blobs, source code, prices and logs | 239 |
@@ -33,7 +34,7 @@ Generated deterministically at run time into a temporary directory (`xtask/src/e
 
 ## OSS corpus
 
-`oss-repos.toml` pins 13 repositories with 9 language labels (Python, Go, JavaScript, TypeScript, Rust, Java, Ruby, C, and Markdown for MDN's docs). They are fetched shallow at the pinned commits into `eval/oss/` (gitignored; about 850 MB on disk, so exclude it from any sync service: `xattr -w com.dropbox.ignored 1 eval/oss` for Dropbox). The run scans 55,876 files (scanned or partially scanned; skipped binaries are not counted).
+`oss-repos.toml` pins 13 repositories with 9 language labels (Python, Go, JavaScript, TypeScript, Rust, Java, Ruby, C, and Markdown for MDN's docs). They are fetched shallow at the pinned commits into `eval/oss/` (gitignored; about 850 MB on disk, so exclude it from any sync service: `xattr -w com.dropbox.ignored 1 eval/oss` for Dropbox). The 2026-10-20 run scanned 55,877 files (scanned or partially scanned). Skipped binaries are not counted, and neither are unscanned files: archives, PDFs, and other formats v1 does not read (32 in that run), and any file whose scan ran past the 2-second time budget. Timeouts depend on machine load, so the count can change between runs on the same commit; the run prints every unscanned file with its reason and records each timed-out one in the metrics as `timed_out.oss.<repo>/<path>` (with the counts `files.oss.unscanned` and `files.oss.timed_out`), so a baseline diff shows which files dropped out. None timed out in the 2026-10-20 run; before the digit-run change in round 6, two scipy data files did (`ellint_rg.txt` and `ellint_rf_xyy.txt`).
 
 Findings are inspected only through the report (rule ids, paths, lines, scores). `oss-known-findings.json` lists findings that are excluded from the false-positive count (`rule`, `path` relative to `eval/oss`, `line`); a flagged file is excluded only when every hit behind its score is listed.
 
@@ -54,7 +55,7 @@ Before the rule changes below, 124 scipy `.npy`/`.npz` files (linprog benchmark 
 
 Per category, at the flag threshold: at most 1 flagged file per 1,000 ordinary files (synthetic hard negatives and OSS each); recall 100% for provider-specific secret rules and for biometric file formats, at least 90% for generic secret rules.
 
-## Results (2026-10-19)
+## Results (2026-10-20)
 
 | Metric | Value | Bar | |
 |---|---|---|---|
@@ -63,8 +64,8 @@ Per category, at the flag threshold: at most 1 flagged file per 1,000 ordinary f
 | Recall, biometric formats | 220/220 (100%), every format 20/20 | 100% | met |
 | Synthetic FP per 1,000, secret | 0/250 (0.0) | ≤ 1 | met |
 | Synthetic FP per 1,000, biometric | 0/250 (0.0); every safetensors checkpoint scores 25, the ViT `.npz` and reference-vector archives 30 | ≤ 1 | met |
-| OSS FP per 1,000, secret | 25/55,876 (0.45); 14 known findings excluded | ≤ 1 | met |
-| OSS FP per 1,000, biometric | 5/55,876 (0.09); all score 60 or 70 (ask), none reaches 75 | ≤ 1 | met |
+| OSS FP per 1,000, secret | 25/55,877 (0.45); 14 known findings excluded | ≤ 1 | met |
+| OSS FP per 1,000, biometric | 5/55,877 (0.09); all score 60 or 70 (ask), none reaches 75 | ≤ 1 | met |
 
 `baseline-metrics.json` holds these numbers.
 
@@ -185,3 +186,17 @@ Secret metrics and the other probes did not change.
 12. **Strict share.** A bank must be more than `min_bank_share` percent (50) of the float tensors (`count × 100 > share × floats`; the key is now 1 to 99). A flat MLP with 4 biases [256] among 8 float tensors is exactly half and no longer a bank (94 → 70 through the single-tensor rule). The MLP is a probe, not a gated negative: a lone flat embedding-width array scoring 70 is the known limitation above.
 13. **`h` removed** from the hierarchical-name list (it excluded initial-style keys such as `h_lee`). Full runs with and without it gave identical results on every category and every flagged file.
 
+
+### Round 6: secret groups, DER keys, parameter words, digit runs
+
+| Change | Recall provider / generic / biometric | Synthetic FP per 1,000 secret / biometric | OSS FP per 1,000 secret / biometric | OSS files scanned (timed out) |
+|---|---|---|---|---|
+| before (round-5 rules) | 1.000 / 1.000 / 1.000 | 0.0 / 0.0 | 0.45 (25) / 0.09 (5) | 55,875 (2) |
+| after (14 to 17) | 1.000 / 1.000 / 1.000 | 0.0 / 0.0 | 0.45 (25) / 0.09 (5) | 55,877 (0) |
+
+Apart from the two scipy files that no longer time out (now scanned: biometric 40, secret 0), every OSS and synthetic target's status and scores are identical before and after, so the same 30 OSS files are flagged.
+
+14. **Secret group.** Converted rules without `secretGroup` take gitleaks' default, the first non-empty capture group, else the whole match (`secret_group = "first_nonempty"` in the `span` post-processor). Before, the span used group 1, and the matches whose secret is in a later group were dropped: current Atlassian `ATATT3…` tokens, `curl -H "Authorization: Bearer …"` headers in either quote style, base64-encoded JWTs whose header starts with `typ` or `kid`, and Kubernetes Secrets with `data:` before `kind:` (4 rules; the agreement test now has one sample of each form).
+15. **DER keys.** `der_key_file` matches PKCS#1, PKCS#8, RFC 5958 version 2, and SEC1 headers with any one-byte, `81`, or `82` length, instead of three fixed forms. The `der_key` positives now include PKCS#8 and SEC1 headers with a two-byte length form (`30 81`); headers with other one-byte lengths are not in the corpus because classification skips them (see [`docs/known-limitations.md`](../docs/known-limitations.md)).
+16. **Parameter words as tokens.** `weight(s)`, `bias(es)`, `token(s)`, `patch(es)`, `wte`, `wpe`, and `lm_head` exclude a tensor name only between non-alphanumeric characters or the name's ends, so identity keys such as `tobias`, `abiasi`, and `patchett` are no longer excluded (a bank of them scored 70, now 94). All checkpoint negatives still score 25 or 30.
+17. **Digit runs.** The converter keeps YARA-X from taking its atoms from runs of digits (`UPSTREAM.md`, "Translation"). Time for one scan with the secrets ruleset alone (YARA-X, release build, best of 3, Apple M4 Max): scipy's `ncbeta.txt` (0.8 MB) 961 → 148 ms, `ellint_rg.txt` (1.9 MB) 2,275 → 324 ms, 2.4 MB of generated printed floats 1,638 → 223 ms, 2.3 MB of generated hex lines 568 → 382 ms; ordinary source and JSON files of 0.6 to 10 MB took 3 to 27 ms both before and after. The remaining cost on digit- and hex-dense text is `sourcegraph_access_token`, whose upstream regex accepts any 40-character hex string.
