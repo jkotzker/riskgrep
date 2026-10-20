@@ -49,7 +49,9 @@ name_regex = "weight$""#,
             PostSpec::NpzMembers {
                 min_dim: 128,
                 embedding_dims: None,
+                exclude_name_regex: None,
                 min_bank: None,
+                min_bank_share: None,
             },
             PostSpec::SafetensorsHeader {
                 min_dim: 128,
@@ -57,6 +59,7 @@ name_regex = "weight$""#,
                 embedding_dims: None,
                 exclude_name_regex: None,
                 min_bank: None,
+                min_bank_share: None,
             },
         ]
     );
@@ -67,11 +70,12 @@ fn meta_embedding_keys() {
     let m = parse(
         r#"category = "biometric"
 weight = 70
-post = "npy_header, safetensors_header, float_array"
+post = "npy_header, npz_members, safetensors_header, float_array"
 min_dim = 64
 embedding_dims = "128, 192,256"
 exclude_name_regex = "bias$"
-min_bank = 3"#,
+min_bank = 3
+min_bank_share = 50"#,
     )
     .unwrap();
     let dims = Some(vec![128, 192, 256]);
@@ -82,12 +86,20 @@ min_bank = 3"#,
                 min_dim: 64,
                 embedding_dims: dims.clone()
             },
+            PostSpec::NpzMembers {
+                min_dim: 64,
+                embedding_dims: dims.clone(),
+                exclude_name_regex: Some("bias$".into()),
+                min_bank: Some(3),
+                min_bank_share: Some(50),
+            },
             PostSpec::SafetensorsHeader {
                 min_dim: 64,
                 name_regex: None,
                 embedding_dims: dims,
                 exclude_name_regex: Some("bias$".into()),
                 min_bank: Some(3),
+                min_bank_share: Some(50),
             },
             PostSpec::FloatArray {
                 embedding_dims: vec![128, 192, 256]
@@ -103,6 +115,30 @@ min_bank = 3"#,
     }
     let e = parse("category = \"b\"\nweight = 1\npost = \"float_array\"").unwrap_err();
     assert!(e.0.contains("embedding_dims"), "{e}");
+}
+
+#[test]
+fn meta_rejects_bad_bank_keys() {
+    let base = "category = \"b\"\nweight = 1\npost = \"safetensors_header\"\nmin_dim = 1";
+    for (keys, needle) in [
+        ("min_bank = 0", "min_bank"),
+        ("min_bank = 1", "min_bank"),
+        ("min_bank = 3\nmin_bank_share = 0", "min_bank_share"),
+        ("min_bank = 3\nmin_bank_share = 101", "min_bank_share"),
+        ("min_bank_share = 50", "min_bank_share"),
+    ] {
+        let e = parse(&format!("{base}\n{keys}")).unwrap_err();
+        assert!(e.0.contains(needle), "{keys}: {e}");
+    }
+    let m = parse(&format!("{base}\nmin_bank = 2\nmin_bank_share = 100")).unwrap();
+    assert!(matches!(
+        m.post[0],
+        PostSpec::SafetensorsHeader {
+            min_bank: Some(2),
+            min_bank_share: Some(100),
+            ..
+        }
+    ));
 }
 
 #[test]

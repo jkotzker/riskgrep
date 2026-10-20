@@ -46,7 +46,9 @@ pub enum PostSpec {
     NpzMembers {
         min_dim: u64,
         embedding_dims: Option<Vec<u64>>,
+        exclude_name_regex: Option<String>,
         min_bank: Option<u64>,
+        min_bank_share: Option<u64>,
     },
     SafetensorsHeader {
         min_dim: u64,
@@ -54,6 +56,7 @@ pub enum PostSpec {
         embedding_dims: Option<Vec<u64>>,
         exclude_name_regex: Option<String>,
         min_bank: Option<u64>,
+        min_bank_share: Option<u64>,
     },
     FloatArray {
         embedding_dims: Vec<u64>,
@@ -132,6 +135,23 @@ impl<'a> Raw<'a> {
         }
     }
 
+    /// `min_bank` (at least 2) and `min_bank_share` (a percentage, 1 to 100,
+    /// only with `min_bank`).
+    fn bank(&self) -> Result<(Option<u64>, Option<u64>), MetaError> {
+        let min = self.uint("min_bank")?;
+        if min.is_some_and(|n| n < 2) {
+            return Err(self.err("`min_bank` must be at least 2"));
+        }
+        let share = self.uint("min_bank_share")?;
+        match share {
+            Some(s) if !(1..=100).contains(&s) => {
+                Err(self.err("`min_bank_share` must be a percentage from 1 to 100"))
+            }
+            Some(_) if min.is_none() => Err(self.err("`min_bank_share` requires `min_bank`")),
+            _ => Ok((min, share)),
+        }
+    }
+
     fn need<T>(&self, v: Option<T>, key: &str, post: &str) -> Result<T, MetaError> {
         v.ok_or_else(|| self.err(format_args!("post `{post}` requires key `{key}`")))
     }
@@ -204,18 +224,27 @@ impl RuleMeta {
                 min_dim: raw.need(raw.uint("min_dim")?, "min_dim", name)?,
                 embedding_dims: raw.dims("embedding_dims")?,
             },
-            "npz_members" => PostSpec::NpzMembers {
-                min_dim: raw.need(raw.uint("min_dim")?, "min_dim", name)?,
-                embedding_dims: raw.dims("embedding_dims")?,
-                min_bank: raw.uint("min_bank")?,
-            },
-            "safetensors_header" => PostSpec::SafetensorsHeader {
-                min_dim: raw.need(raw.uint("min_dim")?, "min_dim", name)?,
-                name_regex: raw.string("name_regex")?,
-                embedding_dims: raw.dims("embedding_dims")?,
-                exclude_name_regex: raw.string("exclude_name_regex")?,
-                min_bank: raw.uint("min_bank")?,
-            },
+            "npz_members" => {
+                let (min_bank, min_bank_share) = raw.bank()?;
+                PostSpec::NpzMembers {
+                    min_dim: raw.need(raw.uint("min_dim")?, "min_dim", name)?,
+                    embedding_dims: raw.dims("embedding_dims")?,
+                    exclude_name_regex: raw.string("exclude_name_regex")?,
+                    min_bank,
+                    min_bank_share,
+                }
+            }
+            "safetensors_header" => {
+                let (min_bank, min_bank_share) = raw.bank()?;
+                PostSpec::SafetensorsHeader {
+                    min_dim: raw.need(raw.uint("min_dim")?, "min_dim", name)?,
+                    name_regex: raw.string("name_regex")?,
+                    embedding_dims: raw.dims("embedding_dims")?,
+                    exclude_name_regex: raw.string("exclude_name_regex")?,
+                    min_bank,
+                    min_bank_share,
+                }
+            }
             "float_array" => PostSpec::FloatArray {
                 embedding_dims: raw.need(raw.dims("embedding_dims")?, "embedding_dims", name)?,
             },

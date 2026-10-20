@@ -83,11 +83,18 @@ pub fn build(
         PostSpec::NpzMembers {
             min_dim,
             embedding_dims,
+            exclude_name_regex,
             min_bank,
+            min_bank_share,
         } => Box::new(NpzMembers {
             min_dim: *min_dim,
             embedding_dims: embedding_dims.clone(),
+            exclude_name_regex: match exclude_name_regex {
+                Some(s) => Some(re("exclude_name_regex", s)?),
+                None => None,
+            },
             min_bank: *min_bank,
+            min_bank_share: *min_bank_share,
         }),
         PostSpec::SafetensorsHeader {
             min_dim,
@@ -95,6 +102,7 @@ pub fn build(
             embedding_dims,
             exclude_name_regex,
             min_bank,
+            min_bank_share,
         } => Box::new(SafetensorsHeader {
             min_dim: *min_dim,
             name_regex: match name_regex {
@@ -107,6 +115,7 @@ pub fn build(
                 None => None,
             },
             min_bank: *min_bank,
+            min_bank_share: *min_bank_share,
         }),
         PostSpec::FloatArray { embedding_dims } => Box::new(FloatArray {
             embedding_dims: embedding_dims.clone(),

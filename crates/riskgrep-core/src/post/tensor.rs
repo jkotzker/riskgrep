@@ -61,13 +61,8 @@ fn parse_npy_header(header: &str) -> Option<(String, Vec<u64>)> {
     Some((descr.to_string(), dims))
 }
 
-/// Dtype and shape of an `.npy` buffer when it is a float array whose shape
-/// qualifies (see [`shape_qualifies`]).
-fn npy_qualifies(
-    data: &[u8],
-    min_dim: u64,
-    embedding_dims: Option<&[u64]>,
-) -> Option<(String, Vec<u64>)> {
+/// Dtype and shape of an `.npy` buffer holding a float array.
+fn npy_float(data: &[u8]) -> Option<(String, Vec<u64>)> {
     if data.get(..6)? != NPY_MAGIC {
         return None;
     }
@@ -85,7 +80,18 @@ fn npy_qualifies(
     let header = data.get(start..start.checked_add(len)?)?;
     let (dtype, shape) = parse_npy_header(std::str::from_utf8(header).ok()?)?;
     let kind = dtype.trim_start_matches(['<', '>', '|', '=']);
-    (is_float(kind) && shape_qualifies(&shape, min_dim, embedding_dims)).then_some((dtype, shape))
+    is_float(kind).then_some((dtype, shape))
+}
+
+/// A bank of `count` identically shaped tensors qualifies when it has at
+/// least `min` tensors and, with `share` (percent), makes up at least that
+/// share of the file's `floats` float tensors.
+fn bank_qualifies(count: u64, floats: u64, min: u64, share: Option<u64>) -> bool {
+    count >= min && share.is_none_or(|s| count.saturating_mul(100) >= s.saturating_mul(floats))
+}
+
+fn excluded(re: Option<&Regex>, name: &str) -> bool {
+    re.is_some_and(|re| re.is_match(name.as_bytes()))
 }
 
 pub struct NpyHeader {
@@ -100,7 +106,9 @@ impl Post for NpyHeader {
     }
 
     fn apply(&self, content: &[u8], m: Range<usize>) -> PostResult {
-        match npy_qualifies(content, self.min_dim, self.embedding_dims.as_deref()) {
+        match npy_float(content)
+            .filter(|(_, s)| shape_qualifies(s, self.min_dim, self.embedding_dims.as_deref()))
+        {
             Some((dtype, shape)) => PostResult::KeepWithShape(
                 m,
                 ShapeFacts::Tensor {
@@ -118,8 +126,13 @@ pub struct NpzMembers {
     pub min_dim: u64,
     /// Require an embedding-shaped member with one of these last dimensions.
     pub embedding_dims: Option<Vec<u64>>,
+    /// Members whose names (without `.npy`) match are ignored.
+    pub exclude_name_regex: Option<Regex>,
     /// Require at least this many qualifying members of one identical shape.
     pub min_bank: Option<u64>,
+    /// With `min_bank`: the bank must be at least this percentage of the
+    /// archive's float members.
+    pub min_bank_share: Option<u64>,
 }
 
 impl Post for NpzMembers {
@@ -131,7 +144,9 @@ impl Post for NpzMembers {
         let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(content)) else {
             return PostResult::Drop;
         };
-        let mut banks: BTreeMap<Vec<u64>, (u64, ShapeFacts)> = BTreeMap::new();
+        let mut floats = 0u64;
+        // Per shape: member count, archive index of the first member, facts.
+        let mut banks: BTreeMap<Vec<u64>, (u64, usize, ShapeFacts)> = BTreeMap::new();
         for i in 0..zip.len().min(NPZ_MAX_MEMBERS) {
             let Ok(file) = zip.by_index(i) else { continue };
             let Some(name) = file.name().strip_suffix(".npy").map(str::to_string) else {
@@ -141,27 +156,36 @@ impl Post for NpzMembers {
             if file.take(NPZ_MEMBER_BYTES).read_to_end(&mut head).is_err() {
                 continue;
             }
-            let Some((dtype, shape)) =
-                npy_qualifies(&head, self.min_dim, self.embedding_dims.as_deref())
-            else {
+            let Some((dtype, shape)) = npy_float(&head) else {
                 continue;
             };
+            floats += 1;
+            if excluded(self.exclude_name_regex.as_ref(), &name)
+                || !shape_qualifies(&shape, self.min_dim, self.embedding_dims.as_deref())
+            {
+                continue;
+            }
             let facts = ShapeFacts::Tensor {
                 dtype,
                 shape: shape.clone(),
                 name: Some(name),
             };
-            let Some(min) = self.min_bank else {
+            if self.min_bank.is_none() {
                 return PostResult::KeepWithShape(m, facts);
-            };
-            // Archive order: the first member of the first full bank.
-            let e = banks.entry(shape).or_insert((0, facts));
-            e.0 += 1;
-            if e.0 >= min {
-                return PostResult::KeepWithShape(m, e.1.clone());
             }
+            banks.entry(shape).or_insert((0, i, facts)).0 += 1;
         }
-        PostResult::Drop
+        let Some(min) = self.min_bank else {
+            return PostResult::Drop;
+        };
+        // Archive order: the first member of the earliest qualifying bank.
+        banks
+            .into_values()
+            .filter(|(n, _, _)| bank_qualifies(*n, floats, min, self.min_bank_share))
+            .min_by_key(|(_, first, _)| *first)
+            .map_or(PostResult::Drop, |(_, _, facts)| {
+                PostResult::KeepWithShape(m, facts)
+            })
     }
 }
 
@@ -175,6 +199,9 @@ pub struct SafetensorsHeader {
     /// Require at least this many qualifying tensors of one identical shape
     /// (an embedding bank: one vector per person).
     pub min_bank: Option<u64>,
+    /// With `min_bank`: the bank must be at least this percentage of the
+    /// file's float tensors.
+    pub min_bank_share: Option<u64>,
 }
 
 impl SafetensorsHeader {
@@ -188,6 +215,7 @@ impl SafetensorsHeader {
         // Smallest qualifying name wins (per shape, for banks), so the result
         // does not depend on the JSON object's iteration order.
         let mut best: Option<ShapeFacts> = None;
+        let mut floats = 0u64;
         let mut banks: BTreeMap<Vec<u64>, (u64, String, String)> = BTreeMap::new();
         for (name, entry) in json.as_object()? {
             if name == "__metadata__" {
@@ -206,17 +234,16 @@ impl SafetensorsHeader {
             else {
                 continue;
             };
+            if !is_float(dtype) {
+                continue;
+            }
+            floats += 1;
             let named = self
                 .name_regex
                 .as_ref()
                 .is_none_or(|re| re.is_match(name.as_bytes()));
-            let excluded = self
-                .exclude_name_regex
-                .as_ref()
-                .is_some_and(|re| re.is_match(name.as_bytes()));
-            if is_float(dtype)
-                && named
-                && !excluded
+            if named
+                && !excluded(self.exclude_name_regex.as_ref(), name)
                 && shape_qualifies(&shape, self.min_dim, self.embedding_dims.as_deref())
             {
                 if self.min_bank.is_some() {
@@ -247,7 +274,7 @@ impl SafetensorsHeader {
         if let Some(min) = self.min_bank {
             return banks
                 .into_iter()
-                .filter(|(_, (n, _, _))| *n >= min)
+                .filter(|(_, (n, _, _))| bank_qualifies(*n, floats, min, self.min_bank_share))
                 .min_by(|a, b| (a.1).1.cmp(&(b.1).1))
                 .map(|(shape, (_, name, dtype))| ShapeFacts::Tensor {
                     dtype,

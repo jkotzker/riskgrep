@@ -25,7 +25,7 @@ Generated deterministically at run time into a temporary directory (`xtask/src/e
 | Provider-specific secrets | `aws_access_key`, `github_pat`, `anthropic_key`, `pem_private_key`, `stripe_key`, `slack_bot_token`, `npm_token`, `openai_key` (each in 7 file types; PEM in 4 containers), `pkcs12`, `der_key` | 20 each, 200 |
 | Generic secrets | `generic_api_key` assignments in 7 file types and key names | 50 |
 | Biometric formats | `npy`, `npz`, `safetensors_named` (tensor name matches the embedding regex), `safetensors_unnamed`, printed floats in python, numpy, and JSON styles; widths 128 to 3072; embedding banks as safetensors and as npz (3, 5, 20, or 109 identically shaped vectors keyed `p225…` VCTK-style or `person_NNN`) | 20 each, 180 |
-| Hard negatives (generated) | sensor CSVs (plain float matrices and timestamped logs), model-weight safetensors, header-only model checkpoints (7 single parameters named or shaped like embeddings: timm `pos_embed`/`cls_token`, BERT `word_embeddings`, HF ViT `position_embeddings`, OpenCLIP `positional_embedding`/`visual.class_embedding`, diffusers `time_embedding`; and a reduced 4-tensor OpenCLIP checkpoint, BERT-base, CLIP ViT-B/32, SD UNet, and timm ViT-B layouts), integer `.npy`, example and placeholder keys, low-entropy assignments, UUID lists, hex hashes, base64 blobs, source code, prices and logs | 232 |
+| Hard negatives (generated) | sensor CSVs (plain float matrices and timestamped logs), model-weight safetensors, header-only model checkpoints (7 single parameters named or shaped like embeddings: timm `pos_embed`/`cls_token`, BERT `word_embeddings`, HF ViT `position_embeddings`, OpenCLIP `positional_embedding`/`visual.class_embedding`, diffusers `time_embedding`; and a reduced 4-tensor OpenCLIP checkpoint, BERT-base, CLIP ViT-B/32, SD UNet, timm ViT-B, Mamba-130m, RWKV-4 169M, Flax BERT-base, and TF BERT-base layouts, and a Google ViT-B/16 `.npz`), two reference-vector `.npz` archives in the style of scipy's FFT test data (`dct_K_N`/`dst_K_N` at 14 lengths, so each embedding width repeats 8 times), integer `.npy`, example and placeholder keys, low-entropy assignments, UUID lists, hex hashes, base64 blobs, source code, prices and logs | 239 |
 | Hard negatives (existing) | the `expect = "none"` cases from the ruleset tests, plus the model-weight and sensor-CSV cases from `ruleset_biometric.rs` | 11 |
 | Probes (not gated) | embeddings at widths outside `embedding_dims` (100, 300, 1000) as npy, safetensors, and printed floats; npy embeddings with 3 leading dimensions; generic secrets under env-style `<PROVIDER>_KEY` names and `consumer_key`/`app_key`/`master_key`/`HMAC_KEY`; tensor counts around the bank rule (2 identical tensors, 5 tensors of different shapes, banks at off-list widths) | 92 |
 
@@ -45,7 +45,7 @@ Findings are inspected only through the report (rule ids, paths, lines, scores).
 | `hashicorp_tf_password` in terraform test data | 3 | False positive: a 10-character dummy value containing a dictionary word, entropy 2.9 |
 | `curl_auth_user` in `prometheus/scripts/sync_repo_files.sh` | 1 | False positive: the value is two shell variable references |
 | `generic_api_key` (credential-named keys in test code, test configs, and docs) | 21 | Counted as false positives without triage (the bar holds even so) |
-| `npz_embedding_tensor` in scipy (benchmark and FFT reference arrays whose last dimension is an embedding width) | 6 | False positives: test artefacts, none named as an embedding. Two (`fftpack/tests/fftw_double_ref.npz`, `fftw_single_ref.npz`) hold several arrays of one embedding shape and also match `npz_embedding_bank` (94) |
+| `npz_embedding_tensor` in scipy (linprog benchmark arrays and `fftpack/tests/test.npz`, flat-named arrays whose last dimension is an embedding width) | 4 | False positives at 70 (ask): test artefacts, none named as an embedding. Until round 4, `fftpack/tests/fftw_double_ref.npz` and `fftw_single_ref.npz` also scored 94 by `npz_embedding_bank`; their members are named `dct_K_N` (an index segment), so they now score 30 |
 | `printed_embedding_array` in `transformers/tests/utils/test_modeling_rope_utils.py` | 1 | False positive: expected values of a test |
 
 Before the rule changes below, 124 scipy `.npy`/`.npz` files (linprog benchmark matrices, test reference data) scored 70; they were counted as false positives, none being named as an embedding.
@@ -61,10 +61,10 @@ Per category, at the flag threshold: at most 1 flagged file per 1,000 ordinary f
 | Recall, provider-specific secrets | 200/200 (100%) | 100% | met |
 | Recall, generic secrets | 50/50 (100%) | ≥ 90% | met |
 | Recall, biometric formats | 180/180 (100%), every format 20/20 | 100% | met |
-| Synthetic FP per 1,000, secret | 0/243 (0.0) | ≤ 1 | met |
-| Synthetic FP per 1,000, biometric | 0/243 (0.0); every model checkpoint scores 25 | ≤ 1 | met |
+| Synthetic FP per 1,000, secret | 0/250 (0.0) | ≤ 1 | met |
+| Synthetic FP per 1,000, biometric | 0/250 (0.0); every safetensors checkpoint scores 25, the ViT `.npz` and reference-vector archives 30 | ≤ 1 | met |
 | OSS FP per 1,000, secret | 25/55,876 (0.45); 14 known findings excluded | ≤ 1 | met |
-| OSS FP per 1,000, biometric | 7/55,876 (0.13); 2 of them reach 94 (deny) | ≤ 1 | met |
+| OSS FP per 1,000, biometric | 5/55,876 (0.09); all score 60 or 70 (ask), none reaches 75 | ≤ 1 | met |
 
 `baseline-metrics.json` holds these numbers.
 
@@ -141,5 +141,29 @@ Each row is a full `cargo xtask eval` run.
 Secret metrics did not change (OSS 0.45, synthetic 0.0).
 
 6. **Embedding banks.** `max_tensors` is gone: it hid speaker and face stores (5, 20, and 109 tensors keyed `p225…`, each [192], and `person_NNN` [3,256], scored 25; `voiceprints.safetensors` with 20 such tensors scored 47.5). New rules `safetensors_embedding_bank` and `npz_embedding_bank` (80, outside the format families, so they add to them) fire on 3 or more non-excluded tensors or `.npy` members of one identical embedding shape (`min_bank = 3`); a bank scores 94 (1 − 0.2 × 0.3), a single unnamed embedding-shaped tensor stays at 70. CLIP's projections are excluded by name instead: the unnamed and bank rules ignore `(^|[._])proj(ection)?($|[._])`, `_proj$`, and `text_projection`, plus `in_proj`. The reduced OpenCLIP checkpoint (`positional_embedding`, `text_projection` [512,512], `token_embedding.weight`, `visual.class_embedding`) and all other checkpoint negatives score 25.
-7. **Named rule.** Parameter-like names anywhere (`weight`, `bias`, `running_mean`/`running_var`, `in_proj`, which covers `weight_ih`/`weight_hh`) and the model-parameter names never count, and `name_regex` is token-bounded (`(^|[._/-])` … `($|[._/-])`), so `invoice_total`, `surface_normals`, and `interface.dense` are not named embeddings while `face_embedding` and `voice.embedding` are.
+7. **Named rule.** Parameter-like names anywhere (`weight`, which also covers `weight_ih`/`weight_hh`; `bias`; `running_mean`/`running_var`; `in_proj`) and the model-parameter names never count, and `name_regex` is token-bounded (`(^|[._/-])` … `($|[._/-])`), so `invoice_total`, `surface_normals`, and `interface.dense` are not named embeddings while `face_embedding` and `voice.embedding` are.
 
+### Round 4: bank share and flat keys, broader parameter names
+
+| Change | Recall biometric (bank npz / bank safetensors) | Synthetic FP per 1,000 biometric | OSS FP per 1,000 biometric |
+|---|---|---|---|
+| before, with the 7 new negatives below (250 negatives) | 1.000 (20/20 / 20/20) | 28.0 (7: all 5 new checkpoints and both reference archives) | 0.13 (7; 2 at 94) |
+| bank share and flat keys, parameter names, npz exclusions (8, 9, 10) | 1.000 (20/20 / 20/20, all ≥ 75) | 0.0 | 0.09 (5; none ≥ 75) |
+
+Secret metrics did not change (OSS 0.45, synthetic 0.0). The probes did not change.
+
+8. **Bank discriminators.** A bank (`safetensors_embedding_bank`, `npz_embedding_bank`) now also needs (a) at least half of the file's float tensors (`min_bank_share = 50`; `.npz`: float members, counting excluded and differently shaped ones) and (b) flat names: a name with a layer or block segment (`layers`, `blocks`, `h`, `encoder`, `encoderblock_0`, `decoder`, `transformer`, `backbone`, `model`) or an index segment between separators (`.0.`, `_1_`) never joins a bank. Identity keys such as `p225`, `person_000`, `spk_12`, `faces.0`, and `speakers/p225` stay flat. Without them, any checkpoint with 3 or more identically shaped embedding-width tensors scored 94: Mamba's `backbone.layers.N.mixer.D` [1536] × 24, RWKV-4's `time_mix_*` [1,1,768] and `time_decay` [768], Flax BERT's `kernel` [768,768] and `scale` [768], TF BERT's `gamma`/`beta` [768], a Google ViT `.npz` (`kernel`, `scale`, `bias`), and scipy's FFT reference archives (113 members `dct_K_N`/`dst_K_N`, embedding widths repeating 8 times).
+9. **Parameter names.** The unnamed, bank, and named rules also ignore token-bounded JAX/Flax/TF, RWKV, Mamba, and ViT parameter names: `kernel`, `scale`, `gamma`, `beta`, `moving_mean`/`moving_variance`, `time_mix`, `time_decay`, `time_first`, `mixer`, `A_log`, `dt_bias`, `conv1d`, and `cls` (Google ViT's class token [1,1,768]). Token-bounded means between `.`, `_`, `/`, or the ends of the name, so a bank keyed `Betancourt_0`, `Betancourt_1`, … still counts.
+10. **Unnamed single tensors and npz.** `npz_members` gained `exclude_name_regex`; `npz_embedding_tensor` and `safetensors_embedding_tensor` (70) ignore the same parameter and hierarchical names as the bank rules. Without the hierarchical part, every scipy-style reference archive scored 70 (`dct_1_128` [128] is embedding-shaped), and no parameter-name list could separate it. All 7 new negatives now score 25 (safetensors) or 30 (`.npz`); scipy's `fftw_double_ref.npz` and `fftw_single_ref.npz` score 30 (were 94).
+
+## Caveats
+
+Detection limits these measurements show; each is also in [`docs/known-limitations.md`](../docs/known-limitations.md).
+
+- **Banks are found by a name and structure heuristic.** A checkpoint whose parameter names fall outside the exclusion lists (and are flat) can still score high when 3 or more of its tensors share one embedding shape and make up half its float tensors. A real bank stored under hierarchical names (`model.speakers.0.vec`) or alongside more other float tensors than bank vectors scores as a single unnamed tensor (70) or not at all.
+- **Embedding widths outside `embedding_dims`** (100, 300, 1000 in the probes) score 30 (npy, npz), 25 (safetensors), or 40 (printed floats): not flagged.
+- **Three or more leading dimensions** (`[2, 2, 2, d]`) are not embedding-shaped: 30, not flagged.
+- **Banks of 2** identical tensors score 70 (the single-tensor rule, ask), not 94.
+- **Several embeddings of different shapes** in one file score 70, not as a bank.
+- **Generic secrets with letter-only values** are dropped by gitleaks' generic allowlist (`^[a-zA-Z_.-]+$`, kept by the converter); generic secrets under key names that do not end in a credential noun (`consumer_key`, `app_key`, `master_key`) are not reported (3 of 12 probes flagged, the `HMAC_KEY` ones).
+- **Flat-named float arrays of an embedding width** (scipy's linprog benchmark data) score 70 (ask): 4 of the 5 OSS biometric false positives.

@@ -231,6 +231,199 @@ fn single_unnamed_tensor_and_reduced_openclip() {
     assert_score(biometric(&f, "clip.safetensors", &clip), 25.0);
 }
 
+type Tensor = (String, &'static str, Vec<u64>);
+
+fn t(name: &str, dtype: &'static str, shape: &[u64]) -> Tensor {
+    (name.to_string(), dtype, shape.to_vec())
+}
+
+fn st_header(tensors: &[Tensor]) -> Vec<u8> {
+    let refs: Vec<(&str, &str, &[u64])> = tensors
+        .iter()
+        .map(|(n, d, s)| (n.as_str(), *d, &s[..]))
+        .collect();
+    synth::safetensors_header(&refs)
+}
+
+fn npz_headers(members: &[Tensor]) -> Vec<u8> {
+    let m: Vec<(String, Vec<u8>)> = members
+        .iter()
+        .map(|(n, d, s)| (format!("{n}.npy"), synth::npy_header(d, s)))
+        .collect();
+    let refs: Vec<(&str, Vec<u8>)> = m.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
+    synth::npz(&refs)
+}
+
+#[test]
+fn foreign_checkpoint_layouts_stay_below_ask() {
+    let f = fixture();
+    // Mamba: `backbone.layers.N.mixer.D` [1536] in every layer.
+    let mut mamba = vec![t("backbone.embedding.weight", "F32", &[64, 768])];
+    for l in 0..24 {
+        let p = format!("backbone.layers.{l}");
+        mamba.push(t(&format!("{p}.mixer.D"), "F32", &[1536]));
+        mamba.push(t(&format!("{p}.mixer.A_log"), "F32", &[1536, 16]));
+        mamba.push(t(&format!("{p}.mixer.conv1d.bias"), "F32", &[1536]));
+        mamba.push(t(&format!("{p}.norm.weight"), "F32", &[768]));
+    }
+    // RWKV-4: per-block `time_mix_*` [1,1,768], `time_decay`/`time_first` [768].
+    let mut rwkv = vec![t("emb.weight", "F32", &[64, 768])];
+    for l in 0..12 {
+        let p = format!("blocks.{l}");
+        for k in [
+            "att.time_mix_k",
+            "att.time_mix_v",
+            "att.time_mix_r",
+            "ffn.time_mix_k",
+        ] {
+            rwkv.push(t(&format!("{p}.{k}"), "F32", &[1, 1, 768]));
+        }
+        rwkv.push(t(&format!("{p}.att.time_decay"), "F32", &[768]));
+        rwkv.push(t(&format!("{p}.att.time_first"), "F32", &[768]));
+    }
+    // Flax and TF BERT: `kernel`, `scale`, `gamma`, `beta`.
+    let mut flax = vec![t("bert.embeddings.LayerNorm.scale", "F32", &[768])];
+    let mut tf = vec![
+        t("bert/embeddings/LayerNorm/gamma", "F32", &[768]),
+        t("bert/embeddings/LayerNorm/beta", "F32", &[768]),
+    ];
+    for l in 0..2 {
+        for q in ["query", "key", "value"] {
+            flax.push(t(
+                &format!("bert.encoder.layer.{l}.attention.self.{q}.kernel"),
+                "F32",
+                &[768, 768],
+            ));
+            tf.push(t(
+                &format!("bert/encoder/layer_{l}/attention/self/{q}/kernel"),
+                "F32",
+                &[768, 768],
+            ));
+        }
+        flax.push(t(
+            &format!("bert.encoder.layer.{l}.output.LayerNorm.scale"),
+            "F32",
+            &[768],
+        ));
+        tf.push(t(
+            &format!("bert/encoder/layer_{l}/output/LayerNorm/gamma"),
+            "F32",
+            &[768],
+        ));
+        tf.push(t(
+            &format!("bert/encoder/layer_{l}/output/LayerNorm/beta"),
+            "F32",
+            &[768],
+        ));
+    }
+    flax.push(t("LayerNorm_0.scale", "F32", &[768]));
+    flax.push(t("Dense_0.kernel", "F32", &[768, 768]));
+    for (name, layout) in [
+        ("mamba", mamba),
+        ("rwkv4", rwkv),
+        ("flax", flax),
+        ("tf", tf),
+    ] {
+        let data = st_header(&layout);
+        let score = biometric(&f, "model.safetensors", &data).unwrap_or(0.0);
+        assert!(score < 50.0, "{name}: {score}");
+    }
+    // Google ViT `.npz` (JAX names) and scipy-style reference vectors.
+    let mut vit = vec![
+        t("cls", "<f4", &[1, 1, 768]),
+        t("embedding/bias", "<f4", &[768]),
+        t("pre_logits/kernel", "<f4", &[768, 768]),
+        t("Transformer/encoder_norm/scale", "<f4", &[768]),
+    ];
+    for b in 0..2 {
+        let p = format!("Transformer/encoderblock_{b}");
+        vit.push(t(&format!("{p}/LayerNorm_0/scale"), "<f4", &[768]));
+        vit.push(t(&format!("{p}/LayerNorm_0/bias"), "<f4", &[768]));
+        vit.push(t(&format!("{p}/MlpBlock_3/Dense_1/bias"), "<f4", &[768]));
+    }
+    let mut refs = vec![t("sizes", "<i8", &[14])];
+    for kind in ["dct", "dst"] {
+        for k in 1..=4 {
+            for n in [16u64, 64, 128, 256, 512, 1024] {
+                refs.push(t(&format!("{kind}_{k}_{n}"), "<f8", &[n]));
+            }
+        }
+    }
+    for (name, layout) in [("vit", vit), ("scipy", refs)] {
+        let data = npz_headers(&layout);
+        let score = biometric(&f, "ref.npz", &data).unwrap_or(0.0);
+        assert!(score < 50.0, "{name}: {score}");
+    }
+}
+
+#[test]
+fn banks_need_flat_keys_and_a_majority() {
+    let f = fixture();
+    let flagged = |data: &[u8], file: &str| {
+        let rules = rules_of(&f, file, data);
+        rules
+            .iter()
+            .any(|r| r == "safetensors_embedding_bank" || r == "npz_embedding_bank")
+    };
+    let flat: [&dyn Fn(usize) -> String; 6] = [
+        &|i| format!("speakers/p{}", 225 + i),
+        &|i| format!("faces.{i}"),
+        &|i| format!("p{}", 225 + i),
+        &|i| format!("person_{i:03}"),
+        &|i| format!("spk_{i}"),
+        // Contains `beta`, but not as a token.
+        &|i| format!("Betancourt_{i}"),
+    ];
+    for keys in flat {
+        let names: Vec<Tensor> = (0..5).map(|i| t(&keys(i), "F32", &[192])).collect();
+        let data = st_header(&names);
+        assert!(flagged(&data, "s.safetensors"), "{}", keys(0));
+        // 94 by the bank rule; 97 when the key is also an embedding name.
+        let score = biometric(&f, "s.safetensors", &data).unwrap_or(0.0);
+        assert!(score >= 94.0, "{}: {score}", keys(0));
+        let npz: Vec<Tensor> = (0..5).map(|i| t(&keys(i), "<f4", &[192])).collect();
+        assert!(flagged(&npz_headers(&npz), "s.npz"), "{} (npz)", keys(0));
+    }
+    let layered: [&dyn Fn(usize) -> String; 4] = [
+        &|i| format!("encoder.layer.{i}.out"),
+        &|i| format!("model.v{i}"),
+        &|i| format!("blocks_{i}_x"),
+        &|i| format!("item.{i}.vec"),
+    ];
+    for keys in layered {
+        let names: Vec<Tensor> = (0..5).map(|i| t(&keys(i), "F32", &[192])).collect();
+        assert!(!flagged(&st_header(&names), "s.safetensors"), "{}", keys(0));
+    }
+    // Five identity vectors among six other float tensors: under half.
+    let mut mixed: Vec<Tensor> = (0..5)
+        .map(|i| t(&format!("p{}", 225 + i), "F32", &[192]))
+        .collect();
+    for i in 0..6 {
+        mixed.push(t(&format!("aux{i}"), "F32", &[7]));
+    }
+    assert!(!flagged(&st_header(&mixed), "s.safetensors"));
+}
+
+#[test]
+fn named_rule_ignores_jax_tf_and_rnn_parameters() {
+    let f = fixture();
+    for name in [
+        "bert/embeddings/LayerNorm/gamma",
+        "bert/embeddings/LayerNorm/beta",
+        "bert.embeddings.LayerNorm.scale",
+        "speaker_encoder.kernel",
+        "face_embedding.moving_mean",
+        "voice.time_decay",
+    ] {
+        let data = st_header(&[t(name, "F32", &[768])]);
+        let rules = rules_of(&f, "t.safetensors", &data);
+        assert!(
+            !rules.contains(&"safetensors_named_embedding".to_string()),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn named_rule_is_token_bounded() {
     let f = fixture();

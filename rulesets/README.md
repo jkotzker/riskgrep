@@ -30,8 +30,10 @@ Post-processors and their arguments:
 | `float_run` | `min_floats` (required): finds maximal runs of at least that many printed floats (separators: commas, whitespace, brackets) in one linear pass. It supplies the evidence ranges itself, so the rule's patterns (any name) are only a cheap trigger |
 | `float_array` | `embedding_dims` (required): finds single bracketed arrays (`[...]`, also inside `array([...])` and JSON) holding only floats separated by commas or whitespace, whose element count is in `embedding_dims`; each innermost row of a nested array is judged on its own. Supplies its own evidence ranges, like `float_run` |
 | `npy_header` | `min_dim` (required), `embedding_dims` (optional): `.npy` float array with a dimension >= `min_dim`; with `embedding_dims`, also embedding-shaped (below) |
-| `npz_members` | `min_dim` (required), `embedding_dims`, `min_bank` (optional): `.npz` with such a float member; with `min_bank`, at least that many qualifying members of one identical shape (an embedding bank) |
-| `safetensors_header` | `min_dim` (required), `name_regex`, `embedding_dims`, `exclude_name_regex`, `min_bank` (optional): float tensor with such a dimension and, if given, a name matching `name_regex`, an embedding shape, and a name not matching `exclude_name_regex`; with `min_bank`, at least that many such tensors of one identical shape |
+| `npz_members` | `min_dim` (required), `embedding_dims`, `exclude_name_regex`, `min_bank`, `min_bank_share` (optional): `.npz` with such a float member and, if given, an embedding shape and a member name (without `.npy`) not matching `exclude_name_regex`; with `min_bank`, at least that many qualifying members of one identical shape (an embedding bank) |
+| `safetensors_header` | `min_dim` (required), `name_regex`, `embedding_dims`, `exclude_name_regex`, `min_bank`, `min_bank_share` (optional): float tensor with such a dimension and, if given, a name matching `name_regex`, an embedding shape, and a name not matching `exclude_name_regex`; with `min_bank`, at least that many such tensors of one identical shape |
+
+`min_bank` is at least 2. `min_bank_share` (a percentage, 1 to 100, only with `min_bank`) also requires the bank to make up at least that share of the file's float tensors (`.npz`: float members), counting excluded and differently shaped ones.
 
 `embedding_dims` is a comma-separated list of widths, e.g. `"128,192,256,512"`. A tensor is embedding-shaped when its last dimension is in the list and at most two dimensions precede it (`[d]`, `[n, d]`, `[a, b, d]`).
 

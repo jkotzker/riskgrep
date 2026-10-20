@@ -113,6 +113,7 @@ pub const NEGATIVE_KINDS: &[&str] = &[
     "source",
     "prices_logs",
     "model_checkpoint",
+    "reference_npz",
 ];
 
 pub const BIOMETRIC_KINDS: &[&str] = &[
@@ -565,24 +566,21 @@ fn probes(out: &mut Vec<Sample>) {
 /// A safetensors header with offsets but no tensor data, as a checkpoint's
 /// first bytes are; the scanner reads headers only.
 fn safetensors_header_only(tensors: &[(String, &str, Vec<u64>)]) -> Vec<u8> {
-    let mut header = serde_json::Map::new();
-    let mut offset = 0u64;
-    for (name, dtype, shape) in tensors {
-        let size = match *dtype {
-            "F32" => 4,
-            _ => 2,
-        };
-        let bytes = shape.iter().product::<u64>() * size;
-        header.insert(
-            name.clone(),
-            serde_json::json!({"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + bytes]}),
-        );
-        offset += bytes;
-    }
-    let json = serde_json::to_vec(&header).expect("header json");
-    let mut out = (json.len() as u64).to_le_bytes().to_vec();
-    out.extend_from_slice(&json);
-    out
+    let refs: Vec<(&str, &str, &[u64])> = tensors
+        .iter()
+        .map(|(n, d, s)| (n.as_str(), *d, &s[..]))
+        .collect();
+    synth::safetensors_header(&refs)
+}
+
+/// An `.npz` of header-only `.npy` members named `name` (without `.npy`).
+fn npz_header_only(members: &[(String, &str, Vec<u64>)]) -> Vec<u8> {
+    let m: Vec<(String, Vec<u8>)> = members
+        .iter()
+        .map(|(n, d, s)| (format!("{n}.npy"), synth::npy_header(d, s)))
+        .collect();
+    let refs: Vec<(&str, Vec<u8>)> = m.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
+    synth::npz(&refs)
 }
 
 /// Header-only model checkpoints: parameters with embedding-like names or
@@ -727,6 +725,10 @@ fn checkpoints(out: &mut Vec<Sample>) {
         ("clip-vit-b-32", clip),
         ("sd-unet", unet),
         ("timm-vit-base", vit),
+        ("mamba-130m", mamba()),
+        ("rwkv4-169m", rwkv4()),
+        ("flax-bert-base", flax_bert()),
+        ("tf-bert-base", tf_bert()),
     ] {
         out.push(sample(
             Group::Negative,
@@ -735,6 +737,236 @@ fn checkpoints(out: &mut Vec<Sample>) {
             safetensors_header_only(&layout),
         ));
     }
+    out.push(sample(
+        Group::Negative,
+        "model_checkpoint",
+        "ViT-B_16.npz".into(),
+        npz_header_only(&google_vit_npz()),
+    ));
+}
+
+type Layout = Vec<(String, &'static str, Vec<u64>)>;
+
+fn tensor(n: &str, d: &'static str, s: &[u64]) -> (String, &'static str, Vec<u64>) {
+    (n.to_string(), d, s.to_vec())
+}
+
+/// Mamba-130m (`mamba_ssm` names): `mixer.D` [1536] in each of 24 layers.
+fn mamba() -> Layout {
+    let t = tensor;
+    let mut l = vec![t("backbone.embedding.weight", "F32", &[50280, 768])];
+    for i in 0..24 {
+        let p = format!("backbone.layers.{i}");
+        for (n, s) in [
+            ("mixer.A_log", &[1536u64, 16][..]),
+            ("mixer.D", &[1536]),
+            ("mixer.conv1d.weight", &[1536, 1, 4]),
+            ("mixer.conv1d.bias", &[1536]),
+            ("mixer.in_proj.weight", &[3072, 768]),
+            ("mixer.x_proj.weight", &[80, 1536]),
+            ("mixer.dt_proj.weight", &[1536, 48]),
+            ("mixer.dt_proj.bias", &[1536]),
+            ("mixer.out_proj.weight", &[768, 1536]),
+            ("norm.weight", &[768]),
+        ] {
+            l.push(t(&format!("{p}.{n}"), "F32", s));
+        }
+    }
+    l.push(t("backbone.norm_f.weight", "F32", &[768]));
+    l.push(t("lm_head.weight", "F32", &[50280, 768]));
+    l
+}
+
+/// RWKV-4 169M: `time_mix_*` [1,1,768] and `time_decay`/`time_first` [768].
+fn rwkv4() -> Layout {
+    let t = tensor;
+    let mut l = vec![
+        t("emb.weight", "F32", &[50277, 768]),
+        t("blocks.0.ln0.weight", "F32", &[768]),
+        t("blocks.0.ln0.bias", "F32", &[768]),
+    ];
+    for i in 0..12 {
+        let p = format!("blocks.{i}");
+        for (n, s) in [
+            ("ln1.weight", &[768u64][..]),
+            ("ln1.bias", &[768]),
+            ("ln2.weight", &[768]),
+            ("ln2.bias", &[768]),
+            ("att.time_decay", &[768]),
+            ("att.time_first", &[768]),
+            ("att.time_mix_k", &[1, 1, 768]),
+            ("att.time_mix_v", &[1, 1, 768]),
+            ("att.time_mix_r", &[1, 1, 768]),
+            ("att.key.weight", &[768, 768]),
+            ("att.value.weight", &[768, 768]),
+            ("att.receptance.weight", &[768, 768]),
+            ("att.output.weight", &[768, 768]),
+            ("ffn.time_mix_k", &[1, 1, 768]),
+            ("ffn.time_mix_r", &[1, 1, 768]),
+            ("ffn.key.weight", &[3072, 768]),
+            ("ffn.receptance.weight", &[768, 768]),
+            ("ffn.value.weight", &[768, 3072]),
+        ] {
+            l.push(t(&format!("{p}.{n}"), "F32", s));
+        }
+    }
+    for (n, s) in [
+        ("ln_out.weight", &[768u64][..]),
+        ("ln_out.bias", &[768]),
+        ("head.weight", &[50277, 768]),
+    ] {
+        l.push(t(n, "F32", s));
+    }
+    l
+}
+
+/// BERT-base layer parameters as `(path, shape)`, joined by `sep` and named
+/// with `kernel` and the layer-norm pair `norm`.
+fn bert_layers(sep: &str, layer: &dyn Fn(usize) -> String, norm: (&str, &str)) -> Layout {
+    let mut l = Vec::new();
+    for i in 0..12 {
+        let p = layer(i);
+        let mut push = |n: String, s: &[u64]| {
+            l.push(tensor(
+                &format!("{p}{sep}{}", n.replace('.', sep)),
+                "F32",
+                s,
+            ))
+        };
+        for q in ["query", "key", "value"] {
+            push(format!("attention.self.{q}.kernel"), &[768, 768]);
+            push(format!("attention.self.{q}.bias"), &[768]);
+        }
+        push("attention.output.dense.kernel".into(), &[768, 768]);
+        push("attention.output.dense.bias".into(), &[768]);
+        push("intermediate.dense.kernel".into(), &[768, 3072]);
+        push("intermediate.dense.bias".into(), &[3072]);
+        push("output.dense.kernel".into(), &[3072, 768]);
+        push("output.dense.bias".into(), &[768]);
+        for ln in ["attention.output.LayerNorm", "output.LayerNorm"] {
+            push(format!("{ln}.{}", norm.0), &[768]);
+            push(format!("{ln}.{}", norm.1), &[768]);
+        }
+    }
+    l
+}
+
+/// Flax BERT-base (`flax_model.msgpack` names): `kernel`, `scale`,
+/// `embedding`, plus a generic Flax module's `LayerNorm_0.scale`.
+fn flax_bert() -> Layout {
+    let t = tensor;
+    let mut l = vec![
+        t(
+            "bert.embeddings.word_embeddings.embedding",
+            "F32",
+            &[30522, 768],
+        ),
+        t(
+            "bert.embeddings.position_embeddings.embedding",
+            "F32",
+            &[512, 768],
+        ),
+        t(
+            "bert.embeddings.token_type_embeddings.embedding",
+            "F32",
+            &[2, 768],
+        ),
+        t("bert.embeddings.LayerNorm.scale", "F32", &[768]),
+        t("bert.embeddings.LayerNorm.bias", "F32", &[768]),
+    ];
+    l.extend(bert_layers(
+        ".",
+        &|i| format!("bert.encoder.layer.{i}"),
+        ("scale", "bias"),
+    ));
+    l.push(t("bert.pooler.dense.kernel", "F32", &[768, 768]));
+    l.push(t("bert.pooler.dense.bias", "F32", &[768]));
+    l.push(t("LayerNorm_0.scale", "F32", &[768]));
+    l.push(t("LayerNorm_0.bias", "F32", &[768]));
+    l
+}
+
+/// TF BERT-base checkpoint names: `kernel`, `gamma`, `beta`.
+fn tf_bert() -> Layout {
+    let t = tensor;
+    let mut l = vec![
+        t("bert/embeddings/word_embeddings", "F32", &[30522, 768]),
+        t("bert/embeddings/position_embeddings", "F32", &[512, 768]),
+        t("bert/embeddings/token_type_embeddings", "F32", &[2, 768]),
+        t("bert/embeddings/LayerNorm/gamma", "F32", &[768]),
+        t("bert/embeddings/LayerNorm/beta", "F32", &[768]),
+    ];
+    l.extend(bert_layers(
+        "/",
+        &|i| format!("bert/encoder/layer_{i}"),
+        ("gamma", "beta"),
+    ));
+    l.push(t("bert/pooler/dense/kernel", "F32", &[768, 768]));
+    l.push(t("bert/pooler/dense/bias", "F32", &[768]));
+    l
+}
+
+/// Google ViT-B/16 `.npz` (JAX names): `cls`, `kernel`, `scale`.
+fn google_vit_npz() -> Layout {
+    let t = tensor;
+    let f = "<f4";
+    let mut l = vec![
+        t("cls", f, &[1, 1, 768]),
+        t("embedding/kernel", f, &[16, 16, 3, 768]),
+        t("embedding/bias", f, &[768]),
+        t(
+            "Transformer/posembed_input/pos_embedding",
+            f,
+            &[1, 197, 768],
+        ),
+        t("Transformer/encoder_norm/scale", f, &[768]),
+        t("Transformer/encoder_norm/bias", f, &[768]),
+        t("pre_logits/kernel", f, &[768, 768]),
+        t("pre_logits/bias", f, &[768]),
+        t("head/kernel", f, &[768, 1000]),
+        t("head/bias", f, &[1000]),
+    ];
+    for b in 0..12 {
+        let p = format!("Transformer/encoderblock_{b}");
+        let a = format!("{p}/MultiHeadDotProductAttention_1");
+        for (n, s) in [
+            (format!("{p}/LayerNorm_0/scale"), &[768u64][..]),
+            (format!("{p}/LayerNorm_0/bias"), &[768]),
+            (format!("{p}/LayerNorm_2/scale"), &[768]),
+            (format!("{p}/LayerNorm_2/bias"), &[768]),
+            (format!("{p}/MlpBlock_3/Dense_0/kernel"), &[768, 3072]),
+            (format!("{p}/MlpBlock_3/Dense_0/bias"), &[3072]),
+            (format!("{p}/MlpBlock_3/Dense_1/kernel"), &[3072, 768]),
+            (format!("{p}/MlpBlock_3/Dense_1/bias"), &[768]),
+            (format!("{a}/query/kernel"), &[768, 12, 64]),
+            (format!("{a}/query/bias"), &[12, 64]),
+            (format!("{a}/key/kernel"), &[768, 12, 64]),
+            (format!("{a}/key/bias"), &[12, 64]),
+            (format!("{a}/value/kernel"), &[768, 12, 64]),
+            (format!("{a}/value/bias"), &[12, 64]),
+            (format!("{a}/out/kernel"), &[12, 64, 768]),
+            (format!("{a}/out/bias"), &[768]),
+        ] {
+            l.push(t(&n, f, s));
+        }
+    }
+    l
+}
+
+/// Reference vectors in the style of scipy's FFT test data: `sizes` plus
+/// `dct_K_N`/`dst_K_N` for K in 1..=4 and N in a list of lengths, several of
+/// them embedding widths, so each width repeats 8 times.
+fn reference_vectors_npz(dtype: &'static str) -> Vec<u8> {
+    const SIZES: &[u64] = &[2, 3, 4, 8, 12, 15, 16, 17, 32, 64, 128, 256, 512, 1024];
+    let mut l = vec![tensor("sizes", "<i8", &[SIZES.len() as u64])];
+    for kind in ["dct", "dst"] {
+        for k in 1..=4 {
+            for &n in SIZES {
+                l.push(tensor(&format!("{kind}_{k}_{n}"), dtype, &[n]));
+            }
+        }
+    }
+    npz_header_only(&l)
 }
 
 fn uuid(r: &mut Rng) -> String {
@@ -1032,6 +1264,14 @@ fn negatives(out: &mut Vec<Sample>) {
             "prices_logs",
             format!("table_{i}.txt"),
             text.into_bytes(),
+        ));
+    }
+    // Reference-vector archives (scipy FFT test data style).
+    for (i, dtype) in ["<f8", "<f4"].into_iter().enumerate() {
+        out.push(neg(
+            "reference_npz",
+            format!("fft_ref_{i}.npz"),
+            reference_vectors_npz(dtype),
         ));
     }
 }

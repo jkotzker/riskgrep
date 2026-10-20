@@ -126,6 +126,7 @@ fn safetensors_name_rule() {
         embedding_dims: None,
         exclude_name_regex: None,
         min_bank: None,
+        min_bank_share: None,
     };
     let r = named.apply(&data, 0..8);
     assert_eq!(
@@ -143,6 +144,7 @@ fn safetensors_name_rule() {
         embedding_dims: None,
         exclude_name_regex: None,
         min_bank: None,
+        min_bank_share: None,
     };
     let r = unnamed.apply(&layer_only, 0..8);
     assert_eq!(tensor(&r).2, Some("layer.0.weight"));
@@ -170,7 +172,9 @@ fn npz_members() {
     let p = NpzMembers {
         min_dim: 192,
         embedding_dims: None,
+        exclude_name_regex: None,
         min_bank: None,
+        min_bank_share: None,
     };
     let both = npz(&[
         ("ids.npy", npy("<i8", "(500,)")),
@@ -194,7 +198,9 @@ fn headers_never_panic_on_malformed_input() {
     let npz_p = NpzMembers {
         min_dim: 1,
         embedding_dims: None,
+        exclude_name_regex: None,
         min_bank: None,
+        min_bank_share: None,
     };
     let st_p = SafetensorsHeader {
         min_dim: 1,
@@ -202,6 +208,7 @@ fn headers_never_panic_on_malformed_input() {
         embedding_dims: None,
         exclude_name_regex: None,
         min_bank: None,
+        min_bank_share: None,
     };
     let good_npy = npy("<f4", "(10, 192)");
     let good_st = safetensors(r#"{"t":{"dtype":"F32","shape":[4,4],"data_offsets":[0,64]}}"#);
@@ -285,7 +292,9 @@ fn npz_embedding_shape() {
     let p = NpzMembers {
         min_dim: 64,
         embedding_dims: Some(DIMS.to_vec()),
+        exclude_name_regex: None,
         min_bank: None,
+        min_bank_share: None,
     };
     let emb = npz(&[
         ("x.npy", npy("<f8", "(5000, 7)")),
@@ -304,6 +313,7 @@ fn safetensors_embedding_shape_and_exclusions() {
         embedding_dims: Some(DIMS.to_vec()),
         exclude_name_regex: Some(re("(?i)(weight|bias)")),
         min_bank: None,
+        min_bank_share: None,
     };
     let emb = safetensors(r#"{"data":{"dtype":"F32","shape":[4,256],"data_offsets":[0,4096]}}"#);
     assert_eq!(tensor(&p.apply(&emb, 0..8)).2, Some("data"));
@@ -323,6 +333,7 @@ fn safetensors_embedding_bank() {
         embedding_dims: Some(DIMS.to_vec()),
         exclude_name_regex: Some(re("(?i)weight")),
         min_bank: Some(3),
+        min_bank_share: None,
     };
     let bank = |n: usize, shape: &str| {
         let items: Vec<String> = (0..n)
@@ -359,7 +370,9 @@ fn npz_embedding_bank() {
     let p = NpzMembers {
         min_dim: 64,
         embedding_dims: Some(DIMS.to_vec()),
+        exclude_name_regex: None,
         min_bank: Some(3),
+        min_bank_share: None,
     };
     let members = |n: usize, shape: &str| -> Vec<u8> {
         let m: Vec<(String, Vec<u8>)> = (0..n)
@@ -374,6 +387,93 @@ fn npz_embedding_bank() {
     );
     assert_eq!(p.apply(&members(2, "(3, 256)"), 0..4), PostResult::Drop);
     assert_eq!(p.apply(&members(4, "(3, 7)"), 0..4), PostResult::Drop);
+}
+
+#[test]
+fn bank_share_counts_every_float_tensor() {
+    let p = SafetensorsHeader {
+        min_dim: 64,
+        name_regex: None,
+        embedding_dims: Some(DIMS.to_vec()),
+        exclude_name_regex: Some(re("(?i)weight")),
+        min_bank: Some(3),
+        min_bank_share: Some(50),
+    };
+    // Three identity vectors plus `others` float tensors that cannot join a
+    // bank (excluded names and other shapes still count as float tensors).
+    let file = |others: usize| {
+        let mut items: Vec<String> = (0..3)
+            .map(|i| {
+                format!(
+                    r#""p{}":{{"dtype":"F32","shape":[192],"data_offsets":[0,9]}}"#,
+                    225 + i
+                )
+            })
+            .collect();
+        for i in 0..others {
+            let (name, shape) = if i % 2 == 0 {
+                (format!("l{i}.weight"), "[192]")
+            } else {
+                (format!("x{i}"), "[7]")
+            };
+            items.push(format!(
+                r#""{name}":{{"dtype":"F32","shape":{shape},"data_offsets":[0,9]}}"#
+            ));
+        }
+        items.push(r#""ids":{"dtype":"I64","shape":[3],"data_offsets":[0,9]}"#.into());
+        safetensors(&format!("{{{}}}", items.join(",")))
+    };
+    assert!(kept(&p.apply(&file(0), 0..8)));
+    // 3 of 6 float tensors: exactly half.
+    assert!(kept(&p.apply(&file(3), 0..8)));
+    // 3 of 7: under half. The integer tensor never counts.
+    assert_eq!(p.apply(&file(4), 0..8), PostResult::Drop);
+}
+
+#[test]
+fn npz_exclusions_and_bank_share() {
+    let p = NpzMembers {
+        min_dim: 64,
+        embedding_dims: Some(DIMS.to_vec()),
+        exclude_name_regex: Some(re("(?i)(kernel|(^|[._/])[0-9]+[._/])")),
+        min_bank: None,
+        min_bank_share: None,
+    };
+    let excluded = npz(&[
+        ("dense/kernel.npy", npy("<f4", "(192, 192)")),
+        ("dct_1_192.npy", npy("<f8", "(192,)")),
+    ]);
+    assert_eq!(p.apply(&excluded, 0..4), PostResult::Drop);
+    let flat = npz(&[
+        ("dense/kernel.npy", npy("<f4", "(192, 192)")),
+        ("x2.npy", npy("<f8", "(192,)")),
+    ]);
+    assert_eq!(tensor(&p.apply(&flat, 0..4)).2, Some("x2"));
+
+    let bank = NpzMembers {
+        min_bank: Some(3),
+        min_bank_share: Some(50),
+        ..p
+    };
+    let store = |others: usize| {
+        let mut m: Vec<(String, Vec<u8>)> = (0..3)
+            .map(|i| (format!("spk_{i}.npy"), npy("<f4", "(192,)")))
+            .collect();
+        for i in 0..others {
+            m.push((format!("t{i}.npy"), npy("<f8", "(5,)")));
+        }
+        m.push(("ids.npy".into(), npy("<i8", "(3,)")));
+        let refs: Vec<(&str, Vec<u8>)> = m.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
+        npz(&refs)
+    };
+    assert_eq!(tensor(&bank.apply(&store(3), 0..4)).2, Some("spk_0"));
+    assert_eq!(bank.apply(&store(4), 0..4), PostResult::Drop);
+    // Excluded members never join a bank.
+    let refs: Vec<(String, Vec<u8>)> = (0..4)
+        .map(|i| (format!("dct_{i}_192.npy"), npy("<f8", "(192,)")))
+        .collect();
+    let refs: Vec<(&str, Vec<u8>)> = refs.iter().map(|(a, b)| (a.as_str(), b.clone())).collect();
+    assert_eq!(bank.apply(&npz(&refs), 0..4), PostResult::Drop);
 }
 
 /// `n` floats joined by `sep`, wrapped in `open`/`close`.

@@ -5,6 +5,16 @@
 // with a large dimension (model weights, scientific data) scores low. Each
 // format's pair shares a family, so an embedding-shaped tensor scores the
 // higher weight.
+//
+// Parameter names never count: PyTorch (`weight`, `bias`, `running_mean`),
+// JAX/Flax/TF (`kernel`, `scale`, `gamma`, `beta`, `moving_mean`), RWKV
+// (`time_mix`, `time_decay`, `time_first`), Mamba (`mixer`, `A_log`,
+// `dt_bias`, `conv1d`), ViT (`cls`), and model-embedding names. The unnamed
+// and bank rules also ignore hierarchical names: a layer or block segment
+// (`layers`, `blocks`, `h`, `encoder`, `encoderblock_0`, `transformer`,
+// `backbone`, `model`) or an index segment between separators (`.0.`,
+// `_1_`); identity keys are flat (`p225`, `person_000`, `spk_12`,
+// `faces.0`, `speakers/p225`).
 
 rule npy_embedding_tensor {
   meta:
@@ -44,14 +54,16 @@ rule npz_embedding_tensor {
     post = "npz_members"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|h|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
   strings:
     $hdr = { 50 4B 03 04 }
   condition:
     $hdr at 0
 }
 
-// Several members of one identical embedding shape: one vector per person.
-// Not in family `npz`, so it adds to the single-tensor rules.
+// Several flat-named members of one identical embedding shape making up at
+// least half of the archive's float members: one vector per person. Not in
+// family `npz`, so it adds to the single-tensor rules.
 rule npz_embedding_bank {
   meta:
     category = "biometric"
@@ -59,7 +71,9 @@ rule npz_embedding_bank {
     post = "npz_members"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|h|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
     min_bank = 3
+    min_bank_share = 50
   strings:
     $hdr = { 50 4B 03 04 }
   condition:
@@ -92,7 +106,7 @@ rule safetensors_named_embedding {
     post = "safetensors_header"
     min_dim = 1
     name_regex = "(?i)(^|[._/-])(embeddings?|speakers?|voices?|voiceprints?|faces?|xvectors?|dvectors?|ecapa|spk_emb)($|[._/-])"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe)"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/]))"
   strings:
     $hdr = { 7B 22 }
   condition:
@@ -101,7 +115,8 @@ rule safetensors_named_embedding {
 
 // Embedding-shaped tensors without an embedding name. With
 // `safetensors_float_tensor` one scores 70 (1 - 0.4 * 0.75), an ask rather
-// than a deny. Model parameter and projection names never count.
+// than a deny. Model parameter, projection, and hierarchical names never
+// count.
 rule safetensors_embedding_tensor {
   meta:
     category = "biometric"
@@ -111,16 +126,17 @@ rule safetensors_embedding_tensor {
     post = "safetensors_header"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection)"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|h|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
   strings:
     $hdr = { 7B 22 }
   condition:
     $hdr at 8 and uint32(4) == 0 and uint32(0) > 1 and uint32(0) + 8 <= filesize
 }
 
-// An embedding bank: three or more such tensors of one identical shape (a
-// speaker or face store keyed by identity). Not in family `safetensors`, so
-// it adds to the rules above.
+// An embedding bank: three or more such tensors of one identical shape,
+// flat-named and at least half of the file's float tensors (a speaker or
+// face store keyed by identity). Not in family `safetensors`, so it adds to
+// the rules above.
 rule safetensors_embedding_bank {
   meta:
     category = "biometric"
@@ -128,8 +144,9 @@ rule safetensors_embedding_bank {
     post = "safetensors_header"
     min_dim = 64
     embedding_dims = "128,192,256,384,512,640,768,1024,1536,2048,3072,4096"
-    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection)"
+    exclude_name_regex = "(?i)(weight|bias|running_(mean|var)|num_batches_tracked|in_proj|pos(ition(al)?)?_?embed|word_embed|token|patch|time_embed|class_embed|cls_token|lm_head|wte|wpe|(^|[._])proj(ection)?($|[._])|_proj$|text_projection|(^|[._/])(kernel|scale|gamma|beta|moving_(mean|variance)|time_(mix|decay|first)|mixer|a_log|dt_bias|conv1d|cls)($|[._/])|(^|[._/])(layers?|blocks?|h|encoder(block)?|decoder(block)?|transformer|backbone|model)($|[._/])|[._/][0-9]+[._/])"
     min_bank = 3
+    min_bank_share = 50
   strings:
     $hdr = { 7B 22 }
   condition:

@@ -1,8 +1,8 @@
 {
   "files.oss": 55876.0,
-  "files.synthetic.negative": 243.0,
+  "files.synthetic.negative": 250.0,
   "files.synthetic.positive": 430.0,
-  "fp_per_1000.oss.biometric": 0.1253,
+  "fp_per_1000.oss.biometric": 0.0895,
   "fp_per_1000.oss.secret": 0.4474,
   "fp_per_1000.synthetic.biometric": 0.0,
   "fp_per_1000.synthetic.secret": 0.0,

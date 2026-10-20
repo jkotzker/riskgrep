@@ -43,9 +43,9 @@ fn is_float_dtype(dtype: &str) -> bool {
         .starts_with('f')
 }
 
-/// A version 1.0 `.npy` file. Float dtypes (`<f4`, `<f8`, `<f2`) get random
-/// finite values; other dtypes get random bytes.
-pub fn npy(dtype: &str, shape: &[u64]) -> Vec<u8> {
+/// The header of a version 1.0 `.npy` file with no data after it, as a large
+/// array's first bytes are (the scanner reads headers only).
+pub fn npy_header(dtype: &str, shape: &[u64]) -> Vec<u8> {
     let dims = match shape {
         [d] => format!("({d},)"),
         _ => format!(
@@ -66,7 +66,13 @@ pub fn npy(dtype: &str, shape: &[u64]) -> Vec<u8> {
     let mut out = b"\x93NUMPY\x01\x00".to_vec();
     out.extend_from_slice(&(header.len() as u16).to_le_bytes());
     out.extend_from_slice(header.as_bytes());
+    out
+}
 
+/// A version 1.0 `.npy` file. Float dtypes (`<f4`, `<f8`, `<f2`) get random
+/// finite values; other dtypes get random bytes.
+pub fn npy(dtype: &str, shape: &[u64]) -> Vec<u8> {
+    let mut out = npy_header(dtype, shape);
     let count: u64 = shape.iter().product();
     let size = item_size(dtype);
     let mut rng = Rng::new(count ^ ((size as u64) << 56));
@@ -101,6 +107,21 @@ pub fn npz(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
 /// A safetensors file from `(name, dtype, shape)` triples, with random data.
 /// `dtype` uses safetensors names (`F32`, `I64`, ...).
 pub fn safetensors(tensors: &[(&str, &str, &[u64])]) -> Vec<u8> {
+    let (mut out, len) = safetensors_parts(tensors);
+    let mut data = vec![0u8; len as usize];
+    Rng::new(len).fill(&mut data);
+    out.extend_from_slice(&data);
+    out
+}
+
+/// The length prefix and JSON header of a safetensors file, with offsets but
+/// no tensor data, as a checkpoint's first bytes are.
+pub fn safetensors_header(tensors: &[(&str, &str, &[u64])]) -> Vec<u8> {
+    safetensors_parts(tensors).0
+}
+
+/// Length prefix plus header, and the data length the header describes.
+fn safetensors_parts(tensors: &[(&str, &str, &[u64])]) -> (Vec<u8>, u64) {
     let mut header = serde_json::Map::new();
     let mut offset = 0u64;
     for (name, dtype, shape) in tensors {
@@ -118,10 +139,7 @@ pub fn safetensors(tensors: &[(&str, &str, &[u64])]) -> Vec<u8> {
     let json = serde_json::to_vec(&header).expect("header json");
     let mut out = (json.len() as u64).to_le_bytes().to_vec();
     out.extend_from_slice(&json);
-    let mut data = vec![0u8; offset as usize];
-    Rng::new(offset).fill(&mut data);
-    out.extend_from_slice(&data);
-    out
+    (out, offset)
 }
 
 fn dtype_bytes(dtype: &str) -> u64 {
