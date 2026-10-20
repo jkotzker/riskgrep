@@ -71,16 +71,68 @@ fn npy_f32_10x192() {
     let f = fixture();
     let data = synth::npy("<f4", &[10, 192]);
     let ev = scan(&f, "a.npy", &data);
-    assert_eq!(ev.len(), 1);
-    assert_eq!(
-        ev[0].shape,
-        vec![ShapeFacts::Tensor {
-            dtype: "<f4".into(),
-            shape: vec![10, 192],
-            name: None
-        }]
-    );
+    let mut rules: Vec<&str> = ev.iter().map(|e| e.rule.as_str()).collect();
+    rules.sort();
+    assert_eq!(rules, ["npy_embedding_tensor", "npy_float_tensor"]);
+    for e in &ev {
+        assert_eq!(
+            e.shape,
+            vec![ShapeFacts::Tensor {
+                dtype: "<f4".into(),
+                shape: vec![10, 192],
+                name: None
+            }]
+        );
+    }
+    // Both rules are in family `npy`, capped at the embedding weight.
     assert_score(biometric(&f, "a.npy", &data), 70.0);
+}
+
+#[test]
+fn npy_not_embedding_shaped() {
+    let f = fixture();
+    // A data table (last dimension 7) and a 3-D volume.
+    for shape in [&[500u64, 7][..], &[4, 4, 4, 192]] {
+        let data = synth::npy("<f8", shape);
+        assert_eq!(
+            rules_of(&f, "a.npy", &data),
+            ["npy_float_tensor"],
+            "{shape:?}"
+        );
+        assert_score(biometric(&f, "a.npy", &data), 30.0);
+    }
+}
+
+#[test]
+fn npz_not_embedding_shaped() {
+    let f = fixture();
+    let data = synth::npz(&[("x.npy", synth::npy("<f8", &[500, 7]))]);
+    assert_score(biometric(&f, "a.npz", &data), 30.0);
+}
+
+#[test]
+fn unnamed_embedding_safetensors() {
+    let f = fixture();
+    let data = synth::safetensors(&[("data", "F32", &[4, 512])]);
+    let mut rules = rules_of(&f, "t.safetensors", &data);
+    rules.sort();
+    assert_eq!(
+        rules,
+        ["safetensors_embedding_tensor", "safetensors_float_tensor"]
+    );
+    // 70 and 30 by noisy-or: 1 - 0.3 * 0.7.
+    assert_score(biometric(&f, "t.safetensors", &data), 79.0);
+}
+
+#[test]
+fn layer_parameters_are_not_embeddings() {
+    let f = fixture();
+    let data = synth::safetensors(&[("fc.weight", "F32", &[10, 512]), ("fc.bias", "F32", &[512])]);
+    assert_eq!(
+        rules_of(&f, "w.safetensors", &data),
+        ["safetensors_float_tensor"]
+    );
+    assert_score(biometric(&f, "w.safetensors", &data), 30.0);
 }
 
 #[test]
@@ -114,21 +166,41 @@ fn printed_embedding_styles() {
         FloatStyle::JsonArray,
     ] {
         let text = synth::printed_floats(256, style);
-        let ev = scan(&f, "notes.txt", text.as_bytes());
-        assert_eq!(ev.len(), 1, "{style:?}");
-        assert_eq!(ev[0].rule, "printed_float_run");
-        assert_eq!(ev[0].count, 1, "{style:?}: one location per run");
-        assert_score(biometric(&f, "notes.txt", text.as_bytes()), 40.0);
+        let mut ev = scan(&f, "notes.txt", text.as_bytes());
+        ev.sort_by(|a, b| a.rule.cmp(&b.rule));
+        let rules: Vec<&str> = ev.iter().map(|e| e.rule.as_str()).collect();
+        assert_eq!(
+            rules,
+            ["printed_embedding_array", "printed_float_run"],
+            "{style:?}"
+        );
+        for e in &ev {
+            assert_eq!(e.count, 1, "{style:?}: one location per array or run");
+        }
+        // Family `printed_floats` caps the pair at 60.
+        assert_score(biometric(&f, "notes.txt", text.as_bytes()), 60.0);
     }
+}
+
+#[test]
+fn printed_run_of_other_length() {
+    let f = fixture();
+    let text = synth::printed_floats(200, FloatStyle::PythonList);
+    assert_eq!(
+        rules_of(&f, "notes.txt", text.as_bytes()),
+        ["printed_float_run"]
+    );
+    assert_score(biometric(&f, "notes.txt", text.as_bytes()), 40.0);
 }
 
 #[test]
 fn path_plus_floats() {
     let f = fixture();
     let text = synth::printed_floats(256, FloatStyle::PythonList);
+    // 60 (printed floats) and 30 (path): 1 - 0.4 * 0.7.
     assert_score(
         biometric(&f, "speaker_embedding.txt", text.as_bytes()),
-        58.0,
+        72.0,
     );
 }
 

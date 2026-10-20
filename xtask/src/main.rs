@@ -1,10 +1,13 @@
 //! Repository tasks: `cargo xtask <task>`.
 
+mod eval;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str =
-    "usage: cargo xtask convert-gitleaks --config <gitleaks.toml> --tag <release tag> --out <dir>";
+    "usage: cargo xtask convert-gitleaks --config <gitleaks.toml> --tag <release tag> --out <dir>
+       cargo xtask eval [--skip-oss]";
 
 fn convert(args: &[String]) -> Result<(), String> {
     let (mut config, mut tag, mut out) = (None, None, None);
@@ -49,6 +52,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("convert-gitleaks") => convert(&args[1..]),
+        Some("eval") => eval::run(&args[1..]),
         _ => Err(USAGE.into()),
     };
     match result {

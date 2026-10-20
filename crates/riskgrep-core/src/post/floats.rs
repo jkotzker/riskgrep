@@ -98,3 +98,73 @@ impl Post for FloatRun {
         Some(float_runs(content, self.min_floats))
     }
 }
+
+/// Bracketed arrays (`[...]`) that hold only floats separated by commas or
+/// whitespace and whose element count is one of `dims`, in one linear pass.
+/// Each range spans the brackets. In a nested array (`[[...], [...]]`) each
+/// innermost row is judged on its own.
+pub fn float_arrays(c: &[u8], dims: &[u64]) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    // Open bracket of the array being read, its float count, and whether a
+    // separator is due before the next float.
+    let mut open: Option<usize> = None;
+    let (mut count, mut need_sep) = (0u64, false);
+    let mut i = 0;
+    while i < c.len() {
+        let b = c[i];
+        if b == b'[' {
+            open = Some(i);
+            count = 0;
+            need_sep = false;
+            i += 1;
+            continue;
+        }
+        let Some(start) = open else {
+            i += 1;
+            continue;
+        };
+        if b == b']' {
+            if dims.contains(&count) {
+                out.push(start..i + 1);
+            }
+            open = None;
+            i += 1;
+        } else if matches!(b, b',' | b' ' | b'\t' | b'\r' | b'\n') {
+            need_sep = false;
+            i += 1;
+        } else {
+            match float_at(c, i) {
+                Ok(end) if !need_sep => {
+                    count += 1;
+                    need_sep = true;
+                    i = end;
+                }
+                Ok(_) => {
+                    open = None;
+                    i += 1;
+                }
+                Err(next) => {
+                    open = None;
+                    i = next;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Printed arrays of an embedding width; supplies its own evidence ranges
+/// like [`FloatRun`].
+pub struct FloatArray {
+    pub embedding_dims: Vec<u64>,
+}
+
+impl Post for FloatArray {
+    fn apply(&self, _content: &[u8], m: Range<usize>) -> PostResult {
+        PostResult::Keep(m)
+    }
+
+    fn runs(&self, content: &[u8]) -> Option<Vec<Range<usize>>> {
+        Some(float_arrays(content, &self.embedding_dims))
+    }
+}

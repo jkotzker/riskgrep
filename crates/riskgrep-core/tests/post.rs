@@ -2,8 +2,8 @@ use regex::bytes::Regex;
 use riskgrep_core::lines::LineIndex;
 use riskgrep_core::model::ShapeFacts;
 use riskgrep_core::post::{
-    compile_regex, AllowRegex, Entropy, NpyHeader, NpzMembers, Post, PostResult, SafetensorsHeader,
-    Span, Stopwords,
+    compile_regex, float_arrays, AllowRegex, Entropy, FloatArray, NpyHeader, NpzMembers, Post,
+    PostResult, SafetensorsHeader, Span, Stopwords,
 };
 use std::io::Write;
 
@@ -103,7 +103,10 @@ fn stopwords_drop() {
 
 #[test]
 fn npy_float_kept_int_dropped() {
-    let p = NpyHeader { min_dim: 192 };
+    let p = NpyHeader {
+        min_dim: 192,
+        embedding_dims: None,
+    };
     let f = npy("<f4", "(10, 192)");
     let r = p.apply(&f, 0..f.len());
     assert_eq!(tensor(&r), ("<f4", &[10, 192][..], None));
@@ -120,6 +123,8 @@ fn safetensors_name_rule() {
     let named = SafetensorsHeader {
         min_dim: 192,
         name_regex: Some(re("embedding")),
+        embedding_dims: None,
+        exclude_name_regex: None,
     };
     let r = named.apply(&data, 0..8);
     assert_eq!(
@@ -134,6 +139,8 @@ fn safetensors_name_rule() {
     let unnamed = SafetensorsHeader {
         min_dim: 192,
         name_regex: None,
+        embedding_dims: None,
+        exclude_name_regex: None,
     };
     let r = unnamed.apply(&layer_only, 0..8);
     assert_eq!(tensor(&r).2, Some("layer.0.weight"));
@@ -158,7 +165,10 @@ fn npz(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
 
 #[test]
 fn npz_members() {
-    let p = NpzMembers { min_dim: 192 };
+    let p = NpzMembers {
+        min_dim: 192,
+        embedding_dims: None,
+    };
     let both = npz(&[
         ("ids.npy", npy("<i8", "(500,)")),
         ("emb.npy", npy("<f4", "(1, 192)")),
@@ -174,11 +184,19 @@ fn npz_members() {
 
 #[test]
 fn headers_never_panic_on_malformed_input() {
-    let npy_p = NpyHeader { min_dim: 1 };
-    let npz_p = NpzMembers { min_dim: 1 };
+    let npy_p = NpyHeader {
+        min_dim: 1,
+        embedding_dims: None,
+    };
+    let npz_p = NpzMembers {
+        min_dim: 1,
+        embedding_dims: None,
+    };
     let st_p = SafetensorsHeader {
         min_dim: 1,
         name_regex: None,
+        embedding_dims: None,
+        exclude_name_regex: None,
     };
     let good_npy = npy("<f4", "(10, 192)");
     let good_st = safetensors(r#"{"t":{"dtype":"F32","shape":[4,4],"data_offsets":[0,64]}}"#);
@@ -227,6 +245,106 @@ fn headers_never_panic_on_malformed_input() {
         npz_p.apply(&good_npz, 0..4),
         PostResult::KeepWithShape(..)
     ));
+}
+
+const DIMS: &[u64] = &[192, 256];
+
+fn kept(r: &PostResult) -> bool {
+    matches!(r, PostResult::KeepWithShape(..))
+}
+
+#[test]
+fn npy_embedding_shape() {
+    let p = NpyHeader {
+        min_dim: 64,
+        embedding_dims: Some(DIMS.to_vec()),
+    };
+    for (shape, want) in [
+        ("(192,)", true),
+        ("(1, 192)", true),
+        ("(500, 256)", true),
+        ("(2, 3, 192)", true),
+        ("(2, 2, 2, 192)", false),
+        ("(10, 193)", false),
+        ("(192, 10)", false),
+    ] {
+        let f = npy("<f4", shape);
+        assert_eq!(kept(&p.apply(&f, 0..4)), want, "{shape}");
+    }
+    let ints = npy("<i8", "(1, 192)");
+    assert_eq!(p.apply(&ints, 0..4), PostResult::Drop);
+}
+
+#[test]
+fn npz_embedding_shape() {
+    let p = NpzMembers {
+        min_dim: 64,
+        embedding_dims: Some(DIMS.to_vec()),
+    };
+    let emb = npz(&[
+        ("x.npy", npy("<f8", "(5000, 7)")),
+        ("emb.npy", npy("<f4", "(3, 256)")),
+    ]);
+    assert_eq!(tensor(&p.apply(&emb, 0..4)).2, Some("emb"));
+    let table = npz(&[("x.npy", npy("<f8", "(5000, 7)"))]);
+    assert_eq!(p.apply(&table, 0..4), PostResult::Drop);
+}
+
+#[test]
+fn safetensors_embedding_shape_and_exclusions() {
+    let p = SafetensorsHeader {
+        min_dim: 64,
+        name_regex: None,
+        embedding_dims: Some(DIMS.to_vec()),
+        exclude_name_regex: Some(re("(?i)(weight|bias)")),
+    };
+    let emb = safetensors(r#"{"data":{"dtype":"F32","shape":[4,256],"data_offsets":[0,4096]}}"#);
+    assert_eq!(tensor(&p.apply(&emb, 0..8)).2, Some("data"));
+    let layers = safetensors(
+        r#"{"fc.weight":{"dtype":"F32","shape":[10,256],"data_offsets":[0,9]},"fc.bias":{"dtype":"F32","shape":[256],"data_offsets":[9,10]}}"#,
+    );
+    assert_eq!(p.apply(&layers, 0..8), PostResult::Drop);
+    let wide = safetensors(r#"{"x":{"dtype":"F32","shape":[256,257],"data_offsets":[0,9]}}"#);
+    assert_eq!(p.apply(&wide, 0..8), PostResult::Drop);
+}
+
+/// `n` floats joined by `sep`, wrapped in `open`/`close`.
+fn floats(n: usize, sep: &str, open: &str, close: &str) -> String {
+    let v: Vec<String> = (0..n).map(|i| format!("{}.{:04}", i % 3, i)).collect();
+    format!("{open}{}{close}", v.join(sep))
+}
+
+#[test]
+fn float_arrays_of_embedding_width() {
+    let one = floats(192, ", ", "x = [", "]\n");
+    let r = float_arrays(one.as_bytes(), DIMS);
+    assert_eq!(r.len(), 1);
+    assert_eq!(&one.as_bytes()[r[0].clone()][..2], b"[0");
+    assert!(float_arrays(floats(191, ", ", "[", "]").as_bytes(), DIMS).is_empty());
+    // numpy repr, wrapped over lines, and a JSON array with newlines.
+    let np = floats(256, ",\n       ", "array([ ", "])");
+    assert_eq!(float_arrays(np.as_bytes(), DIMS).len(), 1);
+    let js = floats(192, ",\n    ", "{\"v\": [\n    ", "\n  ]}");
+    assert_eq!(float_arrays(js.as_bytes(), DIMS).len(), 1);
+    // A matrix of embedding rows: one array per row.
+    let rows = format!(
+        "[{}, {}]",
+        floats(192, ", ", "[", "]"),
+        floats(256, ", ", "[", "]")
+    );
+    assert_eq!(float_arrays(rows.as_bytes(), DIMS).len(), 2);
+    // Unbracketed runs (CSV) and arrays with a non-float element do not count.
+    assert!(float_arrays(floats(192, ",", "", "\n").as_bytes(), DIMS).is_empty());
+    let mixed = floats(192, ", ", "[", ", 7]");
+    assert!(float_arrays(mixed.as_bytes(), DIMS).is_empty());
+    assert!(float_arrays(b"[] [ ] [[", DIMS).is_empty());
+    let p = FloatArray {
+        embedding_dims: DIMS.to_vec(),
+    };
+    assert_eq!(
+        p.runs(one.as_bytes()),
+        Some(float_arrays(one.as_bytes(), DIMS))
+    );
 }
 
 #[test]

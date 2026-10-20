@@ -18,8 +18,7 @@ riskgrep-core = { path = "../crates/riskgrep-core" }
 regex = "1.13"
 regex-syntax = "0.8"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.10"
 toml = "1.1.8"
-
-[dev-dependencies]
 tempfile = "3.27.0"

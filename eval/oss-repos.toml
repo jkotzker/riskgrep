@@ -1,0 +1,81 @@
+# Public repositories for the false-positive measurement of `cargo xtask eval`.
+# Each is fetched shallow at the pinned commit into eval/oss/<name> (gitignored).
+# Pins taken from each default branch on 2026-10-19.
+
+[[repo]]
+name = "scipy"
+url = "https://github.com/scipy/scipy"
+commit = "8ae9128877eefbe5394146edc422f6bbaa77f1e9"
+language = "Python"
+
+[[repo]]
+name = "numpy"
+url = "https://github.com/numpy/numpy"
+commit = "8ba30a04adfa7a969d8270de7ba454d5e7c2afca"
+language = "Python"
+
+[[repo]]
+name = "transformers"
+url = "https://github.com/huggingface/transformers"
+commit = "6f2e80bdad560947903bb4bde8043ae95387069a"
+language = "Python"
+
+[[repo]]
+name = "terraform"
+url = "https://github.com/hashicorp/terraform"
+commit = "8a97fe6c624fa129d5d8246a063c528482fe436c"
+language = "Go"
+
+[[repo]]
+name = "prometheus"
+url = "https://github.com/prometheus/prometheus"
+commit = "50321ccc8f255390bff9621d581e8f42be89d4b3"
+language = "Go"
+
+[[repo]]
+name = "react"
+url = "https://github.com/facebook/react"
+commit = "a679270829ac5786fe7cd3b65acd289d5338dbc7"
+language = "JavaScript"
+
+[[repo]]
+name = "vue-core"
+url = "https://github.com/vuejs/core"
+commit = "08f5abf9bc89594f94ac22882bcbc2ed55b1c9df"
+language = "TypeScript"
+
+[[repo]]
+name = "cargo"
+url = "https://github.com/rust-lang/cargo"
+commit = "587d7ab286a3197dbe8bbe3d0658668d20b9b096"
+language = "Rust"
+
+[[repo]]
+name = "tokio"
+url = "https://github.com/tokio-rs/tokio"
+commit = "ce685ee6916549ed7e52dbfd5430858bbdc734d3"
+language = "Rust"
+
+[[repo]]
+name = "guava"
+url = "https://github.com/google/guava"
+commit = "669a232b4e20ae6e8bc6efc62caaf2f830d56327"
+language = "Java"
+
+[[repo]]
+name = "rails"
+url = "https://github.com/rails/rails"
+commit = "718cb13a5bb2844868919cb2e713b054e7a9ca5d"
+language = "Ruby"
+
+[[repo]]
+name = "redis"
+url = "https://github.com/redis/redis"
+commit = "2138dd66df89ceea3edfaede0e3a6ae9d8436a96"
+language = "C"
+
+[[repo]]
+name = "mdn-content"
+url = "https://github.com/mdn/content"
+commit = "a64fca52b72fd03b0efd7661207d5afdd220aac3"
+language = "Markdown"

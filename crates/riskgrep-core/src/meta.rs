@@ -41,13 +41,20 @@ pub enum PostSpec {
     },
     NpyHeader {
         min_dim: u64,
+        embedding_dims: Option<Vec<u64>>,
     },
     NpzMembers {
         min_dim: u64,
+        embedding_dims: Option<Vec<u64>>,
     },
     SafetensorsHeader {
         min_dim: u64,
         name_regex: Option<String>,
+        embedding_dims: Option<Vec<u64>>,
+        exclude_name_regex: Option<String>,
+    },
+    FloatArray {
+        embedding_dims: Vec<u64>,
     },
 }
 
@@ -103,6 +110,23 @@ impl<'a> Raw<'a> {
             None => Ok(None),
             Some(MetaValue::Integer(i)) if *i >= 0 => Ok(Some(*i as u64)),
             Some(_) => Err(self.err(format_args!("`{key}` must be an integer >= 0"))),
+        }
+    }
+
+    /// A comma-separated list of positive integers (`embedding_dims`).
+    fn dims(&self, key: &str) -> Result<Option<Vec<u64>>, MetaError> {
+        let Some(s) = self.string(key)? else {
+            return Ok(None);
+        };
+        let dims: Option<Vec<u64>> = s
+            .split(',')
+            .map(|d| d.trim().parse::<u64>().ok().filter(|&n| n > 0))
+            .collect();
+        match dims {
+            Some(v) if !v.is_empty() => Ok(Some(v)),
+            _ => Err(self.err(format_args!(
+                "`{key}` must be a comma-separated list of positive integers"
+            ))),
         }
     }
 
@@ -176,13 +200,20 @@ impl RuleMeta {
             },
             "npy_header" => PostSpec::NpyHeader {
                 min_dim: raw.need(raw.uint("min_dim")?, "min_dim", name)?,
+                embedding_dims: raw.dims("embedding_dims")?,
             },
             "npz_members" => PostSpec::NpzMembers {
                 min_dim: raw.need(raw.uint("min_dim")?, "min_dim", name)?,
+                embedding_dims: raw.dims("embedding_dims")?,
             },
             "safetensors_header" => PostSpec::SafetensorsHeader {
                 min_dim: raw.need(raw.uint("min_dim")?, "min_dim", name)?,
                 name_regex: raw.string("name_regex")?,
+                embedding_dims: raw.dims("embedding_dims")?,
+                exclude_name_regex: raw.string("exclude_name_regex")?,
+            },
+            "float_array" => PostSpec::FloatArray {
+                embedding_dims: raw.need(raw.dims("embedding_dims")?, "embedding_dims", name)?,
             },
             other => return Err(raw.err(format_args!("unknown post-processor `{other}`"))),
         })

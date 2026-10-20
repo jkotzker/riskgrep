@@ -155,7 +155,29 @@ fn generic_api_key_assignment() {
     let close = line.rfind('"').unwrap();
     let ev = scan("settings.py", &content);
     assert_span(&ev, "generic_api_key", at + open..at + close);
-    assert_score(&ev, 50.0);
+    assert_score(&ev, 80.0);
+}
+
+#[test]
+fn generic_needs_a_credential_named_key() {
+    // Local change (UPSTREAM.md): containing a keyword is not enough.
+    let value = &synth::fake_secret("github_pat", 9)[4..];
+    for name in ["key_sha256", "tokenizer_name", "first_key", "public_key"] {
+        let (content, _) = embed(&format!("    {name} = \"{value}\""));
+        let ev = scan("settings.py", &content);
+        assert!(ev.is_empty(), "{name}: rules {:?}", rule_ids(&ev));
+    }
+    for name in [
+        "api_key",
+        "client_secret",
+        "db_password",
+        "authToken",
+        "SECRET_KEY",
+    ] {
+        let (content, _) = embed(&format!("    {name} = \"{value}\""));
+        let ev = scan("settings.py", &content);
+        assert_eq!(rule_ids(&ev), ["generic_api_key"], "{name}");
+    }
 }
 
 #[test]
@@ -571,7 +593,7 @@ fn samples() -> Vec<Sample> {
     }
     // gitleaks allowlists for generic-api-key: a stopword in the secret
     // (translated) and a key name allowlisted on the whole match (not
-    // translated; see UPSTREAM.md), so the second is an expected disagreement.
+    // translated; the local change also rejects that key name).
     let random = &synth::fake_secret("github_pat", 6)[4..];
     for line in [
         format!(
@@ -587,6 +609,13 @@ fn samples() -> Vec<Sample> {
             expect_hit: false,
         });
     }
+    // A key name that only contains a keyword: gitleaks reports it, the
+    // local change to generic-api-key (UPSTREAM.md) does not.
+    out.push(Sample {
+        path: "settings.py".into(),
+        content: format!("key_sha256 = \"{random}\"\n").into_bytes(),
+        expect_hit: true,
+    });
     out.push(Sample {
         path: "src/plain.rs".into(),
         content: filler.into_bytes(),
@@ -637,8 +666,10 @@ fn agreement_with_reference() {
         agree >= 0.99,
         "agreement {agree:.4} < 0.99; disagreeing rules: {disagree:?}"
     );
-    // Only the documented gap (generic-api-key's match-target allowlist, see
-    // UPSTREAM.md) may differ, so one dead or always-firing rule fails.
+    // Only documented differences may remain, so one dead or always-firing
+    // rule fails:
+    // - generic_api_key: the local change requires a credential-named key
+    //   (UPSTREAM.md "Local changes"), so `key_sha256 = "..."` is not reported.
     let expected: BTreeSet<String> = ["generic_api_key".to_string()].into();
     assert_eq!(disagree, expected, "disagreeing rules");
 }

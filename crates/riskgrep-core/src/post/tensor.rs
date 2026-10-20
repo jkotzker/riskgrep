@@ -19,6 +19,24 @@ fn is_float(dtype: &str) -> bool {
     matches!(dtype, "f2" | "f4" | "f8" | "F16" | "BF16" | "F32" | "F64")
 }
 
+/// Leading dimensions an embedding-shaped tensor may have: `[d]`, `[n, d]`,
+/// or `[a, b, d]`.
+const MAX_LEADING_DIMS: usize = 2;
+
+/// A shape qualifies when some dimension is at least `min_dim` and, with
+/// `embedding_dims`, the last dimension is one of them and at most
+/// [`MAX_LEADING_DIMS`] dimensions precede it.
+fn shape_qualifies(shape: &[u64], min_dim: u64, embedding_dims: Option<&[u64]>) -> bool {
+    if !shape.iter().any(|&d| d >= min_dim) {
+        return false;
+    }
+    match (embedding_dims, shape.split_last()) {
+        (None, _) => true,
+        (Some(dims), Some((last, lead))) => dims.contains(last) && lead.len() <= MAX_LEADING_DIMS,
+        (Some(_), None) => false,
+    }
+}
+
 fn value_after<'a>(header: &'a str, key: &str) -> Option<&'a str> {
     let pos = header.find(key)? + key.len();
     let rest = header[pos..].trim_start().strip_prefix(':')?;
@@ -42,9 +60,13 @@ fn parse_npy_header(header: &str) -> Option<(String, Vec<u64>)> {
     Some((descr.to_string(), dims))
 }
 
-/// Dtype and shape of an `.npy` buffer when it is a float array with a
-/// dimension of at least `min_dim`.
-fn npy_qualifies(data: &[u8], min_dim: u64) -> Option<(String, Vec<u64>)> {
+/// Dtype and shape of an `.npy` buffer when it is a float array whose shape
+/// qualifies (see [`shape_qualifies`]).
+fn npy_qualifies(
+    data: &[u8],
+    min_dim: u64,
+    embedding_dims: Option<&[u64]>,
+) -> Option<(String, Vec<u64>)> {
     if data.get(..6)? != NPY_MAGIC {
         return None;
     }
@@ -62,11 +84,13 @@ fn npy_qualifies(data: &[u8], min_dim: u64) -> Option<(String, Vec<u64>)> {
     let header = data.get(start..start.checked_add(len)?)?;
     let (dtype, shape) = parse_npy_header(std::str::from_utf8(header).ok()?)?;
     let kind = dtype.trim_start_matches(['<', '>', '|', '=']);
-    (is_float(kind) && shape.iter().any(|&d| d >= min_dim)).then_some((dtype, shape))
+    (is_float(kind) && shape_qualifies(&shape, min_dim, embedding_dims)).then_some((dtype, shape))
 }
 
 pub struct NpyHeader {
     pub min_dim: u64,
+    /// Require an embedding-shaped array with one of these last dimensions.
+    pub embedding_dims: Option<Vec<u64>>,
 }
 
 impl Post for NpyHeader {
@@ -75,7 +99,7 @@ impl Post for NpyHeader {
     }
 
     fn apply(&self, content: &[u8], m: Range<usize>) -> PostResult {
-        match npy_qualifies(content, self.min_dim) {
+        match npy_qualifies(content, self.min_dim, self.embedding_dims.as_deref()) {
             Some((dtype, shape)) => PostResult::KeepWithShape(
                 m,
                 ShapeFacts::Tensor {
@@ -91,6 +115,8 @@ impl Post for NpyHeader {
 
 pub struct NpzMembers {
     pub min_dim: u64,
+    /// Require an embedding-shaped member with one of these last dimensions.
+    pub embedding_dims: Option<Vec<u64>>,
 }
 
 impl Post for NpzMembers {
@@ -111,7 +137,9 @@ impl Post for NpzMembers {
             if file.take(NPZ_MEMBER_BYTES).read_to_end(&mut head).is_err() {
                 continue;
             }
-            if let Some((dtype, shape)) = npy_qualifies(&head, self.min_dim) {
+            if let Some((dtype, shape)) =
+                npy_qualifies(&head, self.min_dim, self.embedding_dims.as_deref())
+            {
                 return PostResult::KeepWithShape(
                     m,
                     ShapeFacts::Tensor {
@@ -129,6 +157,10 @@ impl Post for NpzMembers {
 pub struct SafetensorsHeader {
     pub min_dim: u64,
     pub name_regex: Option<Regex>,
+    /// Require an embedding-shaped tensor with one of these last dimensions.
+    pub embedding_dims: Option<Vec<u64>>,
+    /// Tensors whose names match are ignored (layer parameters).
+    pub exclude_name_regex: Option<Regex>,
 }
 
 impl SafetensorsHeader {
@@ -163,7 +195,15 @@ impl SafetensorsHeader {
                 .name_regex
                 .as_ref()
                 .is_none_or(|re| re.is_match(name.as_bytes()));
-            if is_float(dtype) && named && shape.iter().any(|&d| d >= self.min_dim) {
+            let excluded = self
+                .exclude_name_regex
+                .as_ref()
+                .is_some_and(|re| re.is_match(name.as_bytes()));
+            if is_float(dtype)
+                && named
+                && !excluded
+                && shape_qualifies(&shape, self.min_dim, self.embedding_dims.as_deref())
+            {
                 let better = match &best {
                     Some(ShapeFacts::Tensor { name: Some(n), .. }) => name < n,
                     _ => true,

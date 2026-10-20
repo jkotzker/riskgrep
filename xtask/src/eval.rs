@@ -1,0 +1,1761 @@
+//! `cargo xtask eval`: accuracy of the shipped rulesets.
+//!
+//! Scans a synthetic corpus (generated at run time into a temporary
+//! directory, never written to the repository) and a pinned set of public
+//! repositories with the release `riskgrep` binary, then reports recall and
+//! false positives per 1,000 files at the default thresholds. Fails when the
+//! release bar is not met or a metric is worse than `eval/baseline-metrics.json`.
+//! A passing run rewrites the baseline; `--write-baseline` rewrites it from a
+//! failing run too (the exit status still reports the failure).
+//! Output carries rule ids, paths, lines, and scores only, never file content.
+
+use riskgrep_core::config::Config;
+use riskgrep_core::synth::{self, FloatStyle, Rng};
+use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+pub const SECRET: &str = "secret";
+pub const BIOMETRIC: &str = "biometric";
+
+/// What a synthetic sample measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    /// A credential that a provider-specific (or private key) rule must find.
+    Provider,
+    /// A generic `name = "value"` credential.
+    Generic,
+    /// An embedding file or printed float array.
+    Biometric,
+    /// Ordinary content that must not be flagged.
+    Negative,
+}
+
+impl Group {
+    /// The category a positive sample must be flagged in.
+    pub fn category(self) -> Option<&'static str> {
+        match self {
+            Group::Provider | Group::Generic => Some(SECRET),
+            Group::Biometric => Some(BIOMETRIC),
+            Group::Negative => None,
+        }
+    }
+}
+
+pub struct Sample {
+    pub group: Group,
+    /// Format or negative family, e.g. `github_pat`, `npy`, `sensor_csv`.
+    pub kind: String,
+    /// File name (may include subdirectories) inside the sample's directory.
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Minimum samples per secret provider format and per biometric format.
+pub const PER_FORMAT: usize = 20;
+/// Generic credential assignments.
+pub const GENERIC: usize = 50;
+/// Minimum generated hard negatives (the hand-picked existing ones are extra).
+pub const GENERATED_NEGATIVES: usize = 200;
+/// Minimum OSS files, so a bar of one per 1,000 is measurable.
+pub const MIN_OSS_FILES: u64 = 20_000;
+
+/// `synth::fake_secret` kinds in a provider's format.
+pub const PROVIDER_KINDS: &[&str] = &[
+    "aws_access_key",
+    "github_pat",
+    "anthropic_key",
+    "pem_private_key",
+    "stripe_key",
+    "slack_bot_token",
+    "npm_token",
+    "openai_key",
+];
+
+/// Key-store file formats (binary), scored by `keystores.yar`.
+pub const KEYSTORE_KINDS: &[&str] = &["pkcs12", "der_key"];
+
+/// Generated hard-negative families.
+pub const NEGATIVE_KINDS: &[&str] = &[
+    "sensor_csv",
+    "model_safetensors",
+    "int_npy",
+    "example_key",
+    "low_entropy",
+    "uuid_list",
+    "hex_hash",
+    "base64_blob",
+    "source",
+    "prices_logs",
+];
+
+pub const BIOMETRIC_KINDS: &[&str] = &[
+    "npy",
+    "npz",
+    "safetensors_named",
+    "safetensors_unnamed",
+    "floats_python",
+    "floats_numpy",
+    "floats_json",
+];
+
+// ---- synthetic corpus --------------------------------------------------------
+
+fn sample(group: Group, kind: &str, name: String, bytes: impl Into<Vec<u8>>) -> Sample {
+    Sample {
+        group,
+        kind: kind.to_string(),
+        name,
+        bytes: bytes.into(),
+    }
+}
+
+/// The whole synthetic corpus, deterministic.
+pub fn corpus() -> Vec<Sample> {
+    let mut out = Vec::new();
+    provider_secrets(&mut out);
+    generic_secrets(&mut out);
+    biometric(&mut out);
+    negatives(&mut out);
+    existing_negatives(&mut out);
+    out
+}
+
+/// A token placed in one of several file types. Some name a keyword
+/// (`token`, `key`), some do not.
+fn embed_token(i: usize, tok: &str) -> (String, String) {
+    match i % 7 {
+        0 => (
+            ".env".into(),
+            format!("DATABASE_URL=postgres://localhost/app\nSERVICE_TOKEN={tok}\nDEBUG=false\n"),
+        ),
+        1 => (
+            "settings.py".into(),
+            format!(
+                "import os\n\nclient = Client(\n    url=\"https://api.example.com\",\n    \
+                 credential=\"{tok}\",\n    timeout=30,\n)\n"
+            ),
+        ),
+        2 => (
+            "config.yaml".into(),
+            format!("service:\n  name: billing\n  replicas: 2\n  token: {tok}\n"),
+        ),
+        3 => (
+            "config.json".into(),
+            format!("{{\n  \"name\": \"billing\",\n  \"auth\": {{\n    \"token\": \"{tok}\"\n  }}\n}}\n"),
+        ),
+        4 => (
+            "config.js".into(),
+            format!("export const config = {{\n  region: 'us-east-1',\n  key: '{tok}',\n}};\n"),
+        ),
+        5 => (
+            "deploy.sh".into(),
+            format!("#!/bin/sh\nset -e\nexport CI_SECRET=\"{tok}\"\n./release.sh \"$1\"\n"),
+        ),
+        _ => (
+            "main.rs".into(),
+            format!(
+                "fn main() {{\n    let width = 80;\n    let id = \"{tok}\";\n    \
+                 println!(\"{{}} {{}}\", width, id.len());\n}}\n"
+            ),
+        ),
+    }
+}
+
+/// A PEM block in one of several containers.
+fn embed_pem(i: usize, pem: &str) -> (String, String) {
+    match i % 4 {
+        0 => ("id_rsa".into(), format!("{pem}\n")),
+        1 => ("server.pem".into(), format!("{pem}\n")),
+        2 => {
+            let indented: String = pem.lines().map(|l| format!("    {l}\n")).collect();
+            (
+                "values.yaml".into(),
+                format!("tls:\n  enabled: true\n  key: |\n{indented}"),
+            )
+        }
+        _ => (
+            "service-account.json".into(),
+            format!(
+                "{{\n  \"type\": \"service_account\",\n  \"private_key\": \"{}\\n\",\n  \
+                 \"client_email\": \"app@example.iam.gserviceaccount.com\"\n}}\n",
+                pem.replace('\n', "\\n")
+            ),
+        ),
+    }
+}
+
+/// `prefix` then 300 random bytes.
+fn der(prefix: &[u8], seed: u64) -> Vec<u8> {
+    let mut out = prefix.to_vec();
+    let at = out.len();
+    out.resize(at + 300, 0);
+    Rng::new(seed).fill(&mut out[at..]);
+    out
+}
+
+fn provider_secrets(out: &mut Vec<Sample>) {
+    for kind in PROVIDER_KINDS {
+        for i in 0..PER_FORMAT {
+            let s = synth::fake_secret(kind, 1000 + i as u64);
+            let (name, text) = if *kind == "pem_private_key" {
+                embed_pem(i, &s)
+            } else {
+                embed_token(i, &s)
+            };
+            out.push(sample(Group::Provider, kind, name, text));
+        }
+    }
+    for i in 0..PER_FORMAT {
+        // PKCS #12: SEQUENCE with a two-byte length.
+        let name = if i % 2 == 0 {
+            "client.p12"
+        } else {
+            "client.pfx"
+        };
+        let bytes = der(&[0x30, 0x82, 0x01, 0x2c], 2000 + i as u64);
+        out.push(sample(Group::Provider, "pkcs12", name.into(), bytes));
+    }
+    // DER private keys: PKCS#1/#8 (INTEGER 0) and SEC1 EC keys (INTEGER 1).
+    let prefixes: [&[u8]; 3] = [
+        &[0x30, 0x82, 0x01, 0x2c, 0x02, 0x01, 0x00],
+        &[0x30, 0x77, 0x02, 0x01, 0x01],
+        &[0x30, 0x81, 0x87, 0x02, 0x01, 0x01],
+    ];
+    for i in 0..PER_FORMAT {
+        let name = if i % 2 == 0 { "server.der" } else { "tls.key" };
+        let bytes = der(prefixes[i % 3], 3000 + i as u64);
+        out.push(sample(Group::Provider, "der_key", name.into(), bytes));
+    }
+}
+
+/// The quoted value of a `name = "value"` line.
+fn quoted(line: &str) -> &str {
+    let open = line.find('"').expect("quoted value") + 1;
+    let close = line.rfind('"').expect("quoted value");
+    &line[open..close]
+}
+
+fn generic_secrets(out: &mut Vec<Sample>) {
+    for i in 0..GENERIC {
+        let line = synth::fake_secret("generic_api_key_assignment", 4000 + i as u64);
+        let v = quoted(&line);
+        let (name, text) = match i % 7 {
+            0 => ("settings.py".into(), format!("DEBUG = False\n{line}\n")),
+            1 => (
+                "config.yaml".into(),
+                format!("oauth:\n  client_id: billing\n  client_secret: {v}\n"),
+            ),
+            2 => (
+                "config.json".into(),
+                format!("{{\n  \"user\": \"svc\",\n  \"auth_token\": \"{v}\"\n}}\n"),
+            ),
+            3 => (
+                "app.properties".into(),
+                format!("db.user=app\ndb.password={v}\n"),
+            ),
+            4 => (
+                "config.toml".into(),
+                format!("[storage]\nbucket = \"assets\"\naccess_key = \"{v}\"\n"),
+            ),
+            5 => (
+                "client.js".into(),
+                format!("const apiKey = \"{v}\";\nfetch(url, {{ headers: {{ apiKey }} }});\n"),
+            ),
+            _ => (
+                "Settings.java".into(),
+                format!("class Settings {{\n    static final String SECRET = \"{v}\";\n}}\n"),
+            ),
+        };
+        out.push(sample(Group::Generic, "generic_api_key", name, text));
+    }
+}
+
+/// Common embedding widths (face, speaker, and text models).
+const EMBED_DIMS: &[u64] = &[128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072];
+
+fn biometric(out: &mut Vec<Sample>) {
+    let dtypes = ["<f4", "<f8", "<f2"];
+    for i in 0..PER_FORMAT {
+        let d = EMBED_DIMS[i % EMBED_DIMS.len()];
+        let rows = (i / EMBED_DIMS.len()) as u64 + 1;
+        let shape: Vec<u64> = if i % 2 == 0 { vec![rows, d] } else { vec![d] };
+        let npy = synth::npy(dtypes[i % 3], &shape);
+        out.push(sample(Group::Biometric, "npy", format!("vec_{i}.npy"), npy));
+    }
+    for i in 0..PER_FORMAT {
+        let d = EMBED_DIMS[i % EMBED_DIMS.len()];
+        let mut members = vec![("arr_0.npy", synth::npy("<f4", &[i as u64 + 1, d]))];
+        if i % 2 == 1 {
+            members.push(("ids.npy", synth::npy("<i8", &[i as u64 + 1])));
+        }
+        out.push(sample(
+            Group::Biometric,
+            "npz",
+            format!("batch_{i}.npz"),
+            synth::npz(&members),
+        ));
+    }
+    let named = [
+        "speaker_embedding",
+        "face_embedding",
+        "xvector",
+        "ecapa.out",
+        "voice",
+        "embeddings",
+    ];
+    let unnamed = ["data", "vectors", "tensor_0", "out", "v"];
+    for (kind, names) in [
+        ("safetensors_named", &named[..]),
+        ("safetensors_unnamed", &unnamed[..]),
+    ] {
+        for i in 0..PER_FORMAT {
+            let d = EMBED_DIMS[i % EMBED_DIMS.len()];
+            let rows = (i / EMBED_DIMS.len()) as u64 * 3 + 1;
+            let dtype = if i % 3 == 0 { "F16" } else { "F32" };
+            let shape = [rows, d];
+            let bytes = synth::safetensors(&[(names[i % names.len()], dtype, &shape)]);
+            out.push(sample(
+                Group::Biometric,
+                kind,
+                format!("t_{i}.safetensors"),
+                bytes,
+            ));
+        }
+    }
+    for (kind, style) in [
+        ("floats_python", FloatStyle::PythonList),
+        ("floats_numpy", FloatStyle::NumpyRepr),
+        ("floats_json", FloatStyle::JsonArray),
+    ] {
+        for i in 0..PER_FORMAT {
+            let n = EMBED_DIMS[i % EMBED_DIMS.len()] as usize;
+            let floats = synth::printed_floats(n, style);
+            let (name, text) = match style {
+                FloatStyle::PythonList => (format!("vec_{i}.py"), format!("vec_{i} = {floats}\n")),
+                FloatStyle::NumpyRepr => (
+                    format!("session_{i}.txt"),
+                    format!(">>> model.encode(sample_{i})\n{floats}\n>>> \n"),
+                ),
+                FloatStyle::JsonArray => (
+                    format!("out_{i}.json"),
+                    floats.replacen("{\n", &format!("{{\n  \"id\": {i},\n"), 1),
+                ),
+            };
+            out.push(sample(Group::Biometric, kind, name, text));
+        }
+    }
+}
+
+fn uuid(r: &mut Rng) -> String {
+    let a = r.next_u64();
+    let b = r.next_u64();
+    format!(
+        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+        a >> 32,
+        (a >> 16) & 0xffff,
+        a & 0xfff,
+        0x8000 | ((b >> 48) & 0x3fff),
+        b & 0xffff_ffff_ffff
+    )
+}
+
+fn hex(r: &mut Rng, bytes: usize) -> String {
+    let mut b = vec![0u8; bytes];
+    r.fill(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn b64(r: &mut Rng, bytes: usize) -> String {
+    const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut b = vec![0u8; bytes];
+    r.fill(&mut b);
+    b.iter().map(|x| B64[(*x & 63) as usize] as char).collect()
+}
+
+fn negatives(out: &mut Vec<Sample>) {
+    let neg = |kind: &str, name: String, bytes: Vec<u8>| sample(Group::Negative, kind, name, bytes);
+    // Sensor CSVs: plain float matrices (rows of samples, no index) and logs
+    // with a header and a timestamp or sample-index column.
+    for i in 0..20 {
+        let rows = 20 + 37 * i;
+        let cols = 2 + i % 11;
+        out.push(neg(
+            "sensor_csv",
+            format!("readings_{i}.csv"),
+            synth::csv_rows(rows, cols).into_bytes(),
+        ));
+    }
+    for i in 0..20 {
+        let mut r = Rng::new(5000 + i as u64);
+        let cols = 3 + i % 6;
+        let mut text = String::from(if i % 2 == 0 { "timestamp" } else { "sample" });
+        for c in 0..cols {
+            text.push_str(&format!(",ch{c}"));
+        }
+        text.push('\n');
+        for row in 0..(50 + 40 * i) {
+            if i % 2 == 0 {
+                text.push_str(&format!(
+                    "2026-10-19T12:{:02}:{:02}.{:03}Z",
+                    row / 3600 % 60,
+                    row / 60 % 60,
+                    row % 1000
+                ));
+            } else {
+                text.push_str(&row.to_string());
+            }
+            for _ in 0..cols {
+                text.push_str(&format!(",{:.4}", r.next_f64() * 9.81));
+            }
+            text.push('\n');
+        }
+        out.push(neg("sensor_csv", format!("imu_{i}.csv"), text.into_bytes()));
+    }
+    // Model weights: many float tensors with layer names.
+    for i in 0..25 {
+        let h = [64u64, 128, 256][i % 3];
+        let tensors: Vec<(String, &str, Vec<u64>)> = match i % 3 {
+            0 => vec![
+                ("model.embed_tokens.weight".into(), "F16", vec![512, h]),
+                (
+                    "model.layers.0.self_attn.q_proj.weight".into(),
+                    "F16",
+                    vec![h, h],
+                ),
+                (
+                    "model.layers.0.mlp.up_proj.weight".into(),
+                    "F16",
+                    vec![2 * h, h],
+                ),
+                ("model.norm.weight".into(), "F32", vec![h]),
+            ],
+            1 => vec![
+                ("conv1.weight".into(), "F32", vec![h, 3, 3, 3]),
+                ("layer1.0.bn1.running_mean".into(), "F32", vec![h]),
+                ("fc.weight".into(), "F32", vec![10, h]),
+                ("fc.bias".into(), "F32", vec![10]),
+            ],
+            _ => vec![
+                (
+                    "encoder.layer.0.attention.self.query.weight".into(),
+                    "F32",
+                    vec![h, h],
+                ),
+                (
+                    "encoder.layer.0.intermediate.dense.weight".into(),
+                    "BF16",
+                    vec![2 * h, h],
+                ),
+                ("pooler.dense.bias".into(), "F32", vec![h]),
+            ],
+        };
+        let refs: Vec<(&str, &str, &[u64])> = tensors
+            .iter()
+            .map(|(n, d, s)| (n.as_str(), *d, s.as_slice()))
+            .collect();
+        out.push(neg(
+            "model_safetensors",
+            format!("model_{i}.safetensors"),
+            synth::safetensors(&refs),
+        ));
+    }
+    let int_dtypes = ["<i4", "<i8", "|u1", "<u2", "<i2"];
+    for i in 0..20 {
+        let shape: Vec<u64> = match i % 3 {
+            0 => vec![10, 192],
+            1 => vec![64 + i as u64, 64],
+            _ => vec![1000 + i as u64],
+        };
+        out.push(neg(
+            "int_npy",
+            format!("labels_{i}.npy"),
+            synth::npy(int_dtypes[i % 5], &shape),
+        ));
+    }
+    let placeholders = [
+        "GITHUB_TOKEN=<your-github-token>\n",
+        "api_key = \"YOUR_API_KEY\"\n",
+        "password = \"${DB_PASSWORD}\"\n",
+        "secret_key: \"changeme\"\n",
+        "export OPENAI_API_KEY=\"sk-...\"\n",
+        "token = \"{{ secrets.DEPLOY_TOKEN }}\"\n",
+        "aws_secret_access_key = <secret>\n",
+        "client_secret: $CLIENT_SECRET\n",
+        "STRIPE_KEY=sk_live_REPLACE_ME\n",
+        "auth: { token: process.env.API_TOKEN }\n",
+    ];
+    for i in 0..10 {
+        let key = synth::fake_secret("aws_example_key", 6000 + i as u64);
+        let text =
+            format!("# Example configuration\naws_access_key_id = {key}\nregion = us-east-1\n");
+        out.push(neg(
+            "example_key",
+            format!("example_{i}.cfg"),
+            text.into_bytes(),
+        ));
+    }
+    for (i, p) in placeholders.iter().enumerate() {
+        let text = format!("# Copy to .env and fill in\n{p}");
+        out.push(neg(
+            "example_key",
+            format!("env_{i}.example"),
+            text.into_bytes(),
+        ));
+    }
+    let low = [
+        "api_key = \"aaaaaaaaaaaaaaaaaaaaaaaa\"",
+        "password = \"password\"",
+        "token = \"0000000000000000\"",
+        "secret = \"abababababababab\"",
+        "auth_key = \"aaaabbbbaaaabbbb\"",
+        "PASSWORD=passwordpassword",
+        "access_token: \"test-test-test-test\"",
+        "api_key: 1111111111111111",
+        "credentials = \"none\"",
+        "secret_key = \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"",
+    ];
+    for i in 0..20 {
+        let line = if i < low.len() {
+            low[i].to_string()
+        } else {
+            synth::fake_secret("low_entropy_generic", i as u64)
+        };
+        out.push(neg(
+            "low_entropy",
+            format!("defaults_{i}.py"),
+            format!("# defaults\n{line}\n").into_bytes(),
+        ));
+    }
+    for i in 0..20 {
+        let mut r = Rng::new(7000 + i as u64);
+        let n = 5 + i * 3;
+        let text: String = match i % 4 {
+            0 => {
+                let items: Vec<String> = (0..n)
+                    .map(|j| format!("  {{\"id\": \"{}\", \"name\": \"item{j}\"}}", uuid(&mut r)))
+                    .collect();
+                format!("[\n{}\n]\n", items.join(",\n"))
+            }
+            1 => (0..n)
+                .map(|_| format!("request_id: {}\n", uuid(&mut r)))
+                .collect(),
+            2 => {
+                let mut t = String::from("uuid,name\n");
+                for j in 0..n {
+                    t.push_str(&format!("{},row{j}\n", uuid(&mut r)));
+                }
+                t
+            }
+            _ => (0..n)
+                .map(|j| format!("  <Row key=\"{}\" index={{{j}}} />\n", uuid(&mut r)))
+                .collect(),
+        };
+        out.push(neg("uuid_list", format!("ids_{i}.txt"), text.into_bytes()));
+    }
+    for i in 0..20 {
+        let mut r = Rng::new(8000 + i as u64);
+        let n = 3 + i;
+        let text: String = match i % 5 {
+            0 => (0..n).map(|j| format!("{}  release-{j}.tar.gz\n", hex(&mut r, 32))).collect(),
+            1 => (0..n)
+                .map(|j| {
+                    format!(
+                        "[[package]]\nname = \"crate{j}\"\nversion = \"1.0.{j}\"\nchecksum = \"{}\"\n\n",
+                        hex(&mut r, 32)
+                    )
+                })
+                .collect(),
+            2 => (0..n).map(|_| format!("{{\"commit\": \"{}\"}}\n", hex(&mut r, 20))).collect(),
+            3 => (0..n).map(|_| format!("ETag: \"{}\"\n", hex(&mut r, 16))).collect(),
+            _ => (0..n).map(|j| format!("sha256:{} layer{j}\n", hex(&mut r, 32))).collect(),
+        };
+        out.push(neg(
+            "hex_hash",
+            format!("hashes_{i}.txt"),
+            text.into_bytes(),
+        ));
+    }
+    for i in 0..20 {
+        let mut r = Rng::new(9000 + i as u64);
+        let (name, text) = match i % 4 {
+            0 => (
+                format!("icon_{i}.css"),
+                format!(
+                    ".icon {{ background: url(data:image/png;base64,{}); }}\n",
+                    b64(&mut r, 600)
+                ),
+            ),
+            1 => {
+                let body = b64(&mut r, 800);
+                let lines: Vec<&str> = body
+                    .as_bytes()
+                    .chunks(64)
+                    .map(|c| std::str::from_utf8(c).unwrap())
+                    .collect();
+                (
+                    format!("ca_{i}.crt"),
+                    format!(
+                        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                        lines.join("\n")
+                    ),
+                )
+            }
+            2 => (
+                format!("blob_{i}.json"),
+                format!(
+                    "{{\"encoding\": \"base64\", \"content\": \"{}\"}}\n",
+                    b64(&mut r, 400)
+                ),
+            ),
+            _ => (format!("font_{i}.b64"), format!("{}\n", b64(&mut r, 2000))),
+        };
+        out.push(neg("base64_blob", name, text.into_bytes()));
+    }
+    for i in 0..20 {
+        let text = synth::source_text(4096 + 211 * i, 10_000 + i as u64);
+        out.push(neg("source", format!("module_{i}.rs"), text.into_bytes()));
+    }
+    for i in 0..15 {
+        let n = 50 + 20 * i;
+        let text: String = if i % 3 == 0 {
+            (0..n)
+                .map(|j| format!("item{j},{}.99,{}\n", j % 90 + 1, j % 7 + 1))
+                .collect()
+        } else if i % 3 == 1 {
+            (0..n)
+                .map(|j| {
+                    format!(
+                        "2026-10-19 12:00:{:02} latency=0.{:03} ok\n",
+                        j % 60,
+                        j % 1000
+                    )
+                })
+                .collect()
+        } else {
+            format!(
+                "{{\"weights\": {}}}\n",
+                synth::printed_floats(3 + i, FloatStyle::PythonList)
+            )
+        };
+        out.push(neg(
+            "prices_logs",
+            format!("table_{i}.txt"),
+            text.into_bytes(),
+        ));
+    }
+}
+
+/// The hard negatives already in the ruleset tests.
+fn existing_negatives(out: &mut Vec<Sample>) {
+    let neg =
+        |kind: &str, name: &str, bytes: Vec<u8>| sample(Group::Negative, kind, name.into(), bytes);
+    let src = |s: String| format!("fn main() {{\n    let id = \"{s}\";\n}}\n").into_bytes();
+    out.push(neg(
+        "existing_low_entropy",
+        "settings.py",
+        synth::fake_secret("low_entropy_generic", 7).into_bytes(),
+    ));
+    out.push(neg(
+        "existing_example_key",
+        "src/main.rs",
+        src(synth::fake_secret("aws_example_key", 7)),
+    ));
+    out.push(neg(
+        "existing_vendored",
+        "node_modules/dep/index.js",
+        src(synth::fake_secret("github_pat", 7)),
+    ));
+    out.push(neg(
+        "existing_der_cert",
+        "certs/server.der",
+        der(&[0x30, 0x82, 0x03, 0x1c, 0x30, 0x82, 0x02, 0x04], 6),
+    ));
+    out.push(neg(
+        "existing_not_der",
+        "keys/server.key",
+        b"not a der file\n".to_vec(),
+    ));
+    out.push(neg(
+        "existing_int_npy",
+        "a.npy",
+        synth::npy("<i8", &[10, 192]),
+    ));
+    out.push(neg(
+        "existing_model_weights",
+        "w.safetensors",
+        synth::safetensors(&[("layer.0.weight", "F32", &[768, 768])]),
+    ));
+    out.push(neg(
+        "existing_sensor_csv",
+        "sensor.csv",
+        synth::csv_rows(100, 10).into_bytes(),
+    ));
+    let prices: String = (0..300)
+        .map(|i| format!("item{i},{}.99,{}\n", i % 90 + 1, i % 7 + 1))
+        .collect();
+    out.push(neg("existing_prices", "prices.csv", prices.into_bytes()));
+    let logs: String = (0..300)
+        .map(|i| {
+            format!(
+                "2026-10-19 12:00:{:02} latency=0.{:03} ok\n",
+                i % 60,
+                i % 1000
+            )
+        })
+        .collect();
+    out.push(neg("existing_log", "app.log", logs.into_bytes()));
+    out.push(neg(
+        "existing_small_floats",
+        "small.json",
+        synth::printed_floats(5, FloatStyle::PythonList).into_bytes(),
+    ));
+}
+
+/// Ways the corpus falls short of the minimum sample counts.
+pub fn shortfalls(c: &[Sample]) -> Vec<String> {
+    let mut by: BTreeMap<(Group, &str), usize> = BTreeMap::new();
+    for s in c {
+        *by.entry((s.group, s.kind.as_str())).or_default() += 1;
+    }
+    let n = |g, k: &str| by.get(&(g, k)).copied().unwrap_or(0);
+    let mut out = Vec::new();
+    let mut need = |what: String, have: usize, min: usize| {
+        if have < min {
+            out.push(format!("{what}: {have} samples, need {min}"));
+        }
+    };
+    for k in PROVIDER_KINDS.iter().chain(KEYSTORE_KINDS) {
+        need(format!("provider {k}"), n(Group::Provider, k), PER_FORMAT);
+    }
+    need(
+        "generic_api_key".into(),
+        n(Group::Generic, "generic_api_key"),
+        GENERIC,
+    );
+    for k in BIOMETRIC_KINDS {
+        need(format!("biometric {k}"), n(Group::Biometric, k), PER_FORMAT);
+    }
+    let generated = c
+        .iter()
+        .filter(|s| s.group == Group::Negative && !s.kind.starts_with("existing_"))
+        .count();
+    need("generated negatives".into(), generated, GENERATED_NEGATIVES);
+    for k in NEGATIVE_KINDS {
+        need(format!("negative {k}"), n(Group::Negative, k), 1);
+    }
+    need(
+        "existing negatives".into(),
+        c.iter().filter(|s| s.kind.starts_with("existing_")).count(),
+        1,
+    );
+    out
+}
+
+// ---- thresholds and metrics --------------------------------------------------
+
+/// Default thresholds per category: `(label, value)`, e.g.
+/// `("claude_code.ask", 90.0)`.
+pub fn thresholds(cfg: &Config) -> BTreeMap<String, Vec<(String, f64)>> {
+    let mut out: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
+    for (cat, t) in &cfg.claude_code.thresholds {
+        let v = out.entry(cat.0.clone()).or_default();
+        if let Some(a) = t.ask {
+            v.push(("claude_code.ask".into(), a));
+        }
+        if let Some(d) = t.deny {
+            v.push(("claude_code.deny".into(), d));
+        }
+    }
+    for (cat, b) in &cfg.git.block_at {
+        out.entry(cat.0.clone())
+            .or_default()
+            .push(("git.block_at".into(), *b));
+    }
+    out
+}
+
+/// The lowest default threshold per category: a file at or above it is
+/// "flagged".
+pub fn flag_thresholds(cfg: &Config) -> BTreeMap<String, f64> {
+    thresholds(cfg)
+        .into_iter()
+        .filter_map(|(c, v)| v.iter().map(|(_, t)| *t).reduce(f64::min).map(|m| (c, m)))
+        .collect()
+}
+
+pub fn per_1000(flagged: u64, files: u64) -> f64 {
+    if files == 0 {
+        0.0
+    } else {
+        flagged as f64 * 1000.0 / files as f64
+    }
+}
+
+/// The release bar: `(metric, at least, at most)`.
+const BAR: &[(&str, f64, f64)] = &[
+    ("recall.provider", 1.0, 1.0),
+    ("recall.biometric", 1.0, 1.0),
+    ("recall.generic", 0.9, 1.0),
+    ("fp_per_1000.synthetic.secret", 0.0, 1.0),
+    ("fp_per_1000.synthetic.biometric", 0.0, 1.0),
+    ("fp_per_1000.oss.secret", 0.0, 1.0),
+    ("fp_per_1000.oss.biometric", 0.0, 1.0),
+];
+
+const EPS: f64 = 1e-9;
+
+/// Release-bar violations, one message each. `oss` says whether OSS
+/// metrics are part of this run.
+pub fn bar_failures(metrics: &BTreeMap<String, f64>, oss: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for (key, lo, hi) in BAR {
+        if !oss && key.contains(".oss.") {
+            continue;
+        }
+        match metrics.get(*key) {
+            None => out.push(format!("{key}: missing")),
+            Some(v) if *v < lo - EPS || *v > hi + EPS => {
+                out.push(format!("{key} = {v:.4}: bar is {lo}..={hi}"))
+            }
+            Some(_) => {}
+        }
+    }
+    out
+}
+
+/// Metrics worse than the baseline. `recall.*` must not fall,
+/// `fp_per_1000.*` must not rise; other keys are informational.
+pub fn regressions(
+    current: &BTreeMap<String, f64>,
+    baseline: &BTreeMap<String, f64>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (key, base) in baseline {
+        let Some(cur) = current.get(key) else {
+            continue;
+        };
+        let worse = if key.starts_with("recall.") {
+            *cur < base - EPS
+        } else if key.starts_with("fp_per_1000.") {
+            *cur > base + EPS
+        } else {
+            false
+        };
+        if worse {
+            out.push(format!("{key}: {cur:.4}, baseline {base:.4}"));
+        }
+    }
+    out
+}
+
+/// The baseline to write: `current`, keeping the old OSS metrics when this
+/// run skipped them.
+pub fn merged_baseline(
+    current: &BTreeMap<String, f64>,
+    old: &BTreeMap<String, f64>,
+    skipped_oss: bool,
+) -> BTreeMap<String, f64> {
+    let mut out = current.clone();
+    if skipped_oss {
+        for (k, v) in old {
+            if k.contains("oss") && !out.contains_key(k) {
+                out.insert(k.clone(), *v);
+            }
+        }
+    }
+    out
+}
+
+// ---- scan reports ------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScanReport {
+    pub targets: Vec<Target>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Target {
+    pub target: String,
+    pub status: String,
+    #[serde(default)]
+    pub scores: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub evidence: Vec<Ev>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Ev {
+    pub rule: String,
+    pub category: String,
+    pub weight: f64,
+    #[serde(default)]
+    pub locations: Vec<Loc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Loc {
+    pub line_start: u32,
+}
+
+impl Target {
+    pub fn content_scanned(&self) -> bool {
+        matches!(self.status.as_str(), "scanned" | "partial")
+    }
+
+    pub fn score(&self, category: &str) -> f64 {
+        self.scores.get(category).copied().unwrap_or(0.0)
+    }
+
+    /// `(rule, line)` for each positive-weight location in `category`; line
+    /// 0 for evidence without locations (path and whole-file rules).
+    pub fn hits(&self, category: &str) -> Vec<(String, u32)> {
+        let mut out = Vec::new();
+        for e in self
+            .evidence
+            .iter()
+            .filter(|e| e.category == category && e.weight > 0.0)
+        {
+            if e.locations.is_empty() {
+                out.push((e.rule.clone(), 0));
+            }
+            for l in &e.locations {
+                out.push((e.rule.clone(), l.line_start));
+            }
+        }
+        out
+    }
+}
+
+/// An OSS finding judged a true positive (or an embedding by name) and
+/// excluded from the false-positive count. `path` is relative to `eval/oss`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, serde::Serialize)]
+pub struct KnownFinding {
+    pub rule: String,
+    pub path: String,
+    pub line: u32,
+}
+
+/// True when every hit behind `t`'s `category` score is a known finding.
+pub fn excluded(t: &Target, repo: &str, category: &str, known: &BTreeSet<KnownFinding>) -> bool {
+    let path = format!("{repo}/{}", t.target);
+    let hits = t.hits(category);
+    !hits.is_empty()
+        && hits.into_iter().all(|(rule, line)| {
+            known.contains(&KnownFinding {
+                rule,
+                path: path.clone(),
+                line,
+            })
+        })
+}
+
+// ---- OSS repository list -----------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Repo {
+    pub name: String,
+    pub url: String,
+    pub commit: String,
+    pub language: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepoList {
+    repo: Vec<Repo>,
+}
+
+/// Parse and validate `oss-repos.toml`: at least 10 repositories across at
+/// least 5 languages, unique names, `https://github.com/` URLs, and full
+/// 40-hex commits.
+pub fn parse_repos(text: &str) -> Result<Vec<Repo>, String> {
+    let list: RepoList = toml::from_str(text).map_err(|e| format!("oss-repos.toml: {e}"))?;
+    let mut names = BTreeSet::new();
+    for r in &list.repo {
+        let ok_name = !r.name.is_empty()
+            && r.name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+            && !r.name.starts_with('.');
+        if !ok_name || !names.insert(r.name.as_str()) {
+            return Err(format!(
+                "oss-repos.toml: bad or duplicate name `{}`",
+                r.name
+            ));
+        }
+        if !r.url.starts_with("https://github.com/") {
+            return Err(format!(
+                "oss-repos.toml: {}: url must be https://github.com/...",
+                r.name
+            ));
+        }
+        if r.commit.len() != 40 || !r.commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "oss-repos.toml: {}: commit must be 40 hex digits",
+                r.name
+            ));
+        }
+    }
+    let langs: BTreeSet<&str> = list.repo.iter().map(|r| r.language.as_str()).collect();
+    if list.repo.len() < 10 || langs.len() < 5 {
+        return Err(format!(
+            "oss-repos.toml: need at least 10 repositories in 5 languages, have {} in {}",
+            list.repo.len(),
+            langs.len()
+        ));
+    }
+    Ok(list.repo)
+}
+
+/// The workspace root (the parent of the `xtask` crate).
+pub fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask has a parent")
+        .to_path_buf()
+}
+
+// ---- running -----------------------------------------------------------------
+
+const USAGE: &str = "usage: cargo xtask eval [--skip-oss] [--write-baseline]";
+
+/// Metric values are stored rounded, so reruns compare equal.
+fn round4(x: f64) -> f64 {
+    (x * 10_000.0).round() / 10_000.0
+}
+
+struct Ctx {
+    root: PathBuf,
+    bin: PathBuf,
+    home: PathBuf,
+    out_dir: PathBuf,
+    flags: BTreeMap<String, f64>,
+    thresholds: BTreeMap<String, Vec<(String, f64)>>,
+}
+
+fn target_dir(root: &Path) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"))
+}
+
+fn build_release(root: &Path) -> Result<PathBuf, String> {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(cargo)
+        .args(["build", "--release", "-p", "riskgrep"])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| format!("cargo build: {e}"))?;
+    if !status.success() {
+        return Err(format!("cargo build --release -p riskgrep: {status}"));
+    }
+    Ok(target_dir(root).join("release/riskgrep"))
+}
+
+/// `riskgrep scan --no-cache --format json -- ARGS` in `cwd`, with `HOME`
+/// pointing at an empty eval home (no user config, no cache). The raw
+/// report (rule ids, paths, lines, scores: no content) is kept at `save`.
+fn scan(ctx: &Ctx, cwd: &Path, args: &[String], save: &Path) -> Result<ScanReport, String> {
+    let out = Command::new(&ctx.bin)
+        .args(["scan", "--no-cache", "--format", "json", "--"])
+        .args(args)
+        .current_dir(cwd)
+        .env("HOME", &ctx.home)
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|e| format!("{}: {e}", ctx.bin.display()))?;
+    if !out.status.success() {
+        return Err(format!(
+            "riskgrep scan in {}: {}",
+            cwd.display(),
+            out.status
+        ));
+    }
+    fs::write(save, &out.stdout).map_err(|e| format!("{}: {e}", save.display()))?;
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("riskgrep report: {e}"))
+}
+
+/// `rule@line` list of the hits behind a category score.
+fn hit_list(t: &Target, category: &str) -> String {
+    t.hits(category)
+        .iter()
+        .map(|(r, l)| format!("{r}@{l}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn run(args: &[String]) -> Result<(), String> {
+    let (mut skip_oss, mut write_baseline) = (false, false);
+    for a in args {
+        match a.as_str() {
+            "--skip-oss" => skip_oss = true,
+            "--write-baseline" => write_baseline = true,
+            other => return Err(format!("unknown argument `{other}`\n{USAGE}")),
+        }
+    }
+    let root = workspace_root();
+    let bin = build_release(&root)?;
+    let tmp = tempfile::Builder::new()
+        .prefix("riskgrep-eval-")
+        .tempdir()
+        .map_err(|e| format!("temp dir: {e}"))?;
+    let home = tmp.path().join("home");
+    let cfg_dir = home.join(".config/riskgrep");
+    fs::create_dir_all(&cfg_dir).map_err(|e| e.to_string())?;
+    // Repositories are larger than the default walk limit.
+    fs::write(
+        cfg_dir.join("config.toml"),
+        "[limits]\nwalk_files = 10000000\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let out_dir = target_dir(&root).join("eval");
+    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let cfg = Config::default();
+    let ctx = Ctx {
+        bin,
+        home,
+        out_dir,
+        flags: flag_thresholds(&cfg),
+        thresholds: thresholds(&cfg),
+        root,
+    };
+    for (cat, f) in &ctx.flags {
+        let at: Vec<String> = ctx.thresholds[cat]
+            .iter()
+            .map(|(l, t)| format!("{l} {t}"))
+            .collect();
+        println!("{cat}: flagged at >= {f} ({})", at.join(", "));
+    }
+
+    let mut metrics = BTreeMap::new();
+    synthetic(&ctx, tmp.path(), &mut metrics)?;
+    if !skip_oss {
+        oss(&ctx, &mut metrics)?;
+    }
+
+    println!("\nmetrics:");
+    for (k, v) in &metrics {
+        println!("  {k:<44} {v}");
+    }
+    let json =
+        |m: &BTreeMap<String, f64>| serde_json::to_string_pretty(m).expect("metrics json") + "\n";
+    let latest = ctx.out_dir.join("metrics.json");
+    fs::write(&latest, json(&metrics)).map_err(|e| e.to_string())?;
+
+    let baseline_path = ctx.root.join("eval/baseline-metrics.json");
+    let old: BTreeMap<String, f64> = match fs::read(&baseline_path) {
+        Ok(b) => {
+            serde_json::from_slice(&b).map_err(|e| format!("{}: {e}", baseline_path.display()))?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(e) => return Err(format!("{}: {e}", baseline_path.display())),
+    };
+    let mut failures = bar_failures(&metrics, !skip_oss);
+    failures.extend(
+        regressions(&metrics, &old)
+            .into_iter()
+            .map(|r| format!("worse than baseline: {r}")),
+    );
+    let merged = merged_baseline(&metrics, &old, skip_oss);
+    if write_baseline || failures.is_empty() {
+        fs::write(&baseline_path, json(&merged)).map_err(|e| e.to_string())?;
+        println!("\nwrote {}", baseline_path.display());
+    }
+    if !failures.is_empty() {
+        println!("\nFAIL:");
+        for f in &failures {
+            println!("  {f}");
+        }
+        return Err(format!(
+            "eval failed ({} problems); metrics in {}",
+            failures.len(),
+            latest.display()
+        ));
+    }
+    println!("\nPASS: release bar met and no metric worse than the baseline");
+    Ok(())
+}
+
+#[derive(Default)]
+struct Tally {
+    files: u64,
+    /// Flagged count per threshold label (and "flag").
+    flagged: BTreeMap<String, u64>,
+}
+
+impl Tally {
+    fn add(&mut self, ctx: &Ctx, category: &str, score: f64) {
+        self.files += 1;
+        if score >= ctx.flags[category] {
+            *self.flagged.entry("flag".into()).or_default() += 1;
+        }
+        for (label, t) in &ctx.thresholds[category] {
+            if score >= *t {
+                *self.flagged.entry(label.clone()).or_default() += 1;
+            }
+        }
+    }
+
+    fn count(&self, label: &str) -> u64 {
+        self.flagged.get(label).copied().unwrap_or(0)
+    }
+
+    fn recall(&self, label: &str) -> f64 {
+        if self.files == 0 {
+            0.0
+        } else {
+            self.count(label) as f64 / self.files as f64
+        }
+    }
+}
+
+fn synthetic(ctx: &Ctx, tmp: &Path, metrics: &mut BTreeMap<String, f64>) -> Result<(), String> {
+    let samples = corpus();
+    let short = shortfalls(&samples);
+    if !short.is_empty() {
+        return Err(format!("synthetic corpus: {}", short.join("; ")));
+    }
+    let dir = tmp.join("corpus");
+    let mut dirs = Vec::with_capacity(samples.len());
+    for (i, s) in samples.iter().enumerate() {
+        let d = format!("s{i:04}");
+        let p = dir.join(&d).join(&s.name);
+        fs::create_dir_all(p.parent().expect("sample parent")).map_err(|e| e.to_string())?;
+        fs::write(&p, &s.bytes).map_err(|e| format!("{}: {e}", p.display()))?;
+        dirs.push(d);
+    }
+    let report = scan(ctx, &dir, &dirs, &ctx.out_dir.join("synthetic.json"))?;
+    let mut by_sample: BTreeMap<usize, &Target> = BTreeMap::new();
+    for t in &report.targets {
+        let idx = t
+            .target
+            .strip_prefix('s')
+            .and_then(|r| r.split('/').next())
+            .and_then(|n| n.parse::<usize>().ok())
+            .ok_or_else(|| format!("unexpected target `{}`", t.target))?;
+        by_sample.insert(idx, t);
+    }
+
+    // Positives: tallies by (group, kind) and by group.
+    let mut kinds: BTreeMap<(Group, String), Tally> = BTreeMap::new();
+    let mut groups: BTreeMap<Group, Tally> = BTreeMap::new();
+    let mut neg: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut neg_kinds: BTreeMap<(String, String), u64> = BTreeMap::new();
+    let mut neg_files = 0u64;
+    // Misses and flagged negatives by (what, kind), listed up to 3 each.
+    let mut notes: BTreeMap<(&str, String), Vec<String>> = BTreeMap::new();
+    for (i, s) in samples.iter().enumerate() {
+        let t = by_sample
+            .get(&i)
+            .ok_or_else(|| format!("sample s{i:04} ({}) missing from the report", s.kind))?;
+        if !t.content_scanned() {
+            return Err(format!(
+                "sample {} ({}) not scanned: {}",
+                t.target, s.kind, t.status
+            ));
+        }
+        match s.group.category() {
+            Some(cat) => {
+                let score = t.score(cat);
+                kinds
+                    .entry((s.group, s.kind.clone()))
+                    .or_default()
+                    .add(ctx, cat, score);
+                groups.entry(s.group).or_default().add(ctx, cat, score);
+                if score < ctx.flags[cat] {
+                    notes
+                        .entry(("miss", s.kind.clone()))
+                        .or_default()
+                        .push(format!(
+                            "{:<40} {cat}={score:.1} {}",
+                            t.target,
+                            hit_list(t, cat)
+                        ));
+                }
+            }
+            None => {
+                neg_files += 1;
+                for cat in ctx.flags.keys() {
+                    let score = t.score(cat);
+                    neg.entry(cat.clone()).or_default().add(ctx, cat, score);
+                    if score >= ctx.flags[cat] {
+                        *neg_kinds.entry((cat.clone(), s.kind.clone())).or_default() += 1;
+                        notes
+                            .entry(("flagged", s.kind.clone()))
+                            .or_default()
+                            .push(format!(
+                                "{:<40} {cat}={score:.1} {}",
+                                t.target,
+                                hit_list(t, cat)
+                            ));
+                    }
+                }
+            }
+        }
+    }
+
+    println!("\nsynthetic positives (recall)");
+    let labels = |cat: &str| -> Vec<String> {
+        std::iter::once("flag".to_string())
+            .chain(ctx.thresholds[cat].iter().map(|(l, _)| l.clone()))
+            .collect()
+    };
+    for ((g, kind), t) in &kinds {
+        let cat = g.category().expect("positive");
+        let cols: Vec<String> = labels(cat)
+            .iter()
+            .map(|l| format!("{l} {:.3}", t.recall(l)))
+            .collect();
+        println!(
+            "  {:<9} {kind:<20} n={:<3} {}",
+            format!("{g:?}"),
+            t.files,
+            cols.join("  ")
+        );
+    }
+    for (g, t) in &groups {
+        let cat = g.category().expect("positive");
+        let cols: Vec<String> = labels(cat)
+            .iter()
+            .map(|l| format!("{l} {:.3}", t.recall(l)))
+            .collect();
+        println!(
+            "  {:<9} {:<20} n={:<3} {}",
+            format!("{g:?}"),
+            "(all)",
+            t.files,
+            cols.join("  ")
+        );
+    }
+    println!("\nsynthetic hard negatives: {neg_files} files (false positives per 1,000)");
+    for (cat, t) in &neg {
+        let cols: Vec<String> = labels(cat)
+            .iter()
+            .map(|l| format!("{l} {} ({:.1})", t.count(l), per_1000(t.count(l), t.files)))
+            .collect();
+        println!("  {cat:<10} {}", cols.join("  "));
+    }
+    for ((cat, kind), n) in &neg_kinds {
+        println!("  {cat:<10} {kind:<24} {n} flagged");
+    }
+    if !notes.is_empty() {
+        println!();
+        for ((what, kind), list) in &notes {
+            for n in list.iter().take(3) {
+                println!("  {what:<8} {kind:<20} {n}");
+            }
+            if list.len() > 3 {
+                println!("  {what:<8} {kind:<20} ... and {} more", list.len() - 3);
+            }
+        }
+    }
+
+    for ((g, kind), t) in &kinds {
+        let key = match g {
+            Group::Provider => format!("recall.provider.{kind}"),
+            Group::Biometric => format!("recall.biometric.{kind}"),
+            _ => continue,
+        };
+        metrics.insert(key, round4(t.recall("flag")));
+    }
+    for (g, t) in &groups {
+        let key = format!("recall.{}", format!("{g:?}").to_ascii_lowercase());
+        metrics.insert(key, round4(t.recall("flag")));
+    }
+    for (cat, t) in &neg {
+        metrics.insert(
+            format!("fp_per_1000.synthetic.{cat}"),
+            round4(per_1000(t.count("flag"), t.files)),
+        );
+    }
+    metrics.insert(
+        "files.synthetic.positive".into(),
+        groups.values().map(|t| t.files).sum::<u64>() as f64,
+    );
+    metrics.insert("files.synthetic.negative".into(), neg_files as f64);
+    Ok(())
+}
+
+/// Run git in `dir` with hooks and LFS downloads disabled.
+fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "advice.detachedHead=false",
+        ])
+        .args(args)
+        .env("GIT_LFS_SKIP_SMUDGE", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {} in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// A clean shallow checkout of `r` at its pinned commit under `oss`.
+fn ensure_clone(oss: &Path, r: &Repo) -> Result<PathBuf, String> {
+    let dir = oss.join(&r.name);
+    if dir.join(".git").exists() {
+        if git(&dir, &["rev-parse", "HEAD"]).ok().as_deref() == Some(r.commit.as_str()) {
+            if !git(&dir, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
+                return Err(format!("{}: checkout has local changes", dir.display()));
+            }
+            return Ok(dir);
+        }
+    } else {
+        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        git(&dir, &["init", "-q"])?;
+    }
+    println!("fetching {} at {}", r.url, r.commit);
+    git(
+        &dir,
+        &[
+            "fetch",
+            "-q",
+            "--depth",
+            "1",
+            "--no-tags",
+            &r.url,
+            &r.commit,
+        ],
+    )?;
+    git(
+        &dir,
+        &["checkout", "-q", "--detach", "--force", "FETCH_HEAD"],
+    )?;
+    let head = git(&dir, &["rev-parse", "HEAD"])?;
+    if head != r.commit {
+        return Err(format!("{}: HEAD is {head}, expected {}", r.name, r.commit));
+    }
+    Ok(dir)
+}
+
+fn oss(ctx: &Ctx, metrics: &mut BTreeMap<String, f64>) -> Result<(), String> {
+    let list_path = ctx.root.join("eval/oss-repos.toml");
+    let repos = parse_repos(
+        &fs::read_to_string(&list_path).map_err(|e| format!("{}: {e}", list_path.display()))?,
+    )?;
+    let known_path = ctx.root.join("eval/oss-known-findings.json");
+    let known: BTreeSet<KnownFinding> = match fs::read(&known_path) {
+        Ok(b) => serde_json::from_slice::<Vec<KnownFinding>>(&b)
+            .map_err(|e| format!("{}: {e}", known_path.display()))?
+            .into_iter()
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+        Err(e) => return Err(format!("{}: {e}", known_path.display())),
+    };
+    let oss_dir = ctx.root.join("eval/oss");
+    let mut used: BTreeSet<KnownFinding> = BTreeSet::new();
+    let mut total: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut excluded_n: BTreeMap<String, u64> = BTreeMap::new();
+    let mut flagged_lines = Vec::new();
+    let mut files = 0u64;
+    println!("\nOSS repositories");
+    for r in &repos {
+        let dir = ensure_clone(&oss_dir, r)?;
+        let mut entries: Vec<String> = Vec::new();
+        for e in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+            let e = e.map_err(|e| e.to_string())?;
+            let ft = e.file_type().map_err(|e| e.to_string())?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name != ".git" && !ft.is_symlink() {
+                entries.push(name);
+            }
+        }
+        entries.sort();
+        let report = scan(
+            ctx,
+            &dir,
+            &entries,
+            &ctx.out_dir.join(format!("oss-{}.json", r.name)),
+        )?;
+        let (mut scanned, mut other) = (0u64, 0u64);
+        let mut repo_flags: BTreeMap<String, u64> = BTreeMap::new();
+        for t in &report.targets {
+            if !t.content_scanned() {
+                other += 1;
+                continue;
+            }
+            scanned += 1;
+            for cat in ctx.flags.keys() {
+                let score = t.score(cat);
+                if score >= ctx.flags[cat] {
+                    let path = format!("{}/{}", r.name, t.target);
+                    if excluded(t, &r.name, cat, &known) {
+                        *excluded_n.entry(cat.clone()).or_default() += 1;
+                        for (rule, line) in t.hits(cat) {
+                            used.insert(KnownFinding {
+                                rule,
+                                path: path.clone(),
+                                line,
+                            });
+                        }
+                        // Counted as a file, not as a false positive.
+                        total.entry(cat.clone()).or_default().add(ctx, cat, 0.0);
+                        continue;
+                    }
+                    *repo_flags.entry(cat.clone()).or_default() += 1;
+                    flagged_lines.push(format!(
+                        "  {cat:<10} {score:>5.1}  {path}  {}",
+                        hit_list(t, cat)
+                    ));
+                }
+                total.entry(cat.clone()).or_default().add(ctx, cat, score);
+            }
+        }
+        files += scanned;
+        let flags: Vec<String> = repo_flags.iter().map(|(c, n)| format!("{c} {n}")).collect();
+        println!(
+            "  {:<16} {:<10} {:>6} files scanned, {:>5} not scanned  flagged: {}",
+            r.name,
+            r.language,
+            scanned,
+            other,
+            if flags.is_empty() {
+                "none".into()
+            } else {
+                flags.join(", ")
+            }
+        );
+    }
+    println!("\nOSS: {files} files (false positives per 1,000, known findings excluded)");
+    for (cat, t) in &total {
+        let mut labels = vec!["flag".to_string()];
+        labels.extend(ctx.thresholds[cat].iter().map(|(l, _)| l.clone()));
+        let cols: Vec<String> = labels
+            .iter()
+            .map(|l| format!("{l} {} ({:.2})", t.count(l), per_1000(t.count(l), t.files)))
+            .collect();
+        println!(
+            "  {cat:<10} {}  known excluded {}",
+            cols.join("  "),
+            excluded_n.get(cat).copied().unwrap_or(0)
+        );
+        metrics.insert(
+            format!("fp_per_1000.oss.{cat}"),
+            round4(per_1000(t.count("flag"), t.files)),
+        );
+    }
+    if !flagged_lines.is_empty() {
+        println!("\nOSS flagged files (category, score, path, rule@line):");
+        for l in &flagged_lines {
+            println!("{l}");
+        }
+    }
+    let stale: Vec<&KnownFinding> = known.difference(&used).collect();
+    for k in &stale {
+        println!(
+            "  note: known finding not seen: {} {}@{}",
+            k.path, k.rule, k.line
+        );
+    }
+    metrics.insert("files.oss".into(), files as f64);
+    if files < MIN_OSS_FILES {
+        return Err(format!(
+            "OSS corpus has {files} scanned files; the bar needs at least {MIN_OSS_FILES}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn corpus_meets_the_minimums() {
+        assert_eq!(shortfalls(&corpus()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn corpus_is_deterministic_and_distinct() {
+        let (a, b) = (corpus(), corpus());
+        assert_eq!(a.len(), b.len());
+        assert!(a.iter().zip(&b).all(|(x, y)| x.bytes == y.bytes));
+        // Positives of one format differ from each other.
+        let mut seen = BTreeSet::new();
+        for s in a.iter().filter(|s| s.group != Group::Negative) {
+            assert!(seen.insert(&s.bytes), "duplicate {} sample", s.kind);
+        }
+    }
+
+    #[test]
+    fn positive_names_do_not_lean_on_path_rules() {
+        let path_rule =
+            regex::Regex::new("(?i)(voiceprint|embedding|speaker|enroll|faceprint)").unwrap();
+        for s in corpus().iter().filter(|s| s.group != Group::Negative) {
+            assert!(
+                !path_rule.is_match(&s.name),
+                "{} sample is path-named",
+                s.kind
+            );
+        }
+    }
+
+    #[test]
+    fn default_thresholds() {
+        let cfg = Config::default();
+        let f = flag_thresholds(&cfg);
+        assert_eq!(f[SECRET], 80.0);
+        assert_eq!(f[BIOMETRIC], 50.0);
+        let t = thresholds(&cfg);
+        assert!(t[SECRET].contains(&("claude_code.ask".into(), 90.0)));
+        assert!(t[SECRET].contains(&("git.block_at".into(), 80.0)));
+        assert!(t[BIOMETRIC].contains(&("claude_code.deny".into(), 75.0)));
+    }
+
+    #[test]
+    fn rate_per_1000() {
+        assert_eq!(per_1000(1, 2000), 0.5);
+        assert_eq!(per_1000(0, 0), 0.0);
+    }
+
+    #[test]
+    fn bar() {
+        let good = m(&[
+            ("recall.provider", 1.0),
+            ("recall.generic", 0.9),
+            ("recall.biometric", 1.0),
+            ("fp_per_1000.synthetic.secret", 0.0),
+            ("fp_per_1000.synthetic.biometric", 1.0),
+            ("fp_per_1000.oss.secret", 0.9),
+            ("fp_per_1000.oss.biometric", 0.0),
+        ]);
+        assert!(bar_failures(&good, true).is_empty());
+        let mut bad = good.clone();
+        bad.insert("recall.generic".into(), 0.89);
+        bad.insert("recall.biometric".into(), 0.99);
+        bad.insert("fp_per_1000.oss.secret".into(), 1.1);
+        assert_eq!(bar_failures(&bad, true).len(), 3);
+        // OSS metrics are required only when OSS ran.
+        let mut no_oss = good.clone();
+        no_oss.retain(|k, _| !k.contains(".oss."));
+        assert!(bar_failures(&no_oss, false).is_empty());
+        assert_eq!(bar_failures(&no_oss, true).len(), 2);
+    }
+
+    #[test]
+    fn regressions_by_direction() {
+        let base = m(&[
+            ("recall.generic", 0.9),
+            ("fp_per_1000.oss.secret", 0.5),
+            ("files.oss", 30000.0),
+        ]);
+        assert!(regressions(&base, &base).is_empty());
+        let better = m(&[
+            ("recall.generic", 0.95),
+            ("fp_per_1000.oss.secret", 0.1),
+            ("files.oss", 1.0),
+        ]);
+        assert!(regressions(&better, &base).is_empty());
+        let worse = m(&[("recall.generic", 0.8), ("fp_per_1000.oss.secret", 0.6)]);
+        assert_eq!(regressions(&worse, &base).len(), 2);
+    }
+
+    #[test]
+    fn skipped_oss_keeps_old_oss_metrics() {
+        let old = m(&[("fp_per_1000.oss.secret", 0.5), ("recall.generic", 0.9)]);
+        let cur = m(&[("recall.generic", 0.95)]);
+        let out = merged_baseline(&cur, &old, true);
+        assert_eq!(out["fp_per_1000.oss.secret"], 0.5);
+        assert_eq!(out["recall.generic"], 0.95);
+        assert!(!merged_baseline(&cur, &old, false).contains_key("fp_per_1000.oss.secret"));
+    }
+
+    fn target(evidence: Vec<Ev>) -> Target {
+        Target {
+            target: "src/a.py".into(),
+            status: "scanned".into(),
+            scores: BTreeMap::from([(SECRET.into(), 95.0)]),
+            evidence,
+        }
+    }
+
+    fn ev(rule: &str, cat: &str, weight: f64, lines: &[u32]) -> Ev {
+        Ev {
+            rule: rule.into(),
+            category: cat.into(),
+            weight,
+            locations: lines.iter().map(|&l| Loc { line_start: l }).collect(),
+        }
+    }
+
+    #[test]
+    fn known_findings_exclude_only_fully_known_targets() {
+        let t = target(vec![
+            ev("github_pat", SECRET, 95.0, &[3]),
+            ev("generic_api_key", SECRET, 50.0, &[9]),
+            ev("path_biometric_name", BIOMETRIC, 30.0, &[]),
+        ]);
+        assert_eq!(
+            t.hits(SECRET),
+            vec![("github_pat".into(), 3), ("generic_api_key".into(), 9)]
+        );
+        assert_eq!(t.hits(BIOMETRIC), vec![("path_biometric_name".into(), 0)]);
+        let k = |rule: &str, line| KnownFinding {
+            rule: rule.into(),
+            path: "r/src/a.py".into(),
+            line,
+        };
+        let one = BTreeSet::from([k("github_pat", 3)]);
+        assert!(!excluded(&t, "r", SECRET, &one));
+        let both = BTreeSet::from([k("github_pat", 3), k("generic_api_key", 9)]);
+        assert!(excluded(&t, "r", SECRET, &both));
+        assert!(!excluded(&t, "other", SECRET, &both));
+    }
+
+    fn repo_toml(n: usize, langs: usize) -> String {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "[[repo]]\nname = \"r{i}\"\nurl = \"https://github.com/o/r{i}\"\n\
+                     commit = \"{}\"\nlanguage = \"L{}\"\n",
+                    "a".repeat(40),
+                    i % langs
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn repo_list_validation() {
+        assert_eq!(parse_repos(&repo_toml(10, 5)).unwrap().len(), 10);
+        assert!(parse_repos(&repo_toml(9, 5)).is_err());
+        assert!(parse_repos(&repo_toml(10, 4)).is_err());
+        let short = repo_toml(10, 5).replacen(&"a".repeat(40), "abc", 1);
+        assert!(parse_repos(&short).is_err());
+        let dup = repo_toml(10, 5).replace("name = \"r1\"", "name = \"r0\"");
+        assert!(parse_repos(&dup).is_err());
+        let http = repo_toml(10, 5).replacen("https://github.com", "http://example.com", 1);
+        assert!(parse_repos(&http).is_err());
+    }
+
+    #[test]
+    fn shipped_repo_list_is_valid() {
+        let text = std::fs::read_to_string(workspace_root().join("eval/oss-repos.toml")).unwrap();
+        parse_repos(&text).unwrap();
+    }
+}

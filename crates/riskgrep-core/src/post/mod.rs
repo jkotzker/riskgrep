@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 pub use entropy::Entropy;
-pub use floats::FloatRun;
+pub use floats::{float_arrays, FloatArray, FloatRun};
 pub use span::{AllowRegex, Span};
 pub use tensor::{NpyHeader, NpzMembers, SafetensorsHeader};
 pub use words::Stopwords;
@@ -73,17 +73,39 @@ pub fn build(
         PostSpec::FloatRun { min_floats } => Box::new(FloatRun {
             min_floats: *min_floats,
         }),
-        PostSpec::NpyHeader { min_dim } => Box::new(NpyHeader { min_dim: *min_dim }),
-        PostSpec::NpzMembers { min_dim } => Box::new(NpzMembers { min_dim: *min_dim }),
+        PostSpec::NpyHeader {
+            min_dim,
+            embedding_dims,
+        } => Box::new(NpyHeader {
+            min_dim: *min_dim,
+            embedding_dims: embedding_dims.clone(),
+        }),
+        PostSpec::NpzMembers {
+            min_dim,
+            embedding_dims,
+        } => Box::new(NpzMembers {
+            min_dim: *min_dim,
+            embedding_dims: embedding_dims.clone(),
+        }),
         PostSpec::SafetensorsHeader {
             min_dim,
             name_regex,
+            embedding_dims,
+            exclude_name_regex,
         } => Box::new(SafetensorsHeader {
             min_dim: *min_dim,
             name_regex: match name_regex {
                 Some(s) => Some(re("name_regex", s)?),
                 None => None,
             },
+            embedding_dims: embedding_dims.clone(),
+            exclude_name_regex: match exclude_name_regex {
+                Some(s) => Some(re("exclude_name_regex", s)?),
+                None => None,
+            },
+        }),
+        PostSpec::FloatArray { embedding_dims } => Box::new(FloatArray {
+            embedding_dims: embedding_dims.clone(),
         }),
     })
 }

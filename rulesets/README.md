@@ -28,9 +28,12 @@ Post-processors and their arguments:
 | `stopwords` | `stopwords` (required): list name; drops matches containing a listed word |
 | `allow_regex` | `allow_regex` (required): drops matches the regex accepts |
 | `float_run` | `min_floats` (required): finds maximal runs of at least that many printed floats (separators: commas, whitespace, brackets) in one linear pass. It supplies the evidence ranges itself, so the rule's patterns (any name) are only a cheap trigger |
-| `npy_header` | `min_dim` (required): `.npy` float array with a dimension >= `min_dim` |
-| `npz_members` | `min_dim` (required): `.npz` with such a float member |
-| `safetensors_header` | `min_dim` (required), `name_regex` (optional): float tensor with such a dimension and, if given, a matching name |
+| `float_array` | `embedding_dims` (required): finds single bracketed arrays (`[...]`, also inside `array([...])` and JSON) holding only floats separated by commas or whitespace, whose element count is in `embedding_dims`; each innermost row of a nested array is judged on its own. Supplies its own evidence ranges, like `float_run` |
+| `npy_header` | `min_dim` (required), `embedding_dims` (optional): `.npy` float array with a dimension >= `min_dim`; with `embedding_dims`, also embedding-shaped (below) |
+| `npz_members` | `min_dim` (required), `embedding_dims` (optional): `.npz` with such a float member |
+| `safetensors_header` | `min_dim` (required), `name_regex`, `embedding_dims`, `exclude_name_regex` (optional): float tensor with such a dimension and, if given, a name matching `name_regex`, an embedding shape, and a name not matching `exclude_name_regex` |
+
+`embedding_dims` is a comma-separated list of widths, e.g. `"128,192,256,512"`. A tensor is embedding-shaped when its last dimension is in the list and at most two dimensions precede it (`[d]`, `[n, d]`, `[a, b, d]`).
 
 ## Anchors
 

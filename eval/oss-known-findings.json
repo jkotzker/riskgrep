@@ -1,0 +1,72 @@
+[
+  {
+    "rule": "private_key",
+    "path": "mdn-content/files/en-us/web/api/subtlecrypto/exportkey/index.md",
+    "line": 129
+  },
+  {
+    "rule": "private_key",
+    "path": "mdn-content/files/en-us/web/api/subtlecrypto/importkey/index.md",
+    "line": 109
+  },
+  {
+    "rule": "private_key",
+    "path": "prometheus/scrape/testdata/ca.key",
+    "line": 1
+  },
+  {
+    "rule": "private_key",
+    "path": "prometheus/scrape/testdata/client.key",
+    "line": 1
+  },
+  {
+    "rule": "private_key",
+    "path": "prometheus/scrape/testdata/server.key",
+    "line": 1
+  },
+  {
+    "rule": "private_key",
+    "path": "prometheus/scrape/testdata/servername.key",
+    "line": 1
+  },
+  {
+    "rule": "private_key",
+    "path": "terraform/internal/backend/remote-state/http/testdata/certs/ca.key",
+    "line": 1
+  },
+  {
+    "rule": "private_key",
+    "path": "terraform/internal/backend/remote-state/http/testdata/certs/client.key",
+    "line": 1
+  },
+  {
+    "rule": "private_key",
+    "path": "terraform/internal/backend/remote-state/http/testdata/certs/server.key",
+    "line": 1
+  },
+  {
+    "rule": "private_key",
+    "path": "terraform/internal/communicator/ssh/communicator_test.go",
+    "line": 33
+  },
+  {
+    "rule": "private_key",
+    "path": "terraform/internal/lang/funcs/crypto_test.go",
+    "line": 687
+  },
+  {
+    "rule": "private_key",
+    "path": "terraform/internal/lang/functions_test.go",
+    "line": 1416
+  },
+  {
+    "rule": "private_key",
+    "path": "terraform/internal/pluginshared/testdata/sample.private.key",
+    "line": 1
+  },
+  {
+    "rule": "private_key",
+    "path": "terraform/internal/releaseauth/testdata/sample.private.key",
+    "line": 1
+  }
+]

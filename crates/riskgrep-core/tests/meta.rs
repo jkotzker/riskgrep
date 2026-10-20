@@ -42,14 +42,63 @@ name_regex = "weight$""#,
                 list: "common".into()
             },
             PostSpec::AllowRegex { regex: "^x".into() },
-            PostSpec::NpyHeader { min_dim: 128 },
-            PostSpec::NpzMembers { min_dim: 128 },
+            PostSpec::NpyHeader {
+                min_dim: 128,
+                embedding_dims: None
+            },
+            PostSpec::NpzMembers {
+                min_dim: 128,
+                embedding_dims: None
+            },
             PostSpec::SafetensorsHeader {
                 min_dim: 128,
-                name_regex: Some("weight$".into())
+                name_regex: Some("weight$".into()),
+                embedding_dims: None,
+                exclude_name_regex: None,
             },
         ]
     );
+}
+
+#[test]
+fn meta_embedding_keys() {
+    let m = parse(
+        r#"category = "biometric"
+weight = 70
+post = "npy_header, safetensors_header, float_array"
+min_dim = 64
+embedding_dims = "128, 192,256"
+exclude_name_regex = "bias$""#,
+    )
+    .unwrap();
+    let dims = Some(vec![128, 192, 256]);
+    assert_eq!(
+        m.post,
+        vec![
+            PostSpec::NpyHeader {
+                min_dim: 64,
+                embedding_dims: dims.clone()
+            },
+            PostSpec::SafetensorsHeader {
+                min_dim: 64,
+                name_regex: None,
+                embedding_dims: dims,
+                exclude_name_regex: Some("bias$".into()),
+            },
+            PostSpec::FloatArray {
+                embedding_dims: vec![128, 192, 256]
+            },
+        ]
+    );
+    for bad in ["\"128,x\"", "\"\"", "\" , \"", "5"] {
+        let e = parse(&format!(
+            "category = \"b\"\nweight = 1\npost = \"npy_header\"\nmin_dim = 1\nembedding_dims = {bad}"
+        ))
+        .unwrap_err();
+        assert!(e.0.contains("embedding_dims"), "{bad}: {e}");
+    }
+    let e = parse("category = \"b\"\nweight = 1\npost = \"float_array\"").unwrap_err();
+    assert!(e.0.contains("embedding_dims"), "{e}");
 }
 
 #[test]

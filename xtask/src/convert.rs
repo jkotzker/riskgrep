@@ -33,6 +33,26 @@ const MIN_PREFIX: usize = 3;
 /// pair at the key-store weight.
 const FAMILIES: &[(&str, &str, u32)] = &[("pkcs12-file", "pkcs12", 90)];
 
+/// A local change to one upstream rule: its regex has `find` replaced by
+/// `replace` (exactly once; an upstream regex without `find` is an error, so
+/// a changed upstream rule gets reviewed), and its weight is set.
+pub struct LocalChange {
+    pub id: &'static str,
+    pub find: &'static str,
+    pub replace: &'static str,
+    pub weight: u32,
+    pub why: &'static str,
+}
+
+/// Local changes, measured by `cargo xtask eval` (see `eval/README.md`).
+pub const LOCAL_CHANGES: &[LocalChange] = &[LocalChange {
+    id: "generic-api-key",
+    find: r"(?:access|auth|(?-i:[Aa]pi|API)|credential|creds|key|passw(?:or)?d|secret|token)(?:[ \t\w.-]{0,20})",
+    replace: r"(?:secret|passw(?:or)?d|token|credentials?|creds|auth|(?:api|access|private|secret|auth|client|encryption|signing)[_.-]?key)",
+    weight: 80,
+    why: "the key name must end in a credential noun (`password`, `token`, `api_key`, ...), not merely contain a keyword (`tokenizer`, `key_sha256`, `first_key`); with that, a hit is flagged",
+}];
+
 const GITLEAKS_LICENSE: &str = "MIT License
 
 Copyright (c) 2019 Zachary Rice
@@ -285,6 +305,27 @@ struct Allowlist {
     stopwords: Vec<String>,
     #[serde(default)]
     commits: Vec<String>,
+}
+
+/// Applies [`LOCAL_CHANGES`] to the rules' regexes.
+fn apply_local_changes(cfg: &mut Config) -> Result<(), String> {
+    for c in LOCAL_CHANGES {
+        let Some(r) = cfg.rules.iter_mut().find(|r| r.id == c.id) else {
+            continue;
+        };
+        let re = r
+            .regex
+            .as_mut()
+            .ok_or(format!("local change: {} has no regex", c.id))?;
+        if re.matches(c.find).count() != 1 {
+            return Err(format!(
+                "local change for `{}` no longer applies: review it against the upstream regex",
+                c.id
+            ));
+        }
+        *re = re.replacen(c.find, c.replace, 1);
+    }
+    Ok(())
 }
 
 /// Applies [`go_to_rust`] to every regex in the configuration.
@@ -595,6 +636,7 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
     let text = std::str::from_utf8(config).map_err(|e| format!("config is not UTF-8: {e}"))?;
     let mut cfg: Config = toml::from_str(text).map_err(|e| format!("gitleaks config: {e}"))?;
     normalise(&mut cfg);
+    apply_local_changes(&mut cfg)?;
     let sha = Sha256::digest(config)
         .iter()
         .fold(String::new(), |mut s, b| {
@@ -710,6 +752,8 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
             Class::Contextual
         };
         classes.push((class, r.id.clone()));
+        let local = LOCAL_CHANGES.iter().find(|c| c.id == r.id);
+        let weight = local.map_or(class.weight(), |c| c.weight);
 
         // Post-processor arguments that do not depend on the emitted regex.
         let entropy = r.entropy.filter(|e| *e != 0.0);
@@ -748,10 +792,8 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
         }
 
         let render = |emitted: Option<&str>| -> Result<String, String> {
-            let mut meta: Vec<String> = vec![
-                "category = \"secret\"".into(),
-                format!("weight = {}", class.weight()),
-            ];
+            let mut meta: Vec<String> =
+                vec!["category = \"secret\"".into(), format!("weight = {weight}")];
             if let Some((_, fam, cap)) = FAMILIES.iter().find(|(id, _, _)| *id == r.id) {
                 meta.push(format!("family = {}", yara_str(fam)));
                 meta.push(format!("family_cap = {cap}"));
@@ -805,7 +847,11 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
             }
 
             let mut b = String::new();
-            writeln!(b, "\n// {}: {} ({})", r.id, class.label(), class.weight()).unwrap();
+            let what = match local {
+                Some(_) => format!("{}, local change", class.label()),
+                None => class.label().to_string(),
+            };
+            writeln!(b, "\n// {}: {what} ({weight})", r.id).unwrap();
             writeln!(b, "rule {ident} {{\n  meta:").unwrap();
             for m in &meta {
                 writeln!(b, "    {m}").unwrap();
@@ -935,6 +981,35 @@ fn upstream_md(
          `pkcs12-file` is in family `pkcs12` with cap 90, shared with `pkcs12_keystore` in `keystores.yar`.\n"
     )
     .unwrap();
+
+    writeln!(s, "## Local changes\n").unwrap();
+    let applied: Vec<&LocalChange> = LOCAL_CHANGES
+        .iter()
+        .filter(|c| cfg.rules.iter().any(|r| r.id == c.id))
+        .collect();
+    if applied.is_empty() {
+        writeln!(s, "None.\n").unwrap();
+    } else {
+        writeln!(
+            s,
+            "Applied by the converter (`LOCAL_CHANGES` in `xtask/src/convert.rs`) before translation; the weight replaces the class weight above.\n\n\
+             | Rule | Weight | Change | Why |\n|---|---|---|---|"
+        )
+        .unwrap();
+        for c in applied {
+            writeln!(
+                s,
+                "| `{}` | {} | `{}` replaced by `{}` | {} |",
+                c.id,
+                c.weight,
+                c.find.replace('|', "\\|"),
+                c.replace.replace('|', "\\|"),
+                c.why
+            )
+            .unwrap();
+        }
+        writeln!(s).unwrap();
+    }
 
     writeln!(s, "## Not translated\n").unwrap();
     if skipped.is_empty() {

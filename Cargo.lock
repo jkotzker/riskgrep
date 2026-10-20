@@ -2543,6 +2543,7 @@ dependencies = [
  "regex-syntax",
  "riskgrep-core",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "toml",

@@ -41,6 +41,14 @@ cargo xtask convert-gitleaks --config xtask/upstream/gitleaks.toml --tag v8.30.1
 
 A rule is "fixed provider prefix" when every match of its secret starts with a literal of at least 3 bytes (for example `ghp_`). `private-key` and `pkcs12-file` are private keys; ids starting `generic` are generic; the rest are "provider context" (a provider name near a value). `pkcs12-file` is in family `pkcs12` with cap 90, shared with `pkcs12_keystore` in `keystores.yar`.
 
+## Local changes
+
+Applied by the converter (`LOCAL_CHANGES` in `xtask/src/convert.rs`) before translation; the weight replaces the class weight above.
+
+| Rule | Weight | Change | Why |
+|---|---|---|---|
+| `generic-api-key` | 80 | `(?:access\|auth\|(?-i:[Aa]pi\|API)\|credential\|creds\|key\|passw(?:or)?d\|secret\|token)(?:[ \t\w.-]{0,20})` replaced by `(?:secret\|passw(?:or)?d\|token\|credentials?\|creds\|auth\|(?:api\|access\|private\|secret\|auth\|client\|encryption\|signing)[_.-]?key)` | the key name must end in a credential noun (`password`, `token`, `api_key`, ...), not merely contain a keyword (`tokenizer`, `key_sha256`, `first_key`); with that, a hit is flagged |
+
 ## Not translated
 
 | Rule | What |

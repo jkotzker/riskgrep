@@ -7,16 +7,30 @@ path = "VoicePrint/notes.txt"
 expect = 30
 
 [[case]]
-rule = "npy_float_tensor"
+# Embedding-shaped: the float rule fires too, the family caps both at 70.
+rule = "npy_embedding_tensor"
 synth = "npy:<f4:10x192"
 path = "a.npy"
 expect = 70
 
 [[case]]
-rule = "npz_float_tensor"
+# A float array that is not embedding-shaped (last dimension 7).
+rule = "npy_float_tensor"
+synth = "npy:<f8:500x7"
+path = "a.npy"
+expect = 30
+
+[[case]]
+rule = "npz_embedding_tensor"
 synth = "npz:<f4:4x256"
 path = "a.npz"
 expect = 70
+
+[[case]]
+rule = "npz_float_tensor"
+synth = "npz:<f8:500x7"
+path = "a.npz"
+expect = 30
 
 [[case]]
 rule = "safetensors_named_embedding"
@@ -25,26 +39,48 @@ path = "model.safetensors"
 expect = 85
 
 [[case]]
+# Embedding-shaped without an embedding name: 70 and 30 combine to 79.
+rule = "safetensors_embedding_tensor"
+synth = "safetensors:data=F32@4x512"
+path = "t.safetensors"
+expect = 79
+
+[[case]]
 rule = "safetensors_float_tensor"
 synth = "safetensors:layer.0.weight=F32@768x768"
 path = "w.safetensors"
 expect = 30
 
 [[case]]
-rule = "printed_float_run"
+# Layer parameters are excluded from the embedding-shape rule.
+rule = "safetensors_embedding_tensor"
+synth = "safetensors:fc.weight=F32@10x512;fc.bias=F32@512"
+path = "w.safetensors"
+expect = "none"
+
+[[case]]
+# An array of an embedding width: the run rule fires too, the family caps both at 60.
+rule = "printed_embedding_array"
 synth = "floats:256:python"
 path = "notes.txt"
-expect = 40
+expect = 60
 
 [[case]]
-rule = "printed_float_run"
+rule = "printed_embedding_array"
 synth = "floats:256:numpy"
 path = "notes.txt"
-expect = 40
+expect = 60
 
 [[case]]
-rule = "printed_float_run"
+rule = "printed_embedding_array"
 synth = "floats:256:json"
+path = "notes.txt"
+expect = 60
+
+[[case]]
+# A run whose length is not an embedding width scores low.
+rule = "printed_float_run"
+synth = "floats:200:python"
 path = "notes.txt"
 expect = 40
 
@@ -55,11 +91,11 @@ path = "sensor.csv"
 expect = 40
 
 [[case]]
-# A float run in a file whose name also matches the path rule: both combine.
-rule = "printed_float_run"
+# A printed embedding in a file whose name also matches the path rule: both combine.
+rule = "printed_embedding_array"
 synth = "floats:256:python"
 path = "speaker_embedding.txt"
-expect = 58
+expect = 72
 
 # Hard negatives: each names the rule that must stay silent.
 

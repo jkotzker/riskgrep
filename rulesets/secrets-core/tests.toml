@@ -28,7 +28,7 @@ expect = 95
 rule = "generic_api_key"
 synth = "secret:generic_api_key_assignment"
 path = "settings.py"
-expect = 50
+expect = 80
 
 [[case]]
 rule = "stripe_access_token"
@@ -73,6 +73,13 @@ path = "keys/server.key"
 expect = 90
 
 # Hard negatives: each names the rule that must stay silent.
+
+[[case]]
+# A key name that only contains a keyword (local change; see UPSTREAM.md).
+rule = "generic_api_key"
+synth = "text:key_sha256 = \"9f8e7d6c5b4a39281706f5e4d3c2b1a0\"\n"
+path = "settings.py"
+expect = "none"
 
 [[case]]
 # Entropy below the rule's minimum.

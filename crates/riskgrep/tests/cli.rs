@@ -335,7 +335,7 @@ fn rules_list_names_both_rulesets() {
                 .unwrap()
                 .and(
                     predicate::str::is_match(
-                        r"(?m)^biometric_embeddings +npy_float_tensor +biometric +70$",
+                        r"(?m)^biometric_embeddings +npy_embedding_tensor +biometric +70$",
                     )
                     .unwrap(),
                 ),
