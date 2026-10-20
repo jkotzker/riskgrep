@@ -7,6 +7,12 @@
 //! output becomes an argument, an interpreter or executor running code, an
 //! option this module does not know, a change of directory, a directory
 //! argument, a parse failure, or a spent time or walk budget.
+//!
+//! Two expansions are resolved: `$HOME`/`${HOME}` and a leading `~` or `~/`
+//! from this process's `HOME`, and `$PWD`/`${PWD}` from the working
+//! directory the command runs in. A word using one stays unresolved when the
+//! command line may change that variable before the word is expanded (see
+//! [`text_changes`] and [`command_changes`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -47,6 +53,14 @@ const MAX_NESTING: usize = 256;
 const MAX_BRACE_WORDS: usize = 1_000;
 /// Words all brace expansions in one parse may produce together.
 const MAX_TOTAL_BRACE_WORDS: usize = 10_000;
+/// Budgets longer than this are waited for as this long; keeps deadline
+/// arithmetic from overflowing.
+const MAX_BUDGET: Duration = Duration::from_secs(86_400);
+
+/// Shell variables whose value this module substitutes, as bit flags.
+const VAR_HOME: u8 = 1;
+const VAR_PWD: u8 = 2;
+const VAR_ALL: u8 = VAR_HOME | VAR_PWD;
 
 /// Returns the files `command` would read when run in `cwd`, spending at most
 /// [`DEFAULT_BUDGET`].
@@ -79,7 +93,9 @@ fn run_isolated(command: &str, cwd: &Path, budget: Duration, shortcut: bool) -> 
     // The worker stops itself a little before the wait ends, so a worker
     // that stops cooperatively still delivers its partial result.
     let margin = (budget / 10).min(Duration::from_millis(20));
-    let deadline = start + budget - margin;
+    let deadline = start
+        .checked_add(budget - margin)
+        .unwrap_or_else(|| start + MAX_BUDGET);
     let owned_command = command.to_string();
     let owned_cwd = cwd.to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -124,6 +140,8 @@ struct Cand {
     /// A `glob` pattern when the word holds unquoted glob characters; quoted
     /// parts are escaped in it.
     pattern: Option<String>,
+    /// The `VAR_*` variables whose values were substituted into it.
+    uses: u8,
 }
 
 #[derive(Debug, Default)]
@@ -141,6 +159,9 @@ struct Ir {
     unresolved: bool,
     /// Substitution bodies to analyse as commands of their own.
     nested: Vec<String>,
+    /// `VAR_*` variables the command line may change (or that were already
+    /// changed when it was parsed); words using them are unresolved.
+    changed: u8,
 }
 
 /// Builds one candidate spelling piece by piece.
@@ -149,6 +170,7 @@ struct CandBuf {
     text: String,
     pattern: String,
     has_glob: bool,
+    uses: u8,
 }
 
 impl CandBuf {
@@ -177,6 +199,7 @@ impl CandBuf {
         Cand {
             pattern: self.has_glob.then_some(self.pattern),
             text: self.text,
+            uses: self.uses,
         }
     }
 }
@@ -203,6 +226,13 @@ struct State<'a> {
     unresolved: bool,
     /// Directory entries glob expansion may still visit.
     walk_budget: usize,
+    /// `$HOME` (and `~`); `None` when unset or empty.
+    home: Option<String>,
+    /// `$PWD`: the working directory; `None` when it is not UTF-8.
+    pwd: Option<String>,
+    /// `VAR_*` variables changed by commands analysed so far. Commands
+    /// parsed afterwards (nested ones included) do not use their values.
+    changed: u8,
 }
 
 impl<'a> State<'a> {
@@ -216,6 +246,9 @@ impl<'a> State<'a> {
             probed: HashMap::new(),
             unresolved: false,
             walk_budget: WALK_LIMIT,
+            home: home_dir(),
+            pwd: cwd.to_str().map(str::to_string),
+            changed: 0,
         }
     }
 
@@ -263,13 +296,20 @@ fn analyze(src: &str, depth: usize, st: &mut State) {
     let ir = if refused {
         None
     } else {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| front::parse(src))).unwrap_or(None)
+        let vars = front::Vars {
+            home: st.home.as_deref(),
+            pwd: st.pwd.as_deref(),
+            changed: st.changed,
+        };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| front::parse(src, &vars)))
+            .unwrap_or(None)
     };
     let Some(ir) = ir else {
         st.fallback(src);
         return;
     };
     st.unresolved |= ir.unresolved;
+    st.changed |= ir.changed;
     for cmd in &ir.cmds {
         if st.out_of_time() {
             return;
@@ -387,6 +427,32 @@ const COMMAND_ONLY: &[&str] = &[
 /// Commands that change the directory later relative paths resolve against,
 /// or read and run a file in the current shell.
 const CONTEXT_CHANGERS: &[&str] = &["cd", "pushd", "popd", "source", "."];
+/// Wrappers whose command may run with another `HOME` or working directory
+/// (`env -i`, `env -C`, another user, another root).
+const ENV_CHANGING_WRAPPERS: &[&str] = &[
+    "env",
+    "sudo",
+    "doas",
+    "chroot",
+    "unshare",
+    "systemd-run",
+    "runuser",
+];
+/// Builtins that can assign or unset a variable named by an argument.
+const ASSIGNING_BUILTINS: &[&str] = &[
+    "export",
+    "unset",
+    "declare",
+    "typeset",
+    "local",
+    "readonly",
+    "read",
+    "printf",
+    "mapfile",
+    "readarray",
+    "getopts",
+    "let",
+];
 /// `git` subcommands that print repository content not named as a path.
 const GIT_READERS: &[&str] = &[
     "show",
@@ -1225,6 +1291,11 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
         let Some(spec) = wrapper_spec(&name) else {
             break;
         };
+        if ENV_CHANGING_WRAPPERS.contains(&name.as_str()) {
+            // The command may run with another HOME or directory, so a
+            // command line it runs (`sudo sh -c '...'`) cannot use ours.
+            st.changed = VAR_ALL;
+        }
         let Some(parsed) = parse_options(&words[i + 1..], spec.opts, false) else {
             // An option not in the table: the command word is unknown.
             st.unresolved = true;
@@ -1372,6 +1443,7 @@ fn classify(words: &[Word], depth: usize, st: &mut State) {
         }
         "su" => {
             st.unresolved = true;
+            st.changed = VAR_ALL;
             for j in 0..rest.len() {
                 let arg = literal(rest.get(j)).unwrap_or_default();
                 let payload = match arg.as_str() {
@@ -1721,6 +1793,59 @@ fn home_dir() -> Option<String> {
     std::env::var("HOME").ok().filter(|h| !h.is_empty())
 }
 
+/// The `VAR_*` variables `src` may change, judged from its text: `HOME` or
+/// `PWD` spelled anywhere other than as a plain `$NAME` or `${NAME}`
+/// reference (an assignment, `export`, `unset`, `read`, a `for` variable,
+/// a `${NAME:=...}` default), and any `IFS`, which changes how an unquoted
+/// expansion splits. Anywhere, not only before the use: a loop or a
+/// function can run later text first.
+fn text_changes(src: &str) -> u8 {
+    let mut changed = if src.contains("IFS") { VAR_ALL } else { 0 };
+    for (name, var) in [("HOME", VAR_HOME), ("PWD", VAR_PWD)] {
+        for (at, _) in src.match_indices(name) {
+            let before = &src[..at];
+            let after = &src[at + name.len()..];
+            let plain = before.ends_with('$')
+                && !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+            let braced = before.ends_with("${") && after.starts_with('}');
+            if !plain && !braced {
+                changed |= var;
+            }
+        }
+    }
+    changed
+}
+
+/// The `VAR_*` variables one command line may change in the current shell:
+/// `cd`, `pushd` and `popd` change `PWD`; `eval`, `source`, `.`, `trap`, and
+/// a command whose name is not a literal word may change both; so may an
+/// assigning builtin (`export`, `read`, ...) with an argument that is not
+/// literal. Literal mentions of the names are [`text_changes`]' job.
+fn command_changes(words: &[Word]) -> u8 {
+    let mut i = 0;
+    while i < words.len() {
+        let Some(name) = literal(words.get(i)) else {
+            return VAR_ALL;
+        };
+        match base_name(&name) {
+            "builtin" | "command" => {
+                i += 1;
+                while literal(words.get(i)).is_some_and(|w| w.starts_with('-')) {
+                    i += 1;
+                }
+            }
+            "cd" | "pushd" | "popd" => return VAR_PWD,
+            "eval" | "source" | "." | "trap" => return VAR_ALL,
+            n if ASSIGNING_BUILTINS.contains(&n) => {
+                let opaque = words[i + 1..].iter().any(|w| matches!(w, Word::Unresolved));
+                return if opaque { VAR_ALL } else { 0 };
+            }
+            _ => return 0,
+        }
+    }
+    0
+}
+
 /// Removes backslash-newline pairs outside single quotes, as bash does
 /// before tokenizing.
 fn remove_line_continuations(src: &str) -> String {
@@ -1927,8 +2052,9 @@ fn unescape_backquoted(body: &str) -> String {
 
 mod front {
     use super::{
-        decode_ansi_c, home_dir, remove_line_continuations, substitution_bodies,
-        unescape_backquoted, CandBuf, Ir, Simple, Word, MAX_BRACE_WORDS, MAX_TOTAL_BRACE_WORDS,
+        command_changes, decode_ansi_c, remove_line_continuations, substitution_bodies,
+        text_changes, unescape_backquoted, CandBuf, Ir, Simple, Word, MAX_BRACE_WORDS,
+        MAX_TOTAL_BRACE_WORDS, VAR_HOME, VAR_PWD,
     };
     use brush_parser::ast::{
         self, Command, CommandPrefixOrSuffixItem as Item, CompoundCommand, CompoundList,
@@ -1940,8 +2066,16 @@ mod front {
     };
     use brush_parser::{Parser, ParserOptions};
 
+    /// Values substituted for `$HOME`, `~` and `$PWD`, and the variables
+    /// already changed before this command line (whose values are unknown).
+    pub(super) struct Vars<'a> {
+        pub(super) home: Option<&'a str>,
+        pub(super) pwd: Option<&'a str>,
+        pub(super) changed: u8,
+    }
+
     /// Parses `src`; `None` on a parse error.
-    pub(super) fn parse(src: &str) -> Option<Ir> {
+    pub(super) fn parse(src: &str, vars: &Vars) -> Option<Ir> {
         let options = ParserOptions::default();
         let mut source = src.to_string();
         let program = match Parser::new(source.as_bytes(), &options).parse_program() {
@@ -1961,11 +2095,29 @@ mod front {
             options,
             source: source.chars().collect(),
             brace_budget: MAX_TOTAL_BRACE_WORDS,
+            home: vars.home.map(str::to_string),
+            pwd: vars.pwd.map(str::to_string),
         };
         for list in &program.complete_commands {
             w.list(list);
         }
-        Some(w.ir)
+        let mut ir = w.ir;
+        ir.changed |= vars.changed | text_changes(src);
+        if ir.changed != 0 {
+            // A word that used a value the command line may change is not
+            // known after all.
+            for cmd in &mut ir.cmds {
+                for word in cmd.words.iter_mut().chain(cmd.reads.iter_mut()) {
+                    if let Word::Resolved(cands) = word {
+                        if cands.iter().any(|c| c.uses & ir.changed != 0) {
+                            *word = Word::Unresolved;
+                            ir.unresolved = true;
+                        }
+                    }
+                }
+            }
+        }
+        Some(ir)
     }
 
     struct Walker {
@@ -1976,7 +2128,14 @@ mod front {
         source: Vec<char>,
         /// Brace-expansion words this parse may still produce.
         brace_budget: usize,
+        /// Values of `$HOME` (and `~`) and `$PWD`.
+        home: Option<String>,
+        pwd: Option<String>,
     }
+
+    /// Characters that make an unquoted variable value split into several
+    /// words or act as a glob.
+    const UNQUOTED_UNSAFE: &[char] = &[' ', '\t', '\n', '*', '?', '[', '\\'];
 
     /// How expansions inside a word affect the result.
     #[derive(Clone, Copy, PartialEq)]
@@ -2144,6 +2303,7 @@ mod front {
             for item in s.suffix.iter().flat_map(|p| p.0.iter()) {
                 self.item(item, false, &mut out);
             }
+            self.ir.changed |= command_changes(&out.words);
             self.ir.cmds.push(out);
         }
 
@@ -2275,13 +2435,24 @@ mod front {
                             buf.quoted(rest);
                         }
                     }
-                    WordPiece::TildeExpansion(TildeExpr::Home) => match home_dir() {
-                        Some(home) => buf.quoted(&home),
+                    // The result of a tilde expansion is not split or globbed.
+                    WordPiece::TildeExpansion(TildeExpr::Home) => match &self.home {
+                        Some(home) => {
+                            buf.quoted(home);
+                            buf.uses |= VAR_HOME;
+                        }
                         None => known = false,
                     },
-                    WordPiece::TildeExpansion(_) | WordPiece::ParameterExpansion(_) => {
-                        known = false
-                    }
+                    WordPiece::ParameterExpansion(expr) => match self.variable(expr) {
+                        // Unquoted, the value is split on whitespace and
+                        // globbed; only a value neither can change is used.
+                        Some((value, var)) if quoted || !value.contains(UNQUOTED_UNSAFE) => {
+                            buf.quoted(&value);
+                            buf.uses |= var;
+                        }
+                        _ => known = false,
+                    },
+                    WordPiece::TildeExpansion(_) => known = false,
                     WordPiece::ArithmeticExpression(expr) => {
                         self.embedded_substitutions(&expr.value);
                         known = false;
@@ -2300,6 +2471,24 @@ mod front {
                 self.ir.unresolved = true;
             }
             known
+        }
+
+        /// The value of a plain `$HOME`, `${HOME}`, `$PWD` or `${PWD}`, and
+        /// which variable it is. Any other parameter expansion (including
+        /// `${HOME:-x}` and `${!HOME}`) is unknown.
+        fn variable(&self, expr: &word::ParameterExpr) -> Option<(String, u8)> {
+            let word::ParameterExpr::Parameter {
+                parameter: word::Parameter::Named(name),
+                indirect: false,
+            } = expr
+            else {
+                return None;
+            };
+            match name.as_str() {
+                "HOME" => self.home.clone().map(|v| (v, VAR_HOME)),
+                "PWD" => self.pwd.clone().map(|v| (v, VAR_PWD)),
+                _ => None,
+            }
         }
 
         /// The raw words produced by brace expansion of `raw`; `None` when

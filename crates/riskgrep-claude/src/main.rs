@@ -3,9 +3,10 @@
 //! Reads the hook input on stdin, finds the files the tool call would read,
 //! scans them, and prints an `ask` or `deny` decision when a category crosses
 //! its threshold. Prints nothing otherwise and never emits `allow`. The exit
-//! status is always 0: an exit other than 0 or 2 without a JSON decision is a
-//! non-blocking error that lets the call proceed (fail-open), and exit 2
-//! blocks. Failures here must ask, which only a JSON decision can do.
+//! status is always 0: Claude Code documents an exit other than 0 or 2
+//! without a JSON decision as a non-blocking error that lets the call
+//! proceed (fail-open), though the handling depends on its version. Failures
+//! here must ask, which only a JSON decision does reliably.
 
 use riskgrep_claude::bash::bash_targets_within;
 use riskgrep_claude::decide::{decide, error_decision, Decision};
@@ -127,7 +128,10 @@ fn run(start: Instant) -> Decision {
     let cfg = match config::load(Mode::ClaudeCode, root.as_deref(), Overrides::default()) {
         Ok(c) => c,
         Err(e) => {
-            return Decision::Ask(format!("RiskGrep: configuration error ({e})"));
+            return Decision::Ask(format!(
+                "RiskGrep: configuration error ({})",
+                config_error_summary(&e.0)
+            ));
         }
     };
     let cc = cfg.claude_code.clone();
@@ -138,6 +142,17 @@ fn run(start: Instant) -> Decision {
     })) {
         Ok(d) => d,
         Err(_) => error_decision(cc.on_error, "RiskGrep: internal error"),
+    }
+}
+
+/// A configuration error without configuration text: a TOML error becomes
+/// `<what> <path> at line L, column C` (its snippet and message, which
+/// quote the file, are dropped); any other error keeps its first line.
+fn config_error_summary(msg: &str) -> String {
+    let first = msg.lines().next().unwrap_or_default();
+    match first.split_once(": TOML parse error at ") {
+        Some((head, position)) => format!("{head} at {position}"),
+        None => first.to_string(),
     }
 }
 
