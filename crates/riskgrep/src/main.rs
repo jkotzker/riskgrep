@@ -1,5 +1,16 @@
 //! `riskgrep`: scan files for sensitive data and score them per category.
 
+/// `println!` returning `Result<(), CliError>`: a closed standard output
+/// ends the process quietly (see [`stdout_result`]).
+macro_rules! outln {
+    ($($arg:tt)*) => {
+        $crate::stdout_result(::std::io::Write::write_fmt(
+            &mut ::std::io::stdout().lock(),
+            format_args!("{}\n", format_args!($($arg)*)),
+        ))
+    };
+}
+
 mod cli;
 mod git;
 mod rules;
@@ -40,6 +51,17 @@ impl From<riskgrep_core::suppress::SuppressError> for CliError {
 impl From<std::io::Error> for CliError {
     fn from(e: std::io::Error) -> Self {
         CliError(e.to_string())
+    }
+}
+
+/// The result of a write to standard output. A closed pipe (`riskgrep
+/// rules list | head -1`) means the reader stopped on purpose: the process
+/// exits at once with status 0 and prints nothing. Other errors are
+/// returned.
+pub fn stdout_result<T>(r: std::io::Result<T>) -> Result<T, CliError> {
+    match r {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => std::process::exit(0),
+        r => Ok(r?),
     }
 }
 

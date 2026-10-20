@@ -65,7 +65,7 @@ fn list() -> Result<i32, CliError> {
         .collect();
     rows.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
     for (ns, rule, cat, w) in rows {
-        println!("{ns}  {rule}  {cat}  {w}");
+        outln!("{ns}  {rule}  {cat}  {w}")?;
     }
     Ok(0)
 }
@@ -95,11 +95,11 @@ fn compile(repo: bool) -> Result<i32, CliError> {
     } else {
         "already compiled"
     };
-    println!(
+    outln!(
         "{verb} {rules} rules from {} rulesets in {} ms",
         sets.len(),
         start.elapsed().as_millis()
-    );
+    )?;
     Ok(0)
 }
 
@@ -226,20 +226,20 @@ fn run_suites(
                     if matches!(case.expect, Expect::Score(_)) {
                         covered.insert(key);
                     }
-                    println!("ok  {label}  {detail}");
+                    outln!("ok  {label}  {detail}")?;
                 }
                 Err(why) => {
                     failed += 1;
-                    println!("FAIL  {label}  {} : {why}", case.synth);
+                    outln!("FAIL  {label}  {} : {why}", case.synth)?;
                 }
             }
         }
     }
     let total = all_rules.len();
-    println!(
+    outln!(
         "{passed} passed, {failed} failed; {} of {total} rules have a passing positive case",
         covered.len()
-    );
+    )?;
     Ok(if failed == 0 { 0 } else { 1 })
 }
 
