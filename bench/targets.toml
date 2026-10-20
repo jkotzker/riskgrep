@@ -1,0 +1,23 @@
+# p95 latency targets in milliseconds, measured by `cargo xtask bench` on the
+# release build with both rulesets enabled and a warm rules bundle. A missed
+# target fails the run; relaxing one needs the maintainer's approval.
+
+[case.claude_read_cached]
+description = "riskgrep-claude Read, single cached file"
+p95_ms = 5.0
+
+[case.claude_read_uncached]
+description = "riskgrep-claude Read, uncached text file of 64 KB (evidence cache wiped before each run)"
+p95_ms = 15.0
+
+[case.scan_stdin_4kb]
+description = "riskgrep scan - with 4 KB on standard input"
+p95_ms = 15.0
+
+[case.scan_stdin_1mb]
+description = "riskgrep scan - with 1 MB on standard input"
+p95_ms = 50.0
+
+[case.git_pre_commit_20_files]
+description = "riskgrep git pre-commit, 20 staged text files, uncached (evidence cache wiped before each run)"
+p95_ms = 100.0

@@ -5,7 +5,7 @@
 //! escaped so one finding stays on one line).
 
 use crate::cli::{GitCommand, HookArgs, PreCommitArgs};
-use crate::scan::{repo_root, EXIT_OK, EXIT_THRESHOLD};
+use crate::scan::{repo_root_git, EXIT_OK, EXIT_THRESHOLD};
 use crate::CliError;
 use riskgrep_core::config::{self, Action, GitConfig, Mode, Overrides};
 use riskgrep_core::model::round1;
@@ -337,7 +337,7 @@ fn unscanned_line(path: &str, status: &str, reason: &str) -> String {
 }
 
 fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
-    let root = repo_root().ok_or_else(|| CliError("not in a git repository".into()))?;
+    let root = repo_root_git().ok_or_else(|| CliError("not in a git repository".into()))?;
     let cfg = config::load(Mode::Git, Some(&root), Overrides::default())?;
     let git_cfg = cfg.git.clone();
     let full_files = a.full_files || git_cfg.full_files;

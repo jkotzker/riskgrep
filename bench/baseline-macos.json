@@ -1,0 +1,7 @@
+{
+  "claude_read_cached": 4.45,
+  "claude_read_uncached": 12.29,
+  "git_pre_commit_20_files": 89.59,
+  "scan_stdin_1mb": 27.48,
+  "scan_stdin_4kb": 12.56
+}

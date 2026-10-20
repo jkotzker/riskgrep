@@ -1,5 +1,6 @@
 //! Repository tasks: `cargo xtask <task>`.
 
+mod bench;
 mod eval;
 
 use std::path::PathBuf;
@@ -7,7 +8,8 @@ use std::process::ExitCode;
 
 const USAGE: &str =
     "usage: cargo xtask convert-gitleaks --config <gitleaks.toml> --tag <release tag> --out <dir>
-       cargo xtask eval [--skip-oss] [--write-baseline] [--keep-corpus DIR]";
+       cargo xtask eval [--skip-oss] [--write-baseline] [--keep-corpus DIR]
+       cargo xtask bench [--write-baseline] [--runs N]";
 
 fn convert(args: &[String]) -> Result<(), String> {
     let (mut config, mut tag, mut out) = (None, None, None);
@@ -53,6 +55,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("convert-gitleaks") => convert(&args[1..]),
         Some("eval") => eval::run(&args[1..]),
+        Some("bench") => bench::run(&args[1..]),
         _ => Err(USAGE.into()),
     };
     match result {

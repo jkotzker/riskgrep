@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel and components.
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build release binaries
+        run: cargo build --release -p riskgrep -p riskgrep-claude
+
+      - name: Rule tests
+        run: ./target/release/riskgrep rules test
+
+      # No public-repository clones in CI: the OSS half of the evaluation
+      # needs network access and about 850 MB.
+      - name: Evaluation (synthetic corpus)
+        run: cargo xtask eval --skip-oss
+
+      - name: Install hyperfine
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install hyperfine
+          else
+            sudo apt-get update
+            sudo apt-get install -y hyperfine
+          fi
+
+      # Targets are absolute, but the regression check needs a baseline from
+      # the same OS. Skip, with a message, until one is committed.
+      - name: Benchmarks
+        shell: bash
+        run: |
+          os=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
+          if [ -f "bench/baseline-$os.json" ]; then
+            cargo xtask bench
+          else
+            echo "::notice::bench/baseline-$os.json not found: benchmarks skipped for $RUNNER_OS. Generate one with 'cargo xtask bench --write-baseline' on that OS and commit it."
+          fi
