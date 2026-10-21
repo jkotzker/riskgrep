@@ -154,7 +154,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 - **Not covered (false positive):** credential-named assignments with placeholder or test values in test code, test configuration, and documentation (for example `api_key = "..."` in a test fixture or a tutorial).
 - **Why:** the generic rule sees a credential-named key with a random-looking value and cannot tell a test value from a real one.
-- **How it shows up:** a score of 80 (blocked by the git hook; below Claude Code's ask threshold of 90). In the evaluation's 55,877 scanned public-repository files, 21 such files were flagged, most of the 25 secret false positives (0.45 per 1,000).
+- **How it shows up:** a score of 80 (blocked by the git hook; asks in Claude Code, whose default `secret` ask threshold is 80). In the evaluation's 55,877 scanned public-repository files, 21 such files were flagged, most of the 25 secret false positives (0.45 per 1,000).
 - **Planned fix:** none decided.
 
 ### Paths on gitleaks' global allowlist are skipped by the converted secret rules
@@ -178,11 +178,11 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** a non-DER binary key or a DER key under another name is a binary of unknown format and is skipped (`on_skipped` applies: allow by default). An encrypted PKCS#8 key in a `.der` or `.key` file is not skipped: it is read as a key store, matches no rule, and scores 0. A `.der` or `.key` file over 1 MiB, or with another length byte, is scanned as text when it has no NUL byte in its first 8 KiB, otherwise skipped as binary of unknown format. PEM-encoded keys are found by `private_key` under any name. A text `.key` file of at most 1 MiB that starts with `0` (0x30) followed by an ASCII byte is also read as a key store; the same bytes are read as for a text file and every rule runs on them, so the text rules still apply (`cargo test -p riskgrep-core --test ruleset_secrets text_key_file_starting_with_a_digit_is_still_scanned_for_tokens`). A larger text `.key` file takes the text path, including the first-and-last-megabyte sampling above 8 MiB (`cargo test -p riskgrep-core --test ruleset_secrets large_text_key_file`: a 9 MiB `.key` file starting with `0x` and ending in a generated AWS key scores secret 95, as the same bytes named `.txt` do).
 - **Planned fix:** none decided.
 
-### Generic and weight-80 secrets never prompt in Claude Code by default
+### Generic and weight-80 secrets ask in Claude Code, false positives included
 
-- **Not covered:** the generic secret rule and the provider rules that need context score 80. The default Claude Code threshold for `secret` is `ask` at 90 with no `deny`, so these hits do not prompt. The git hook blocks at 80.
-- **Why:** the weights were set so that the git hook (block at 80) flags them while a Claude Code prompt is reserved for provider-specific formats (95) and private keys; the evaluation's false-positive rate depends on that split.
-- **How it shows up:** a file with only a generic credential assignment is blocked at commit but read by the agent without a prompt. Lower `claude_code.thresholds.secret.ask` to 80 to prompt on them, at the cost of the 21 generic false positives in the evaluation corpus.
+- **Not covered (false positive):** the generic secret rule and the provider rules that need context score 80. The default Claude Code thresholds for `secret` are `ask` at 80 and `deny` at 95, so these hits prompt rather than block, and the false positives among them (test values, documentation examples) prompt as well.
+- **Why:** the default `ask` threshold equals the generic rule's weight, so every secret the git hook blocks (at 80) also prompts in Claude Code; only provider-specific formats and private keys (95) reach `deny`.
+- **How it shows up:** reading a file whose only credential is a generic assignment asks first (`cargo test -p riskgrep-claude --test hook read_generic_secret_asks`). The 21 generic false positives in the evaluation's public-repository corpus (see "Generic secret assignments in test code and documentation") score 80, so each meets the `ask` threshold. Raise `claude_code.thresholds.secret.ask` above 80 to stop prompting on them, at the cost of reading real generic credentials without a prompt.
 - **Planned fix:** none decided.
 
 ### Embedding names with a parameter suffix are not flagged by name
@@ -298,11 +298,11 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 | Command | Default (`allow`) | `on_unresolved = "deny"` |
 |---|---|---|
-| `cat "$PWD/a.txt"` | ask (secret 95.0) | ask (secret 95.0) |
-| `cat $PWD/a.txt`, `cat ${PWD}/a.txt` | ask | ask |
-| `cat $HOME/proj/a.txt`, `cat "${HOME}/proj/a.txt"` | ask | ask |
-| `cat ~/proj/a.txt` | ask | ask |
-| `cat "$(echo a.txt)"` | ask (`a.txt` is named in the substitution) | deny (unresolved) |
+| `cat "$PWD/a.txt"` | deny (secret 95.0) | deny (secret 95.0) |
+| `cat $PWD/a.txt`, `cat ${PWD}/a.txt` | deny | deny |
+| `cat $HOME/proj/a.txt`, `cat "${HOME}/proj/a.txt"` | deny | deny |
+| `cat ~/proj/a.txt` | deny | deny |
+| `cat "$(echo a.txt)"` | deny (`a.txt` is named in the substitution) | deny (secret 95.0 and unresolved) |
 | `HOME=/x cat $HOME/proj/a.txt` | no decision | deny (unresolved) |
 | `export HOME=/x; cat ~/proj/a.txt` | no decision | deny (unresolved) |
 | `cd h && cat $PWD/a.txt` | no decision | deny (unresolved) |

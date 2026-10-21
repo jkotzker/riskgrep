@@ -421,11 +421,11 @@ fn no_value_leaves_the_process() {
     }
 
     // A hook call must decide for every file whose scan score reaches the
-    // default ask thresholds (secret 90, biometric 75).
+    // default secret ask threshold (80) or biometric deny threshold (75).
     let must_decide: Vec<String> = targets
         .iter()
         .filter(|t| {
-            t["scores"]["secret"].as_f64().unwrap_or(0.0) >= 90.0
+            t["scores"]["secret"].as_f64().unwrap_or(0.0) >= 80.0
                 || t["scores"]["biometric"].as_f64().unwrap_or(0.0) >= 75.0
         })
         .filter_map(|t| t["target"].as_str())

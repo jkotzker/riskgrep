@@ -44,7 +44,7 @@ The hook scores the lines added by the staged changes (`--full-files` or `git.fu
 
 ## Claude Code hook
 
-`riskgrep-claude` checks `Read`, `NotebookRead`, `Grep`, and `Bash` tool calls before they run. It finds the files the call would read, scans them, and answers `ask` or `deny` when a score reaches its threshold (defaults: `biometric` ask at 50 and deny at 75, `secret` ask at 90). It never answers `allow`, and any other tool is untouched. A Bash command whose files the analysis cannot determine gets no decision by default (`claude_code.on_unresolved = "allow"`); set it to `"ask"` or `"deny"` to prompt or block on such commands (see [Known limitations](docs/known-limitations.md#unresolved-bash-commands-get-no-decision-by-default)).
+`riskgrep-claude` checks `Read`, `NotebookRead`, `Grep`, and `Bash` tool calls before they run. It finds the files the call would read, scans them, and answers `ask` or `deny` when a score reaches its threshold (defaults: `biometric` ask at 50 and deny at 75, `secret` ask at 80 and deny at 95). It never answers `allow`, and any other tool is untouched. A Bash command whose files the analysis cannot determine gets no decision by default (`claude_code.on_unresolved = "allow"`); set it to `"ask"` or `"deny"` to prompt or block on such commands (see [Known limitations](docs/known-limitations.md#unresolved-bash-commands-get-no-decision-by-default)).
 
 ```sh
 riskgrep rules compile        # warm the rules cache before the first call (any directory)

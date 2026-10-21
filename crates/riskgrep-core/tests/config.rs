@@ -64,8 +64,8 @@ fn defaults_match_design() {
     assert_eq!(
         t[&cat("secret")],
         Threshold {
-            ask: Some(90.0),
-            deny: None
+            ask: Some(80.0),
+            deny: Some(95.0)
         }
     );
     assert_eq!(c.claude_code.on_error, Action::Ask);

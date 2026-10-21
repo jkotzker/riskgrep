@@ -119,8 +119,8 @@ impl Default for Config {
                     (
                         cat("secret"),
                         Threshold {
-                            ask: Some(90.0),
-                            deny: None,
+                            ask: Some(80.0),
+                            deny: Some(95.0),
                         },
                     ),
                 ]),

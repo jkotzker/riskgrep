@@ -170,13 +170,29 @@ mod tests {
         let cfg = Config::default().claude_code;
         let r = report(vec![
             target("/a", "biometric", 85.0),
-            target("/b", "secret", 95.0),
+            target("/b", "secret", 90.0),
         ]);
         assert_eq!(
             decide(&r, false, &cfg),
             Decision::Deny(
                 "RiskGrep: /a scored biometric 85.0 (r1). Threshold: deny at 75.".into()
             )
+        );
+    }
+
+    #[test]
+    fn default_secret_thresholds_ask_at_80_and_deny_at_95() {
+        let cfg = Config::default().claude_code;
+        let d = |score| decide(&report(vec![target("/a", "secret", score)]), false, &cfg);
+        assert_eq!(d(79.9), Decision::NoOpinion);
+        assert_eq!(
+            d(80.0),
+            Decision::Ask("RiskGrep: /a scored secret 80.0 (r1). Threshold: ask at 80.".into())
+        );
+        assert!(matches!(d(94.9), Decision::Ask(_)));
+        assert_eq!(
+            d(95.0),
+            Decision::Deny("RiskGrep: /a scored secret 95.0 (r1). Threshold: deny at 95.".into())
         );
     }
 
@@ -194,13 +210,13 @@ mod tests {
     fn lists_three_then_counts_the_rest() {
         let cfg = Config::default().claude_code;
         let ts = (0..6)
-            .map(|i| target(&format!("/f{i}"), "secret", 90.0 + i as f64))
+            .map(|i| target(&format!("/f{i}"), "secret", 85.0 + i as f64))
             .collect();
         let Decision::Ask(text) = decide(&report(ts), false, &cfg) else {
             panic!("expected ask")
         };
         assert!(
-            text.starts_with("RiskGrep: /f5 scored secret 95.0"),
+            text.starts_with("RiskGrep: /f5 scored secret 90.0"),
             "{text}"
         );
         assert!(text.ends_with(", and 3 more."), "{text}");
@@ -214,7 +230,7 @@ mod tests {
         skipped.status = TargetStatus::Skipped {
             reason: "binary".into(),
         };
-        let r = report(vec![target("/a", "secret", 89.9), skipped]);
+        let r = report(vec![target("/a", "secret", 79.9), skipped]);
         assert_eq!(decide(&r, true, &cfg), Decision::NoOpinion);
     }
 
@@ -226,7 +242,7 @@ mod tests {
         bad.status = TargetStatus::Unscanned {
             reason: "unreadable: PermissionDenied".into(),
         };
-        let r = report(vec![target("/a", "secret", 95.0), bad]);
+        let r = report(vec![target("/a", "secret", 90.0), bad]);
         assert_eq!(
             decide(&r, false, &cfg),
             Decision::Deny("RiskGrep: could not scan /u (unreadable: PermissionDenied)".into())
@@ -236,7 +252,7 @@ mod tests {
     #[test]
     fn many_rule_ids_are_counted() {
         let cfg = Config::default().claude_code;
-        let mut t = target("/a", "secret", 95.0);
+        let mut t = target("/a", "secret", 90.0);
         let proto = t.evidence[0].clone();
         t.evidence = (0..8)
             .map(|i| Evidence {
@@ -247,7 +263,7 @@ mod tests {
         assert_eq!(
             decide(&report(vec![t]), false, &cfg),
             Decision::Ask(
-                "RiskGrep: /a scored secret 95.0 (r0, r1, r2, r3, r4, and 3 more). Threshold: ask at 90."
+                "RiskGrep: /a scored secret 90.0 (r0, r1, r2, r3, r4, and 3 more). Threshold: ask at 80."
                     .into()
             )
         );

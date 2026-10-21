@@ -1453,7 +1453,7 @@ pub fn shortfalls(c: &[Sample]) -> Vec<String> {
 // ---- thresholds and metrics --------------------------------------------------
 
 /// Default thresholds per category: `(label, value)`, e.g.
-/// `("claude_code.ask", 90.0)`.
+/// `("claude_code.ask", 80.0)`.
 pub fn thresholds(cfg: &Config) -> BTreeMap<String, Vec<(String, f64)>> {
     let mut out: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
     for (cat, t) in &cfg.claude_code.thresholds {
@@ -2464,7 +2464,8 @@ mod tests {
         assert_eq!(f[SECRET], 80.0);
         assert_eq!(f[BIOMETRIC], 50.0);
         let t = thresholds(&cfg);
-        assert!(t[SECRET].contains(&("claude_code.ask".into(), 90.0)));
+        assert!(t[SECRET].contains(&("claude_code.ask".into(), 80.0)));
+        assert!(t[SECRET].contains(&("claude_code.deny".into(), 95.0)));
         assert!(t[SECRET].contains(&("git.block_at".into(), 80.0)));
         assert!(t[BIOMETRIC].contains(&("claude_code.deny".into(), 75.0)));
     }

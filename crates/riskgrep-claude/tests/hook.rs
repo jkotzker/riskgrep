@@ -199,14 +199,26 @@ fn read_biometric_denied() {
 }
 
 #[test]
-fn read_env_secret_asks() {
+fn read_env_secret_denied() {
     let e = Env::new();
     let f = e.write("config.env", aws_file().as_bytes());
     let (d, reason) = e.run("Read", json!({ "file_path": f })).decision();
-    assert_eq!(d, "ask");
+    assert_eq!(d, "deny");
     assert!(reason.contains("scored secret 95.0"), "{reason}");
-    assert!(reason.ends_with("Threshold: ask at 90."), "{reason}");
+    assert!(reason.contains("Threshold: deny at 95."), "{reason}");
     assert!(!reason.contains("AKIA"), "{reason}");
+}
+
+#[test]
+fn read_generic_secret_asks() {
+    // The generic rule scores 80: the default secret `ask` threshold.
+    let e = Env::new();
+    let line = synth::fake_secret("generic_api_key_assignment", 1);
+    let f = e.write("settings.env", format!("x = 1\n{line}\n").as_bytes());
+    let (d, reason) = e.run("Read", json!({ "file_path": f })).decision();
+    assert_eq!(d, "ask");
+    assert!(reason.contains("scored secret 80.0"), "{reason}");
+    assert!(reason.contains("Threshold: ask at 80."), "{reason}");
 }
 
 #[test]
@@ -223,17 +235,17 @@ fn notebook_read_uses_notebook_path() {
     let (d, _) = e
         .run("NotebookRead", json!({ "notebook_path": f }))
         .decision();
-    assert_eq!(d, "ask");
+    assert_eq!(d, "deny");
 }
 
 #[test]
-fn bash_cat_secret_asks() {
+fn bash_cat_secret_denied() {
     let e = Env::new();
     e.write("config.env", aws_file().as_bytes());
     let (d, reason) = e
         .run("Bash", json!({ "command": "cat config.env" }))
         .decision();
-    assert_eq!(d, "ask");
+    assert_eq!(d, "deny");
     assert!(reason.contains("config.env scored secret 95.0"), "{reason}");
 }
 
@@ -311,14 +323,14 @@ fn grep_searches_hidden_files() {
     let (d, reason) = e
         .run("Grep", json!({ "pattern": "x", "path": e.dir().join("h") }))
         .decision();
-    assert_eq!(d, "ask");
+    assert_eq!(d, "deny");
     assert!(reason.contains("h/.env scored secret 95.0"), "{reason}");
 
     e.write("k/.aws/credentials", aws_file().as_bytes());
     let (d, reason) = e
         .run("Grep", json!({ "pattern": "x", "path": e.dir().join("k") }))
         .decision();
-    assert_eq!(d, "ask");
+    assert_eq!(d, "deny");
     assert!(
         reason.contains("k/.aws/credentials scored secret 95.0"),
         "{reason}"
@@ -340,7 +352,7 @@ fn grep_glob_splits_like_claude_code() {
         let (d, reason) = e
             .run("Grep", json!({ "pattern": "x", "path": dir, "glob": glob }))
             .decision();
-        assert_eq!(d, "ask", "glob {glob:?}");
+        assert_eq!(d, "deny", "glob {glob:?}");
         assert!(reason.contains("x.env scored secret 95.0"), "{reason}");
     }
 }
@@ -355,7 +367,7 @@ fn grep_path_is_trimmed_and_tilde_expanded() {
         let (d, reason) = e
             .run("Grep", json!({ "pattern": "x", "path": path }))
             .decision();
-        assert_eq!(d, "ask", "path {path:?}");
+        assert_eq!(d, "deny", "path {path:?}");
         assert!(reason.contains("proj/a.txt scored secret 95.0"), "{reason}");
     }
 }
@@ -400,7 +412,7 @@ fn bash_home_pwd_and_tilde_are_expanded() {
         "cat ~/proj/a.txt",
     ] {
         let (d, reason) = e.run("Bash", json!({ "command": command })).decision();
-        assert_eq!(d, "ask", "{command}");
+        assert_eq!(d, "deny", "{command}");
         assert!(reason.contains("a.txt scored secret 95.0"), "{reason}");
     }
 }
