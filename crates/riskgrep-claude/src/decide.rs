@@ -1,7 +1,7 @@
 //! The hook decision: a pure function of the scan report and the config.
 
 use riskgrep_core::config::{Action, ClaudeCodeConfig};
-use riskgrep_core::model::round1;
+use riskgrep_core::model::{meets_threshold, round1};
 use riskgrep_core::{Report, TargetStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,9 +69,9 @@ pub fn decide(report: &Report, unresolved: bool, cfg: &ClaudeCodeConfig) -> Deci
                 continue;
             };
             let score = round1(raw);
-            let (sev, at) = if let Some(d) = th.deny.filter(|d| score >= *d) {
+            let (sev, at) = if let Some(d) = th.deny.filter(|d| meets_threshold(raw, *d)) {
                 (Sev::Deny, d)
-            } else if let Some(a) = th.ask.filter(|a| score >= *a) {
+            } else if let Some(a) = th.ask.filter(|a| meets_threshold(raw, *a)) {
                 (Sev::Ask, a)
             } else {
                 continue;
@@ -178,6 +178,16 @@ mod tests {
                 "RiskGrep: /a scored biometric 85.0 (r1). Threshold: deny at 75.".into()
             )
         );
+    }
+
+    #[test]
+    fn thresholds_use_the_rounded_score() {
+        let cfg = Config::default().claude_code;
+        // Raw 74.96 shows as 75.0, which meets the biometric deny at 75.
+        let r = report(vec![target("/a", "biometric", 74.96)]);
+        assert!(matches!(decide(&r, false, &cfg), Decision::Deny(_)));
+        let r = report(vec![target("/a", "biometric", 74.94)]);
+        assert!(!matches!(decide(&r, false, &cfg), Decision::Deny(_)));
     }
 
     #[test]

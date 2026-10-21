@@ -3,6 +3,7 @@
 use crate::cli::{threshold_map, BaselineArgs, Format, OnError, ScanArgs};
 use crate::{text, CliError};
 use riskgrep_core::config::{self, Config, Mode, Overrides};
+use riskgrep_core::model::meets_threshold;
 use riskgrep_core::scanner::resolve_rulesets;
 use riskgrep_core::suppress::{Baseline, IgnoreRules};
 use riskgrep_core::{Category, Report, RiskGrep, TargetStatus};
@@ -97,7 +98,7 @@ fn read_stdin() -> io::Result<(Vec<u8>, bool)> {
 }
 
 pub fn scan(a: ScanArgs) -> Result<i32, CliError> {
-    let thresholds = threshold_map(&a.fail_above);
+    let thresholds = threshold_map(&a.fail_at);
     let on_error = a.on_error.unwrap_or(if thresholds.is_empty() {
         OnError::Allow
     } else {
@@ -176,13 +177,15 @@ fn merge(mut parts: Vec<Report>) -> Report {
     Report::from_targets(&version, &bundle, targets)
 }
 
-/// 1 when a score is strictly above its threshold, else 2 when a target is
+/// 1 when a score meets its threshold (`meets_threshold`), else 2 when a target is
 /// unscanned and `on_error` blocks, else 0.
 pub fn exit_code(report: &Report, thresholds: &BTreeMap<String, f64>, on_error: OnError) -> i32 {
     let exceeded = report.targets.iter().any(|t| {
-        thresholds
-            .iter()
-            .any(|(cat, n)| t.scores.get(&Category(cat.clone())).is_some_and(|s| s > n))
+        thresholds.iter().any(|(cat, n)| {
+            t.scores
+                .get(&Category(cat.clone()))
+                .is_some_and(|&s| meets_threshold(s, *n))
+        })
     });
     if exceeded {
         return EXIT_THRESHOLD;
@@ -275,14 +278,23 @@ mod tests {
     fn exit_codes() {
         let un = TargetStatus::Unscanned { reason: "r".into() };
         let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 80.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 0);
-        assert_eq!(exit_code(&r, &th(79.9), OnError::Block), 1);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 1);
+        assert_eq!(exit_code(&r, &th(80.1), OnError::Block), 0);
         assert_eq!(exit_code(&r, &BTreeMap::new(), OnError::Block), 0);
         let r = Report::from_targets("0", "b", vec![t(un.clone(), 0.0)]);
         assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 2);
         assert_eq!(exit_code(&r, &th(80.0), OnError::Allow), 0);
         let r = Report::from_targets("0", "b", vec![t(un, 0.0), t(TargetStatus::Scanned, 90.0)]);
         assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 1);
+    }
+
+    #[test]
+    fn exit_code_uses_the_rounded_score() {
+        let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 79.96)]);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 1);
+        assert_eq!(exit_code(&r, &th(80.1), OnError::Block), 0);
+        let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 79.94)]);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 0);
     }
 
     #[test]

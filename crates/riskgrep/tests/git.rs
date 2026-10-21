@@ -375,6 +375,26 @@ fn block_at_is_inclusive() {
 }
 
 #[test]
+fn block_at_agrees_with_fail_at_at_the_boundary() {
+    // A generic `api_key` assignment scores secret 80.0; `scan --fail-at`
+    // and the hook treat 80 as met and 80.1 as not met.
+    let line = synth::fake_secret("generic_api_key_assignment", 5);
+    for (limit, code) in [("80", 1), ("80.1", 0)] {
+        let r = Repo::new();
+        r.write(
+            ".riskgrep.toml",
+            format!("[git.block_at]\nsecret = {limit}\n"),
+        );
+        r.write("conf.txt", format!("{line}\n"));
+        r.stage("conf.txt");
+        r.pre_commit().assert().code(code);
+        r.riskgrep(&["scan", "conf.txt", "--fail-at", &format!("secret={limit}")])
+            .assert()
+            .code(code);
+    }
+}
+
+#[test]
 fn install_hook_refuses_overwrite() {
     let r = Repo::new();
     r.riskgrep(&["git", "install-hook"]).assert().code(0);

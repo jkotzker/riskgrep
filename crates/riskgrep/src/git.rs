@@ -8,7 +8,7 @@ use crate::cli::{GitCommand, HookArgs, PreCommitArgs};
 use crate::scan::{repo_root_git, EXIT_OK, EXIT_THRESHOLD};
 use crate::CliError;
 use riskgrep_core::config::{self, Action, GitConfig, Mode, Overrides};
-use riskgrep_core::model::round1;
+use riskgrep_core::model::{meets_threshold, round1};
 use riskgrep_core::{RiskGrep, TargetReport, TargetStatus};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -304,7 +304,7 @@ fn offences(path: &str, t: &TargetReport, git_cfg: &GitConfig) -> Vec<String> {
         let Some(&score) = t.scores.get(cat) else {
             continue;
         };
-        if score < *limit {
+        if !meets_threshold(score, *limit) {
             continue;
         }
         let mut rules = BTreeSet::new();
@@ -520,6 +520,24 @@ mod tests {
     #[test]
     fn display_escapes_controls() {
         assert_eq!(display(b"a\nb\xff"), "a\\nb\u{fffd}");
+    }
+
+    #[test]
+    fn offences_use_the_rounded_score() {
+        let cat = riskgrep_core::Category("secret".into());
+        let cfg = GitConfig {
+            block_at: [(cat.clone(), 80.0)].into(),
+            ..riskgrep_core::config::Config::default().git
+        };
+        let t = |score| TargetReport {
+            target: "x".into(),
+            status: TargetStatus::Scanned,
+            scores: [(cat.clone(), score)].into(),
+            evidence: vec![],
+            suppressed: 0,
+        };
+        assert_eq!(offences("x", &t(79.96), &cfg).len(), 1);
+        assert!(offences("x", &t(79.94), &cfg).is_empty());
     }
 
     #[test]

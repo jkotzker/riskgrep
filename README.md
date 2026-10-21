@@ -25,13 +25,13 @@ This puts `riskgrep` and `riskgrep-claude` in `~/.cargo/bin`. Run `riskgrep rule
 riskgrep scan path/to/file.env                  # a file
 riskgrep scan src/ --format json                # a directory, as JSON
 cat notes.txt | riskgrep scan -                 # standard input
-riskgrep scan . --fail-above secret=79.9,biometric=74.9
+riskgrep scan . --fail-at secret=80,biometric=75
 riskgrep baseline .                             # record current findings as known
 riskgrep rules list                             # every rule, category, and weight
 riskgrep rules test                             # run the rulesets' own test cases
 ```
 
-`--fail-above CATEGORY=N` makes the exit status 1 when a target's score for that category is above `N`. `--fail-above` compares strictly (a score must be above `N`), while the git hook's `block_at` and the Claude Code thresholds are inclusive (a score at the threshold counts), so `secret=79.9` matches the git hook's default block at 80: a file scoring exactly 80 exits 0 with `--fail-above secret=80` and 1 with `--fail-above secret=79.9` (measured with the release `riskgrep` on a generated generic `api_key` assignment scoring secret 80.0). Exit status 2 means a target could not be scanned and `--on-error block` applies; 3 is a usage or configuration error. When standard output is closed early (`riskgrep scan … | head -1`), the command stops writing without a message and keeps the exit status the scan computed, so a gate in a pipeline with `set -o pipefail` still fails on 1 or 2; a scan that passed exits 0 (`cargo test -p riskgrep --test epipe`). `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
+`--fail-at CATEGORY=N[,CATEGORY=N…]` makes the exit status 1 when a target's score for that category is at or above `N`. A target meets a threshold when its score rounded to one decimal, the number every output shows, is at least the threshold; `--fail-at`, the git hook's `block_at`, and the Claude Code hook's `ask` and `deny` thresholds all use that one rule (`cargo test -p riskgrep --test cli fail_at_is_inclusive`). Exit status 2 means a target could not be scanned and `--on-error block` applies; 3 is a usage or configuration error. When standard output is closed early (`riskgrep scan … | head -1`), the command stops writing without a message and keeps the exit status the scan computed, so a gate in a pipeline with `set -o pipefail` still fails on 1 or 2; a scan that passed exits 0 (`cargo test -p riskgrep --test epipe`). `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
 
 ## Git hook
 
@@ -79,6 +79,7 @@ The cache (compiled rules and per-file evidence, with no file content) is in `~/
 
 ## Changes users may notice
 
+- `--fail-above` is replaced by `--fail-at`, which is inclusive like the hook thresholds.
 - Relative paths in configuration (`extra_ruleset_dirs`, `trusted_repos`) resolve against the directory of the file that declares them (`~/.config/riskgrep/` for the user file, the repository root for `.riskgrep.toml`), never against the working directory. Use absolute paths where a path meant the working directory.
 - The user configuration file is read only when `HOME` is an absolute path; without one, the defaults apply and the cache is off.
 - Baselines identify findings decided by a tensor header or a path-name rule by the file's content, not by rule and path. Regenerate `.riskgrep-baseline.json` with `riskgrep baseline` if it holds such findings from an earlier build.

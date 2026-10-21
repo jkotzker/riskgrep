@@ -13,7 +13,7 @@ pub const EXIT_USAGE: i32 = 3;
     version,
     about = "Score files 0-100 per sensitive-data category",
     long_about = "Score files 0-100 per sensitive-data category (secrets, biometric embeddings).\n\n\
-Exit codes: 0 nothing above a --fail-above threshold; 1 a threshold was exceeded; \
+Exit codes: 0 no --fail-at threshold met; 1 a threshold was met; \
 2 a target could not be scanned and --on-error is block; 3 usage or configuration error. \
 A closed standard output ends the output quietly and keeps the exit code the scan computed."
 )]
@@ -67,17 +67,17 @@ pub struct ScanArgs {
     /// Output format
     #[arg(long, value_enum, default_value = "text")]
     pub format: Format,
-    /// Exit 1 when a target's unrounded score for CATEGORY is strictly greater
-    /// than N (0-100); comma-separated or repeated
+    /// Exit 1 when a target's score for CATEGORY, rounded to one decimal, is
+    /// at or above N (0-100); comma-separated or repeated
     #[arg(
-        long = "fail-above",
+        long = "fail-at",
         value_name = "CAT=N,...",
         value_delimiter = ',',
         value_parser = parse_threshold
     )]
-    pub fail_above: Vec<(String, f64)>,
+    pub fail_at: Vec<(String, f64)>,
     /// What an unscanned target does to the exit status: `block` exits 2.
-    /// Default: block when --fail-above is given, otherwise allow
+    /// Default: block when --fail-at is given, otherwise allow
     #[arg(long, value_enum)]
     pub on_error: Option<OnError>,
     /// Do not read or write the evidence cache

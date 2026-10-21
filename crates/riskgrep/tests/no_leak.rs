@@ -356,14 +356,14 @@ fn no_value_leaves_the_process() {
             &stdin_all,
         ));
         outs.push(w.run(
-            &format!("scan {fmt} fail-above"),
+            &format!("scan {fmt} fail-at"),
             "riskgrep",
             &w.work,
             &[
                 "scan",
                 "--format",
                 fmt,
-                "--fail-above",
+                "--fail-at",
                 "secret=1,biometric=1",
                 ".",
             ],
@@ -436,10 +436,10 @@ fn no_value_leaves_the_process() {
         "too few files reach a hook threshold"
     );
 
-    // Each other scan shows a nonzero score; --fail-above exits 1.
+    // Each other scan shows a nonzero score; --fail-at exits 1.
     let nonzero = Regex::new(r"[1-9]\d*\.\d").unwrap();
     for fmt in ["json", "text"] {
-        for what in ["files (no cache)", "files", "dir", "stdin", "fail-above"] {
+        for what in ["files (no cache)", "files", "dir", "stdin", "fail-at"] {
             let label = format!("scan {fmt} {what}");
             let o = find(&outs, &label);
             assert!(!o.stdout.is_empty(), "{label}: empty stdout");
@@ -453,7 +453,7 @@ fn no_value_leaves_the_process() {
             };
             assert!(shows, "{label}: no nonzero score shown");
         }
-        let label = format!("scan {fmt} fail-above");
+        let label = format!("scan {fmt} fail-at");
         assert_eq!(find(&outs, &label).code, Some(1), "{label}: exit status");
     }
 

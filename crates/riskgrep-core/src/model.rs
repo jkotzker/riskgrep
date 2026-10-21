@@ -9,6 +9,14 @@ pub fn round1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
 }
 
+/// Whether `score` meets `threshold`: the score rounded to one decimal, the
+/// number every output shows, is at or above it. Every threshold in RiskGrep
+/// (`scan --fail-at`, the git hook's `block_at`, the Claude Code hook's
+/// `ask` and `deny`) uses this one rule.
+pub fn meets_threshold(score: f64, threshold: f64) -> bool {
+    round1(score) >= threshold
+}
+
 fn ser_scores<S: Serializer>(m: &BTreeMap<Category, f64>, s: S) -> Result<S::Ok, S::Error> {
     s.collect_map(m.iter().map(|(k, v)| (k, round1(*v))))
 }
@@ -130,5 +138,23 @@ impl Report {
             summary,
             targets,
         }
+    }
+}
+
+#[cfg(test)]
+mod threshold_tests {
+    use super::*;
+
+    #[test]
+    fn threshold_is_inclusive_and_uses_the_rounded_score() {
+        assert!(meets_threshold(80.0, 80.0));
+        assert!(!meets_threshold(80.0, 80.1));
+        assert!(meets_threshold(80.0, 79.9));
+        // Raw 79.96 shows as 80.0, so it meets 80.
+        assert_eq!(round1(79.96), 80.0);
+        assert!(meets_threshold(79.96, 80.0));
+        // Raw 79.94 shows as 79.9, so it does not.
+        assert!(!meets_threshold(79.94, 80.0));
+        assert!(meets_threshold(79.94, 79.9));
     }
 }

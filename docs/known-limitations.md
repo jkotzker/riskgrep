@@ -261,7 +261,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 - **Not covered:** files past the 10,000th in one walk (`limits.walk_files`), symlinked files and directories found during a walk, and any directory entry that cannot be read (one unreadable entry fails the whole directory). Directories themselves do not count against the limit.
 - **Why:** a bound on work and on following links out of the tree.
-- **How it shows up:** symlinks appear as skipped targets. A walk that reaches the limit reports the directory `unscanned` with the reason `directory walk stopped at the limit of N files (limits.walk_files)`, so `on_error` applies: with `--on-error block` (the default when `--fail-above` is given) `riskgrep scan` exits 2 (`cargo test -p riskgrep --test cli walk_limit_follows_on_error`). Raise the limit or scan subdirectories separately.
+- **How it shows up:** symlinks appear as skipped targets. A walk that reaches the limit reports the directory `unscanned` with the reason `directory walk stopped at the limit of N files (limits.walk_files)`, so `on_error` applies: with `--on-error block` (the default when `--fail-at` is given) `riskgrep scan` exits 2 (`cargo test -p riskgrep --test cli walk_limit_follows_on_error`). Raise the limit or scan subdirectories separately.
 - **Planned fix:** none decided.
 
 ### Path rules see a path relative to the working directory

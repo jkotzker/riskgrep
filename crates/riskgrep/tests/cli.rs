@@ -57,7 +57,7 @@ fn key_dir() -> (tempfile::TempDir, PathBuf, String) {
 fn exit_0_below() {
     let (dir, _, _) = key_dir();
     riskgrep(dir.path())
-        .args(["scan", "key.txt", "--fail-above", "secret=99"])
+        .args(["scan", "key.txt", "--fail-at", "secret=99"])
         .assert()
         .code(0);
 }
@@ -66,18 +66,44 @@ fn exit_0_below() {
 fn exit_1_above() {
     let (dir, _, _) = key_dir();
     riskgrep(dir.path())
-        .args(["scan", "key.txt", "--fail-above", "secret=80"])
+        .args(["scan", "key.txt", "--fail-at", "secret=80"])
         .assert()
         .code(1);
 }
 
+/// A work directory holding `generic.txt`: a generated generic `api_key`
+/// assignment, which scores secret 80.0.
+fn generic_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let line = synth::fake_secret("generic_api_key_assignment", 5);
+    fs::write(dir.path().join("generic.txt"), format!("{line}\n")).unwrap();
+    dir
+}
+
 #[test]
-fn fail_above_is_strict() {
-    let (dir, _, _) = key_dir();
+fn fail_at_is_inclusive() {
+    let dir = generic_dir();
     riskgrep(dir.path())
-        .args(["scan", "key.txt", "--fail-above", "secret=95"])
+        .args(["scan", "generic.txt", "--format", "json"])
+        .assert()
+        .stdout(predicate::str::contains("\"secret\": 80.0"));
+    riskgrep(dir.path())
+        .args(["scan", "generic.txt", "--fail-at", "secret=80"])
+        .assert()
+        .code(1);
+    riskgrep(dir.path())
+        .args(["scan", "generic.txt", "--fail-at", "secret=80.1"])
         .assert()
         .code(0);
+}
+
+#[test]
+fn fail_above_is_removed() {
+    let (dir, _, _) = key_dir();
+    riskgrep(dir.path())
+        .args(["scan", "key.txt", "--fail-above", "secret=80"])
+        .assert()
+        .code(3);
 }
 
 #[test]
@@ -99,7 +125,7 @@ fn exit_2_unscanned_blocks() {
     fs::write(&file, "hello\n").unwrap();
     fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
     riskgrep(dir.path())
-        .args(["scan", "locked.txt", "--fail-above", "secret=80"])
+        .args(["scan", "locked.txt", "--fail-at", "secret=80"])
         .assert()
         .code(2);
     // Block is also selectable without a threshold.
@@ -119,7 +145,7 @@ fn exit_2_unscanned_blocks() {
         .args([
             "scan",
             "locked.txt",
-            "--fail-above",
+            "--fail-at",
             "secret=80",
             "--on-error",
             "allow",
@@ -138,7 +164,7 @@ fn threshold_exceeded_wins_over_unscanned() {
     fs::write(&locked, "x\n").unwrap();
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
     riskgrep(dir.path())
-        .args(["scan", "key.txt", "locked.txt", "--fail-above", "secret=80"])
+        .args(["scan", "key.txt", "locked.txt", "--fail-at", "secret=80"])
         .assert()
         .code(1);
 }
@@ -162,12 +188,12 @@ fn exit_3_bad_flag() {
 fn exit_3_unknown_category() {
     let (dir, _, _) = key_dir();
     riskgrep(dir.path())
-        .args(["scan", "key.txt", "--fail-above", "nonsense=50"])
+        .args(["scan", "key.txt", "--fail-at", "nonsense=50"])
         .assert()
         .code(3)
         .stderr(predicate::str::contains("nonsense"));
     riskgrep(dir.path())
-        .args(["scan", "key.txt", "--fail-above", "secret=lots"])
+        .args(["scan", "key.txt", "--fail-at", "secret=lots"])
         .assert()
         .code(3);
     riskgrep(dir.path())
@@ -341,7 +367,7 @@ fn category_filter() {
 fn default_path_is_cwd() {
     let (dir, _, _) = key_dir();
     riskgrep(dir.path())
-        .args(["scan", "--fail-above", "secret=80"])
+        .args(["scan", "--fail-at", "secret=80"])
         .assert()
         .code(1);
 }
@@ -356,7 +382,7 @@ fn baseline_roundtrip() {
         .status()
         .unwrap();
     riskgrep(dir.path())
-        .args(["scan", "key.txt", "--fail-above", "secret=80"])
+        .args(["scan", "key.txt", "--fail-at", "secret=80"])
         .assert()
         .code(1);
     riskgrep(dir.path())
@@ -366,7 +392,7 @@ fn baseline_roundtrip() {
         .stdout(predicate::str::contains("1 fingerprint"));
     assert!(dir.path().join(".riskgrep-baseline.json").is_file());
     riskgrep(dir.path())
-        .args(["scan", "key.txt", "--fail-above", "secret=80"])
+        .args(["scan", "key.txt", "--fail-at", "secret=80"])
         .assert()
         .code(0);
     // Creating a baseline again still sees the baselined finding.
