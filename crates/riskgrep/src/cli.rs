@@ -14,7 +14,8 @@ pub const EXIT_USAGE: i32 = 3;
     about = "Score files 0-100 per sensitive-data category",
     long_about = "Score files 0-100 per sensitive-data category (secrets, biometric embeddings).\n\n\
 Exit codes: 0 nothing above a --fail-above threshold; 1 a threshold was exceeded; \
-2 a target could not be scanned and --on-error is block; 3 usage or configuration error."
+2 a target could not be scanned and --on-error is block; 3 usage or configuration error. \
+A closed standard output ends the output quietly and keeps the exit code the scan computed."
 )]
 pub struct Cli {
     #[command(subcommand)]

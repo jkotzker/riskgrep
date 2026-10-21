@@ -52,3 +52,47 @@ fn scan_json_into_a_closed_pipe_exits_quietly() {
         assert_eq!(code, Some(0), "{format}");
     }
 }
+
+#[test]
+fn scan_into_a_closed_pipe_keeps_the_computed_exit_code() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let secret = riskgrep_core::synth::fake_secret("aws_access_key", 11);
+    std::fs::write(
+        cwd.path().join("a.txt"),
+        format!("let id = \"{secret}\";\n"),
+    )
+    .unwrap();
+    std::fs::write(cwd.path().join("b.txt"), "hello\n").unwrap();
+    for format in ["json", "text"] {
+        let (code, stderr) = closed_stdout(
+            &[
+                "scan",
+                "--format",
+                format,
+                "--fail-above",
+                "secret=50",
+                "a.txt",
+            ],
+            home.path(),
+            cwd.path(),
+        );
+        assert_eq!(stderr, "", "{format}");
+        assert_eq!(code, Some(1), "{format}");
+        // Nothing above the threshold: still a quiet 0.
+        let (code, stderr) = closed_stdout(
+            &[
+                "scan",
+                "--format",
+                format,
+                "--fail-above",
+                "secret=50",
+                "b.txt",
+            ],
+            home.path(),
+            cwd.path(),
+        );
+        assert_eq!(stderr, "", "{format}");
+        assert_eq!(code, Some(0), "{format}");
+    }
+}

@@ -167,7 +167,7 @@ fn unscanned(reason: &str) -> TargetStatus {
 
 /// Classification with the safetensors size check applied.
 fn classify(name: &str, head: &[u8], size: u64) -> FileClass {
-    match classify::classify(name, head) {
+    match classify::classify_sized(name, head, size) {
         FileClass::KnownBinary(Known::Safetensors)
             if !classify::safetensors_header_fits(head, size) =>
         {

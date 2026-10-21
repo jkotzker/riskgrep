@@ -154,8 +154,14 @@ pub fn scan(a: ScanArgs) -> Result<i32, CliError> {
             .and_then(|()| writeln!(stdout)),
         Format::Text => stdout.write_all(text::render(&report).as_bytes()),
     };
-    crate::stdout_result(written.and_then(|()| stdout.flush()))?;
-    Ok(exit_code(&report, &thresholds, on_error))
+    let code = exit_code(&report, &thresholds, on_error);
+    match written.and_then(|()| stdout.flush()) {
+        // The reader closed the pipe on purpose: no message, and the exit
+        // code the scan computed still applies (a gate must not pass).
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => std::process::exit(code),
+        r => r?,
+    }
+    Ok(code)
 }
 
 fn merge(mut parts: Vec<Report>) -> Report {

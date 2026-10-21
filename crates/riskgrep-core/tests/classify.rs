@@ -1,6 +1,6 @@
 use riskgrep_core::classify::{
-    classify, read_for_scan, safetensors_header_fits, slice_for_scan, FileClass, Known, Limits,
-    Tail,
+    classify, classify_sized, read_for_scan, safetensors_header_fits, slice_for_scan, FileClass,
+    Known, Limits, Tail, KEY_STORE_MAX,
 };
 use riskgrep_core::synth;
 use std::fs::File;
@@ -116,7 +116,7 @@ fn key_stores() {
     // Any DER SEQUENCE header for .der/.key: short-form lengths (PKCS#8
     // Ed25519/X25519 `30 2e`, Ed448 `30 47`, SEC1 P-256 without public key
     // `30 31`, P-224 `30 68`, secp256k1 `30 74`, brainpoolP256r1 `30 78`) and
-    // long forms `81`, `82`, `83`. `.p12`/`.pfx` keep `30 82` only.
+    // long forms `81` and `82`. `.p12`/`.pfx` keep `30 82` only.
     for prefix in [
         vec![0x30, 0x2e, 0x02, 0x01, 0x00, 0x30],
         vec![0x30, 0x31, 0x02, 0x01, 0x01, 0x04],
@@ -124,7 +124,6 @@ fn key_stores() {
         vec![0x30, 0x68, 0x02, 0x01, 0x01, 0x04],
         vec![0x30, 0x74, 0x02, 0x01, 0x01, 0x04],
         vec![0x30, 0x78, 0x02, 0x01, 0x01, 0x04],
-        vec![0x30, 0x83, 0x01, 0x00, 0x00, 0x02, 0x01, 0x00],
     ] {
         let h = pad(prefix.clone(), 32);
         for name in ["a.der", "a.key", "A.KEY"] {
@@ -144,8 +143,9 @@ fn key_stores() {
             );
         }
     }
-    // Not a DER length byte: indefinite (`80`) or a length of 4+ bytes.
-    for second in [0x80u8, 0x84, 0xff] {
+    // Not a recognised length byte: indefinite (`80`), or a length of 3+ bytes
+    // (`83` is a valid DER length that no key-store rule matches).
+    for second in [0x80u8, 0x83, 0x84, 0xff] {
         let h = pad(vec![0x30, second, 0x02, 0x01, 0x00], 32);
         assert_ne!(
             classify("a.key", &h),
@@ -157,6 +157,22 @@ fn key_stores() {
         classify("a.key", &[0x30]),
         FileClass::KnownBinary(Known::KeyStore)
     );
+    // Larger than 1 MiB: not a key store, so a text file whose first bytes
+    // look like a header takes the text path (and its tail is scanned).
+    let h = pad(vec![0x30, 0x78, 0x02, 0x01, 0x01, 0x04], 32);
+    for name in ["a.der", "a.key"] {
+        assert_eq!(
+            classify_sized(name, &h, KEY_STORE_MAX),
+            FileClass::KnownBinary(Known::KeyStore)
+        );
+        assert_eq!(
+            classify_sized(name, &h, KEY_STORE_MAX + 1),
+            FileClass::Text,
+            "{name}"
+        );
+    }
+    let h = pad(b"0x big text\n".to_vec(), 32);
+    assert_eq!(classify_sized("a.key", &h, 9 << 20), FileClass::Text);
     // PEM .key stays text
     let pem = pad(b"-----BEGIN PRIVATE KEY-----\n".to_vec(), 64);
     assert_eq!(classify("a.key", &pem), FileClass::Text);

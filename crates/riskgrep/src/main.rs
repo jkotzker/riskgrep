@@ -57,7 +57,8 @@ impl From<std::io::Error> for CliError {
 /// The result of a write to standard output. A closed pipe (`riskgrep
 /// rules list | head -1`) means the reader stopped on purpose: the process
 /// exits at once with status 0 and prints nothing. Other errors are
-/// returned.
+/// returned. (`scan` handles a closed pipe itself so that the exit code it
+/// computed is kept.)
 pub fn stdout_result<T>(r: std::io::Result<T>) -> Result<T, CliError> {
     match r {
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => std::process::exit(0),

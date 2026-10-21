@@ -142,8 +142,19 @@ fn image_kind(head: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Classify a file from its name and first bytes (the sniff window).
+/// The largest `.der` or `.key` file read as a key store (1 MiB). Larger
+/// files take the text or binary path, so a text file whose first bytes
+/// happen to look like a DER header is scanned like any other text.
+pub const KEY_STORE_MAX: u64 = 1 << 20;
+
+/// Classify a file from its name and first bytes (the sniff window), taking
+/// the file size to be the length of `head`.
 pub fn classify(name: &str, head: &[u8]) -> FileClass {
+    classify_sized(name, head, head.len() as u64)
+}
+
+/// Classify a file from its name, first bytes (the sniff window), and size.
+pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
     if head.starts_with(&[0x93, b'N', b'U', b'M', b'P', b'Y']) {
         return FileClass::KnownBinary(Known::Npy);
     }
@@ -159,14 +170,16 @@ pub fn classify(name: &str, head: &[u8]) -> FileClass {
     }
     let has_ext = |exts: &[&str]| exts.iter().any(|ext| ends_with_ignore_case(name, ext));
     // DER SEQUENCE: `30 82` (two-byte length) for PKCS #12 files; for
-    // `.der`/`.key`, any SEQUENCE with a valid length byte (short form below
-    // 0x80, or long form 0x81 to 0x83), so every private-key layout reaches
+    // `.der`/`.key` of at most `KEY_STORE_MAX` bytes, any SEQUENCE whose
+    // length byte is short form (below 0x80) or long form `81` or `82` (the
+    // forms the key-store rules match), so every private-key layout reaches
     // the rules (PKCS#8 Ed25519 is `30 2e`, SEC1 P-224 `30 68`), which then
     // decide whether it is a key.
-    let der_sequence = head.first() == Some(&0x30)
+    let der_sequence = size <= KEY_STORE_MAX
+        && head.first() == Some(&0x30)
         && head
             .get(1)
-            .is_some_and(|&l| l < 0x80 || (0x81..=0x83).contains(&l));
+            .is_some_and(|&l| l < 0x80 || (0x81..=0x82).contains(&l));
     if (head.starts_with(&[0x30, 0x82]) && has_ext(&[".p12", ".pfx"]))
         || (der_sequence && has_ext(&[".der", ".key"]))
     {

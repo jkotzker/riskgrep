@@ -450,7 +450,7 @@ fn der_structures_that_are_not_private_keys() {
 
 #[test]
 fn ec_key_file_end_to_end() {
-    use riskgrep_core::classify::{classify, read_for_scan, FileClass, Known, Limits};
+    use riskgrep_core::classify::{classify_sized, read_for_scan, FileClass, Known, Limits};
     use std::io::Write;
     let mut f = tempfile::Builder::new().suffix(".key").tempfile().unwrap();
     f.write_all(&der_with(&[0x30, 0x77, 0x02, 0x01, 0x01, 0x04], 9))
@@ -462,7 +462,7 @@ fn ec_key_file_end_to_end() {
     let mut head = vec![0u8; (limits.sniff as u64).min(size) as usize];
     std::os::unix::fs::FileExt::read_exact_at(&file, &mut head, 0).unwrap();
     let name = f.path().to_string_lossy().into_owned();
-    let class = classify(&name, &head);
+    let class = classify_sized(&name, &head, size);
     assert_eq!(class, FileClass::KnownBinary(Known::KeyStore));
     let content = read_for_scan(&file, size, &class, &limits).unwrap();
     assert_eq!(content.bytes.len() as u64, size);
@@ -535,6 +535,43 @@ fn text_key_file_starting_with_a_digit_is_still_scanned_for_tokens() {
         got[0].2
     );
     assert_eq!(got[0].1, Some(95.0));
+}
+
+#[test]
+fn large_text_key_file_starting_with_a_digit_is_scanned_whole() {
+    // Over 1 MiB the leading `0x` is not read as a DER header, so the file
+    // takes the text path (first and last megabyte past 8 MiB) and a secret
+    // on its last line is found; the same bytes named `.txt` score the same.
+    let dir = tempfile::tempdir().unwrap();
+    let secret = synth::fake_secret("aws_access_key", 21);
+    let mut body = b"0x header\n".to_vec();
+    let filler = b"lorem ipsum dolor sit amet, consectetur adipiscing elit\n";
+    while body.len() < 9 << 20 {
+        body.extend_from_slice(filler);
+    }
+    body.extend_from_slice(format!("aws_access_key_id = \"{secret}\"\n").as_bytes());
+    let mut paths = Vec::new();
+    for name in ["big.key", "big.der", "big.txt"] {
+        let p = dir.path().join(name);
+        std::fs::write(&p, &body).unwrap();
+        paths.push(p);
+    }
+    for (target, secret, rules) in scan_files(&paths) {
+        assert_eq!(secret, Some(95.0), "{target} {rules:?}");
+    }
+}
+
+#[test]
+fn der_header_with_a_three_byte_length_is_not_a_key_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("k.key");
+    std::fs::write(
+        &p,
+        der_with(&[0x30, 0x83, 0x01, 0x00, 0x00, 0x02, 0x01, 0x00], 8),
+    )
+    .unwrap();
+    let got = scan_files(&[p]);
+    assert_eq!(got[0].1, None, "{:?}", got[0].2);
 }
 
 #[test]

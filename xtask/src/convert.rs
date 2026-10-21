@@ -198,6 +198,34 @@ const MAX_ATOM_CLASS: u32 = 11;
 /// Repetitions this long or longer give four-byte atoms.
 const ATOM_RUN: u32 = 4;
 
+/// True when the regex has an inline flag group that mentions `m`, whether it
+/// turns multi-line mode on or off (`(?m)`, `(?im)`, `(?m:...)`, `(?-m:...)`).
+/// A regex that does not parse is reported as not setting it.
+pub fn sets_multi_line(re: &str) -> bool {
+    regex_syntax::ast::parse::Parser::new()
+        .parse(re)
+        .is_ok_and(|ast| ast_sets_multi_line(&ast))
+}
+
+fn ast_sets_multi_line(a: &regex_syntax::ast::Ast) -> bool {
+    use regex_syntax::ast::{Ast, Flag, FlagsItemKind, GroupKind};
+    let has_m = |f: &regex_syntax::ast::Flags| {
+        f.items
+            .iter()
+            .any(|i| matches!(i.kind, FlagsItemKind::Flag(Flag::MultiLine)))
+    };
+    match a {
+        Ast::Flags(f) => has_m(&f.flags),
+        Ast::Group(g) => {
+            matches!(&g.kind, GroupKind::NonCapturing(f) if has_m(f)) || ast_sets_multi_line(&g.ast)
+        }
+        Ast::Repetition(r) => ast_sets_multi_line(&r.ast),
+        Ast::Alternation(alt) => alt.asts.iter().any(ast_sets_multi_line),
+        Ast::Concat(c) => c.asts.iter().any(ast_sets_multi_line),
+        _ => false,
+    }
+}
+
 /// Keeps YARA-X from choosing its atoms (the literals it searches for before
 /// running a regex) inside a run of digits.
 ///
@@ -207,18 +235,24 @@ const ATOM_RUN: u32 = 4;
 /// offset of digit-dense text (measured: 0.8 MB of printed numbers took
 /// about 1 s with the secrets ruleset). Each repetition of at least
 /// [`ATOM_RUN`] over a class of at most [`MAX_ATOM_CLASS`] bytes, none of
-/// them letters, becomes `(?:RUN|$^)`. `$^` needs one position to be both
-/// the start and the end of the input, so it can only match an empty input;
-/// a regex that cannot match the empty string matches exactly what it did
-/// before, and the rewrite is only made for such regexes. With the run
-/// wrapped, YARA-X 1.21 takes its atoms from the regex's other literals
-/// (measured by scan time; `eval/README.md`, round 6). Only the YARA-X anchor is rewritten; `span_regex`
-/// keeps the original.
+/// them letters, becomes `(?:RUN|$^)`. Without multi-line mode, `$^` needs
+/// one position to be both the start and the end of the input, so it can
+/// only match an empty input; a regex that cannot match the empty string
+/// matches exactly what it did before, and the rewrite is only made for such
+/// regexes. In multi-line mode `$^` also matches between a line end and the
+/// next line start, so a regex that sets multi-line mode (see
+/// [`sets_multi_line`]) is returned unchanged. With the run wrapped, YARA-X
+/// 1.21 takes its atoms from the regex's other literals (measured by scan
+/// time; `eval/README.md`, round 6). Only the YARA-X anchor is rewritten;
+/// `span_regex` keeps the original.
 pub fn steer_atoms(re: &str) -> String {
     use regex_syntax::ast::{parse::Parser, Ast, RepetitionKind, RepetitionRange};
     let Ok(ast) = Parser::new().parse(re) else {
         return re.to_string();
     };
+    if ast_sets_multi_line(&ast) {
+        return re.to_string();
+    }
     let nonempty = regex_syntax::ParserBuilder::new()
         .unicode(false)
         .utf8(false)
@@ -847,6 +881,12 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
         let mut hir = None;
         if let Some(re) = &r.regex {
             let compiled = check_regex(&r.id, "regex", re)?;
+            if sets_multi_line(re) {
+                skipped.push((
+                    r.id.clone(),
+                    "atom steering not applied: the regex sets multi-line mode".into(),
+                ));
+            }
             let explicit = compiled.captures_len() - 1;
             let parsed = parse_hir(&r.id, re)?;
             let group1_nonempty = find_capture(&parsed, 1)
@@ -1068,7 +1108,7 @@ fn upstream_md(
         "- Each rule becomes one YARA-X rule named after the gitleaks id with `-` replaced by `_` (and `_` prepended to an id starting with a digit).\n\
          - Regexes are read with Go (RE2) syntax: a `{{` that does not start a repetition is escaped for Rust and YARA-X; nothing else changes.\n\
          - The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The original regex is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret: `secretGroup` when the rule sets it, otherwise as gitleaks does, the first capture group that matched non-empty, else the whole match (`secret_group = \"first_nonempty\"`; `secret_group = 1` when group 1 always takes part and is never empty, which selects the same text).\n\
-         - In `$re` only, a repetition of 4 or more over a class of at most 11 characters with no letters (`[0-9]{{11}}`, `\\d{{15,16}}`) is written `(?:RUN|$^)`. YARA-X otherwise searches for every 4-digit string in place of the rule's literal prefix, which made digit-dense text scan as slowly as 0.8 MB/s. `$^` matches only an empty input and no converted regex matches the empty string, so `$re` matches exactly what it did.\n\
+         - In `$re` only, a repetition of 4 or more over a class of at most 11 characters with no letters (`[0-9]{{11}}`, `\\d{{15,16}}`) is written `(?:RUN|$^)`. YARA-X otherwise searches for every 4-digit string in place of the rule's literal prefix, which made digit-dense text scan as slowly as 0.8 MB/s. Without multi-line mode `$^` matches only an empty input and no converted regex matches the empty string, so `$re` matches exactly what it did. A regex that sets multi-line mode (an inline flag group containing `m`) is not rewritten, because `$^` also matches between lines there; the rule is listed under Not translated.\n\
          - Keywords are `nocase` literals `$kw0..n`; the rule needs one of them and `$re`.\n\
          - `entropy` becomes the `entropy` post-processor on the secret. gitleaks drops a secret whose entropy is at most the threshold; the post-processor drops one below it.\n\
          - Allowlist stopwords become `stopwords/secrets_core_<rule>.txt` (rule and global stopwords) or `stopwords/secrets_core_global.txt` (global only).\n\

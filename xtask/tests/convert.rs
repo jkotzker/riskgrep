@@ -4,7 +4,7 @@ use riskgrep_core::bundle::load_or_compile;
 use riskgrep_core::ruleset::Ruleset;
 use std::fs;
 use std::path::{Path, PathBuf};
-use xtask::{convert_gitleaks, lazy_to_greedy, steer_atoms, PINNED_TAG};
+use xtask::{convert_gitleaks, lazy_to_greedy, sets_multi_line, steer_atoms, PINNED_TAG};
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
@@ -173,6 +173,46 @@ fn digit_runs_are_kept_out_of_atom_selection() {
     // Only when the regex cannot match the empty string: then `$^` (start
     // and end of the input at one position) never takes part in a match.
     assert_eq!(steer_atoms(r"(?:[0-9]{4})?"), r"(?:[0-9]{4})?");
+}
+
+#[test]
+fn multi_line_regexes_are_not_steered() {
+    // Under multi-line mode `$^` matches between a line end and the next
+    // line start, so the wrapped alternative could match: steering is skipped
+    // for any regex with an `m` flag group.
+    for re in [
+        r"(?m)ntn_[0-9]{11}x",
+        r"(?im)ntn_[0-9]{11}x",
+        r"(?:(?m)ntn_[0-9]{11})x",
+        r"(?m:ntn_[0-9]{11})x",
+        r"(?-m:ntn_[0-9]{11})x",
+    ] {
+        assert!(sets_multi_line(re), "{re}");
+        assert_eq!(steer_atoms(re), re, "{re}");
+    }
+    assert!(!sets_multi_line(r"(?i)ntn_[0-9]{11}x"));
+    assert!(!sets_multi_line(r"ntn_[0-9]{11}m"));
+    assert!(!sets_multi_line("(?s)ntn_[0-9]{11}x"));
+    assert_eq!(
+        steer_atoms(r"(?s)ntn_[0-9]{11}x"),
+        r"(?s)ntn_(?:[0-9]{11}|$^)x"
+    );
+}
+
+#[test]
+fn converter_records_a_skipped_steering() {
+    let cfg = b"title = \"t\"\n[[rules]]\nid = \"multi\"\nregex = '(?m)^ab_[0-9]{11}$'\nkeywords = [\"ab_\"]\n\
+[[rules]]\nid = \"plain\"\nregex = 'cd_[0-9]{11}'\nkeywords = [\"cd_\"]\n";
+    let d = tempfile::tempdir().unwrap();
+    convert_gitleaks(cfg, "v0", d.path()).unwrap();
+    let yar = fs::read_to_string(d.path().join("gitleaks.yar")).unwrap();
+    assert_eq!(yar.matches("|$^)").count(), 1, "only `plain` is steered");
+    let md = fs::read_to_string(d.path().join("UPSTREAM.md")).unwrap();
+    assert!(
+        md.contains("| `multi` | atom steering not applied: the regex sets multi-line mode |"),
+        "{md}"
+    );
+    assert!(!md.contains("| `plain` |"));
 }
 
 #[test]
