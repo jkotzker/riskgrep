@@ -4,9 +4,23 @@ RiskGrep is a local scanner that scores files from 0 to 100 per sensitive-data c
 
 It has three front ends: the `riskgrep` command line, a git `pre-commit` hook, and `riskgrep-claude`, a Claude Code `PreToolUse` hook that asks or denies before an agent reads a sensitive file.
 
-Threat model: RiskGrep protects against accidental exposure by a cooperative agent or person; it does not resist one that works around it on purpose (see [Known limitations](docs/known-limitations.md)).
-
 Licensed under MIT or Apache-2.0, at your option.
+
+## What RiskGrep is
+
+- **A static risk-assessment tool.** It scores files, directories, standard input, and the files a shell command names, from 0 to 100 for each category of sensitive data.
+- **Heuristic, with no LLM.** Scores come from pattern rules, checksums, and structural checks such as file headers and tensor shapes. Nothing is sent to a model or over the network, and with the same rules and configuration the same input always gets the same score.
+- **A way to assess content without reading it.** Agents and automated systems learn how risky something is before they open it. Reports carry rule identifiers, paths, line numbers, and scores, never the matched content.
+- **Scores first, decisions second.** The command line reports scores and fails only at thresholds you choose; the git hook blocks at its thresholds; the Claude Code hook asks or denies at its own. Each consumer sets the policy that fits it.
+
+## What RiskGrep is not
+
+- **Not a security measure against a hostile agent.** It protects against accidental exposure by a cooperative agent or person. An agent that sets out to get around it can do so, for example by editing your configuration, reading a file through a path RiskGrep does not see, or running a program that opens the file itself.
+- **Not a replacement for sandboxing.** It does not isolate processes or restrict what a program can reach on the filesystem or the network.
+- **Not a replacement for permission rules.** It does not control access to files or tools; it scores content so that something else can decide. Keep your file permissions and your agent's allow and deny rules.
+- **Not a guarantee of anything.** Heuristics miss sensitive content and flag harmless content. A low score does not mean a file is safe, and a hook decision does not guarantee that a read, a commit, or a leak is prevented. See [Known limitations](docs/known-limitations.md).
+
+Use it as one layer alongside those controls, not in place of them.
 
 ## Install
 
