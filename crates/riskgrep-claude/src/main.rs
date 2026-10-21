@@ -184,7 +184,12 @@ fn work(
             let t = bash_targets_within(cmd, cwd, budget);
             unresolved = t.unresolved;
             if t.files.is_empty() {
-                return decide(&Report::from_targets("", "", Vec::new()), unresolved, &cc);
+                return decide(
+                    &Report::from_targets("", "", Vec::new()),
+                    unresolved,
+                    &cc,
+                    None,
+                );
             }
             Job::Files(t.files)
         }
@@ -212,7 +217,7 @@ fn work(
         return error_decision(cc.on_error, "RiskGrep: could not start scan");
     }
     match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(Ok(report)) => decide(&report, unresolved, &cc),
+        Ok(Ok(report)) => decide(&report, unresolved, &cc, input::requested_lines(hook)),
         Ok(Err(reason)) => error_decision(cc.on_error, &format!("RiskGrep: {reason}")),
         Err(RecvTimeoutError::Timeout) => {
             error_decision(cc.on_error, "RiskGrep: scan exceeded time budget")
@@ -269,6 +274,7 @@ fn scan(
             scores: Default::default(),
             evidence: Vec::new(),
             suppressed: 0,
+            text: false,
         });
         report = Report::from_targets(&report.riskgrep_version, &report.rules_bundle, targets);
     }

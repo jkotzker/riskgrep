@@ -4,7 +4,9 @@ use riskgrep_core::bundle::load_or_compile;
 use riskgrep_core::ruleset::Ruleset;
 use std::fs;
 use std::path::{Path, PathBuf};
-use xtask::{convert_gitleaks, lazy_to_greedy, sets_multi_line, steer_atoms, PINNED_TAG};
+use xtask::{
+    can_match_newline, convert_gitleaks, lazy_to_greedy, sets_multi_line, steer_atoms, PINNED_TAG,
+};
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
@@ -41,6 +43,66 @@ fn other_lazy_forms() {
     assert_eq!(lazy_to_greedy("[[:alnum:]?]*?[]?]+?"), "[[:alnum:]?]*[]?]+");
     // An escaped backslash does not escape the next quantifier.
     assert_eq!(lazy_to_greedy(r"\\+?"), r"\\+");
+}
+
+#[test]
+fn newline_reachability() {
+    for re in [
+        r"AKIA[A-Z2-7]{16}",
+        r"ghp_[0-9a-zA-Z]{36}",
+        r"(?i)key[ \t]*=[ \t]*([a-z0-9]{8})",
+        r"a.b",
+        r"(?m)^x$",
+        r"[^\n]+",
+        r"\\n",
+        // `\v` is a vertical tab, not a class.
+        r"\v",
+    ] {
+        assert!(!can_match_newline(re).unwrap(), "{re}");
+    }
+    for re in [
+        r"a\sb",
+        r"[\s\S]",
+        r"(?s)a.b",
+        r"(?s:.)",
+        r"[^x]",
+        r"[^'\x22]+",
+        r"a\nb",
+        r"\x0a",
+        r"[\x00-\x7f]",
+        r"[[:space:]]",
+        r"(?-u:\W)",
+        r"\D",
+        r#"[^"]+"#,
+    ] {
+        assert!(can_match_newline(re).unwrap(), "{re}");
+    }
+    assert!(can_match_newline("(").is_err());
+}
+
+/// The `meta:` block of rule `ident` in the committed `gitleaks.yar`.
+fn rule_meta(ident: &str) -> String {
+    let src = fs::read_to_string(repo().join("rulesets/secrets-core/gitleaks.yar")).unwrap();
+    let start = src
+        .find(&format!("rule {ident} {{"))
+        .unwrap_or_else(|| panic!("rule {ident}"));
+    let rest = &src[start..];
+    rest[..rest.find("condition:").unwrap()].to_string()
+}
+
+#[test]
+fn line_complete_marks_rules_whose_matches_stay_on_one_line() {
+    for ident in ["aws_access_token", "github_pat", "slack_bot_token"] {
+        assert!(rule_meta(ident).contains("line_complete = true"), "{ident}");
+    }
+    for ident in [
+        "private_key",
+        "kubernetes_secret_yaml",
+        "pkcs12_file",
+        "generic_api_key",
+    ] {
+        assert!(!rule_meta(ident).contains("line_complete"), "{ident}");
+    }
 }
 
 fn rule_count(config: &[u8]) -> usize {

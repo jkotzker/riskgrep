@@ -94,6 +94,8 @@ struct Raw {
     /// False for targets that are not content (a directory that hit the walk
     /// limit): they get no scores.
     content: bool,
+    /// The content was scanned as text (see [`TargetReport::text`]).
+    text: bool,
 }
 
 impl Raw {
@@ -104,16 +106,24 @@ impl Raw {
             status,
             evidence: Vec::new(),
             content: false,
+            text: false,
         }
     }
 
-    fn scanned(target: String, rel: String, status: TargetStatus, evidence: Vec<Evidence>) -> Raw {
+    fn scanned(
+        target: String,
+        rel: String,
+        status: TargetStatus,
+        evidence: Vec<Evidence>,
+        text: bool,
+    ) -> Raw {
         Raw {
             target,
             status,
             evidence,
             rel,
             content: true,
+            text,
         }
     }
 }
@@ -125,6 +135,8 @@ struct Pending {
     path_ext: String,
     ekey: String,
     content: Content,
+    /// The content is text (see [`TargetReport::text`]).
+    text: bool,
     /// Evidence-cache key; `None` when the result must not be cached.
     hash: Option<[u8; 32]>,
     /// Stat entry to record, with the time the file was examined (taken
@@ -414,6 +426,7 @@ impl RiskGrep {
                 path_ext: "<stdin>".into(),
                 ekey: String::new(),
                 content,
+                text: true,
                 hash: None,
                 stat: None,
             }),
@@ -424,8 +437,10 @@ impl RiskGrep {
 
     /// Scan one git blob. `name` is its repository-relative path; results are
     /// cached by `blob_id`. With `only_lines`, evidence located outside those
-    /// lines is dropped before scoring, unless the blob was only partly read:
-    /// then line numbers of its tail are unknown and all evidence is kept.
+    /// lines is dropped before scoring, unless the blob was only partly read
+    /// (line numbers of its tail are unknown) or is not text (a key store or
+    /// tensor file, whose offsets are not lines of a diff): then all evidence
+    /// is kept.
     pub fn scan_blob(
         &mut self,
         name: &str,
@@ -435,7 +450,7 @@ impl RiskGrep {
     ) -> TargetReport {
         let mut raw = self.prepare_blob(name, blob_id, bytes);
         if let Some(only) = only_lines {
-            if !matches!(raw.status, TargetStatus::Partial { .. }) {
+            if raw.text && !matches!(raw.status, TargetStatus::Partial { .. }) {
                 keep_lines(&mut raw.evidence, only);
             }
         }
@@ -459,7 +474,13 @@ impl RiskGrep {
             .as_ref()
             .and_then(|c| c.evidence(blob_key, &ekey))
         {
-            return Raw::scanned(name.into(), name.into(), TargetStatus::Scanned, ev);
+            return Raw::scanned(
+                name.into(),
+                name.into(),
+                TargetStatus::Scanned,
+                ev,
+                class == FileClass::Text,
+            );
         }
         match classify::slice_for_scan(bytes, &class, &self.cfg.limits) {
             Err(e) => Raw::status(name.to_string(), unreadable(&e)),
@@ -474,6 +495,7 @@ impl RiskGrep {
                 ekey,
                 hash: content.partial.is_none().then_some(blob_key),
                 content,
+                text: class == FileClass::Text,
                 stat: None,
             }),
         }
@@ -596,12 +618,14 @@ impl RiskGrep {
         let ekey = format!("{}:{path_ext}", self.key);
         let rel = relative_to(self.rel_base.as_deref(), &real);
         let cache = self.cache.as_ref();
+        let text = class == FileClass::Text;
         let hit = |ev: Vec<Evidence>| {
             Ok(Step::Done(Raw::scanned(
                 target.to_string(),
                 rel.clone(),
                 TargetStatus::Scanned,
                 ev,
+                text,
             )))
         };
         if let Some(c) = cache {
@@ -647,6 +671,7 @@ impl RiskGrep {
             path_ext,
             ekey,
             content,
+            text,
             hash,
             stat: stable.then_some((key, now)),
         })))
@@ -676,7 +701,7 @@ impl RiskGrep {
             Some(not_read) => TargetStatus::Partial { not_read },
             None => TargetStatus::Scanned,
         };
-        Raw::scanned(p.target, p.rel, status, ev)
+        Raw::scanned(p.target, p.rel, status, ev, p.text)
     }
 
     fn load_engine(&mut self) {
@@ -776,6 +801,7 @@ impl RiskGrep {
             scores: BTreeMap::new(),
             evidence: raw.evidence,
             suppressed: 0,
+            text: raw.text,
         };
         if !raw.content {
             return t;
@@ -785,14 +811,17 @@ impl RiskGrep {
             _ => {
                 t.status = unscanned("rule load failure");
                 t.evidence.clear();
+                t.text = false;
                 return t;
             }
         };
         t.evidence.retain(|e| self.categories.contains(&e.category));
         for e in &mut t.evidence {
-            if let Some(m) = sm.keys.get(&e.rule).and_then(|k| sm.meta.get(k)) {
+            let m = sm.keys.get(&e.rule).and_then(|k| sm.meta.get(k));
+            if let Some(m) = m {
                 e.weight = m.weight;
             }
+            e.line_complete = m.is_some_and(|m| m.line_complete);
         }
         let rel = raw.rel;
         suppress::apply(

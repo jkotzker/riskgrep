@@ -756,3 +756,17 @@ fn pathological_digit_text_is_fast_and_negative() {
         assert!(start.elapsed().as_secs_f64() < 1.0);
     }
 }
+
+#[test]
+fn no_biometric_rule_is_line_complete() {
+    // Path and tensor rules have no text lines; the printed-float rules are
+    // not proven to cover every float of an array.
+    let f = fixture();
+    let marked: Vec<&String> = f
+        .meta
+        .iter()
+        .filter(|(_, m)| m.line_complete)
+        .map(|(k, _)| k)
+        .collect();
+    assert!(marked.is_empty(), "{marked:?}");
+}

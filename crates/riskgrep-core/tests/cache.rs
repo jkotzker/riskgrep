@@ -34,6 +34,7 @@ fn ev(rule: &str, fp: [u8; 32]) -> Evidence {
         }],
         shape: vec![],
         fingerprints: vec![fp],
+        line_complete: false,
     }
 }
 

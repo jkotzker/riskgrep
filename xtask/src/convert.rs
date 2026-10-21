@@ -569,6 +569,34 @@ fn parse_hir(owner: &str, src: &str) -> Result<Hir, String> {
         .map_err(|e| format!("{owner}: regex does not parse: {e}"))
 }
 
+/// Whether `re` can match text containing a line feed: any literal or class
+/// that admits `\n` (`\s`, `[^x]`, `(?s:.)`, `[\s\S]`, `\x0a`) anywhere in
+/// it. A regex that cannot is "line-complete" once every match of it is
+/// located (see the `span` post-processor): each match lies on the lines its
+/// location names. Parsed as the scan engine compiles it (bytes, no
+/// Unicode).
+pub fn can_match_newline(re: &str) -> Result<bool, String> {
+    fn walk(h: &Hir) -> bool {
+        use regex_syntax::hir::Class;
+        match h.kind() {
+            HirKind::Empty | HirKind::Look(_) => false,
+            HirKind::Literal(l) => l.0.contains(&b'\n'),
+            HirKind::Class(Class::Bytes(c)) => c
+                .ranges()
+                .iter()
+                .any(|r| r.start() <= b'\n' && b'\n' <= r.end()),
+            HirKind::Class(Class::Unicode(c)) => c
+                .ranges()
+                .iter()
+                .any(|r| r.start() <= '\n' && '\n' <= r.end()),
+            HirKind::Repetition(r) => r.max != Some(0) && walk(&r.sub),
+            HirKind::Capture(c) => walk(&c.sub),
+            HirKind::Concat(v) | HirKind::Alternation(v) => v.iter().any(walk),
+        }
+    }
+    Ok(walk(&parse_hir("regex", re)?))
+}
+
 fn find_capture(h: &Hir, index: u32) -> Option<&Hir> {
     match h.kind() {
         HirKind::Capture(c) if c.index == index => Some(&c.sub),
@@ -984,6 +1012,9 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
                 meta.push(format!("post = {}", yara_str(&post.join(","))));
                 meta.push(format!("span_regex = {}", yara_str(re)));
                 meta.push(format!("secret_group = {}", group.meta_value()));
+                if !can_match_newline(re).map_err(|e| format!("{}: {e}", r.id))? {
+                    meta.push("line_complete = true".into());
+                }
                 if let Some(e) = entropy {
                     meta.push(format!("min_entropy = {}", number(e)));
                 }
@@ -1109,6 +1140,8 @@ fn upstream_md(
          - Regexes are read with Go (RE2) syntax: a `{{` that does not start a repetition is escaped for Rust and YARA-X; nothing else changes.\n\
          - The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The original regex is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret: `secretGroup` when the rule sets it, otherwise as gitleaks does, the first capture group that matched non-empty, else the whole match (`secret_group = \"first_nonempty\"`; `secret_group = 1` when group 1 always takes part and is never empty, which selects the same text).\n\
          - In `$re` only, a repetition of 4 or more over a class of at most 11 characters with no letters (`[0-9]{{11}}`, `\\d{{15,16}}`) is written `(?:RUN|$^)`. YARA-X otherwise searches for every 4-digit string in place of the rule's literal prefix, which made digit-dense text scan as slowly as 0.8 MB/s. Without multi-line mode `$^` matches only an empty input and no converted regex matches the empty string, so `$re` matches exactly what it did. A regex that sets multi-line mode (an inline flag group containing `m`) is not rewritten, because `$^` also matches between lines there; the rule is listed under Not translated.\n\
+         - The `span` post-processor reports every non-overlapping match of `span_regex` inside each `$re` match, so a match that runs over several secrets yields one location per secret.\n\
+         - `line_complete = true` is set when no part of `span_regex` can match a line feed: any literal or class that admits one rejects the rule, including `\\s`, `\\W`, `\\D`, negated classes, `[\\s\\S]`, dot-all `.`, `[[:space:]]`, and `\\n` or `\\x0a`. Each match of such a rule then lies on the lines of its location, and the Claude Code hook offers partial reads only for files whose findings all come from such rules.\n\
          - Keywords are `nocase` literals `$kw0..n`; the rule needs one of them and `$re`.\n\
          - `entropy` becomes the `entropy` post-processor on the secret. gitleaks drops a secret whose entropy is at most the threshold; the post-processor drops one below it.\n\
          - Allowlist stopwords become `stopwords/secrets_core_<rule>.txt` (rule and global stopwords) or `stopwords/secrets_core_global.txt` (global only).\n\

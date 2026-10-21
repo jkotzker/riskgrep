@@ -24,6 +24,7 @@ const BLOB_MAX: u64 = 128 << 20;
 const MAX_LINES: usize = 5;
 const HOOK_BODY: &str = "#!/bin/sh\nexec riskgrep git pre-commit \"$@\"\n";
 const GITLINK_MODE: &[u8] = b"160000";
+const SYMLINK_MODE: &[u8] = b"120000";
 
 pub fn run(cmd: GitCommand) -> Result<i32, CliError> {
     match cmd {
@@ -32,7 +33,8 @@ pub fn run(cmd: GitCommand) -> Result<i32, CliError> {
     }
 }
 
-/// A staged addition, copy, modification, or rename, by its new path.
+/// A staged addition, copy, modification, rename, or type change, by its
+/// new path.
 #[derive(Debug, PartialEq, Eq)]
 struct Staged {
     path: Vec<u8>,
@@ -40,6 +42,9 @@ struct Staged {
     from: Option<Vec<u8>>,
     /// Newly added: every line is an added line, so no diff is needed.
     added: bool,
+    /// A type change (status `T`, such as a symlink replaced by a regular
+    /// file): scored whole, with no diff.
+    typechange: bool,
 }
 
 fn git(root: &Path) -> Command {
@@ -72,6 +77,7 @@ fn parse_raw(out: &[u8]) -> Vec<Staged> {
         }
         let status = meta.rsplit(|b| *b == b' ').next().unwrap_or_default();
         let added = status.first() == Some(&b'A');
+        let typechange = status.first() == Some(&b'T');
         let two = matches!(status.first(), Some(b'R' | b'C'));
         let Some(first) = fields.next() else { break };
         if two {
@@ -80,12 +86,14 @@ fn parse_raw(out: &[u8]) -> Vec<Staged> {
                 path: second.to_vec(),
                 from: Some(first.to_vec()),
                 added,
+                typechange,
             });
         } else {
             staged.push(Staged {
                 path: first.to_vec(),
                 from: None,
                 added,
+                typechange,
             });
         }
     }
@@ -228,12 +236,13 @@ fn staged_files(root: &Path) -> Result<Vec<Staged>, CliError> {
         "-z",
         "--find-renames",
         "--no-ext-diff",
-        "--diff-filter=ACMR",
+        "--diff-filter=ACMRT",
     ]);
     Ok(parse_raw(&git_output(c)?))
 }
 
-/// Added line ranges for every non-added staged entry, from ONE zero-context
+/// Added line ranges for every modified, renamed, or copied staged entry
+/// (additions and type changes are scored whole), from ONE zero-context
 /// diff. The patch is split on `diff --git ` lines (a content line always
 /// starts with `+`, `-`, space, `@`, or `\`; a path with a newline is
 /// C-quoted, so a header is one line) and sections are matched to entries by
@@ -243,7 +252,9 @@ fn added_lines(
     root: &Path,
     staged: &[Staged],
 ) -> Result<Vec<Option<Vec<RangeInclusive<u32>>>>, CliError> {
-    let modified: Vec<usize> = (0..staged.len()).filter(|&i| !staged[i].added).collect();
+    let modified: Vec<usize> = (0..staged.len())
+        .filter(|&i| !staged[i].added && !staged[i].typechange)
+        .collect();
     let mut out: Vec<Option<Vec<RangeInclusive<u32>>>> = vec![None; staged.len()];
     if modified.is_empty() {
         return Ok(out);
@@ -378,7 +389,9 @@ fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
                 }
                 continue;
             };
-            if mode == GITLINK_MODE {
+            // A gitlink holds a commit id, and a type change into a symlink
+            // holds only the link's target path: neither is content.
+            if mode == GITLINK_MODE || (f.typechange && mode == SYMLINK_MODE) {
                 continue;
             }
             let bytes = match batch.read(id)? {
@@ -397,7 +410,14 @@ fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
             };
             let blob_id = hex_to_bytes(id)
                 .ok_or_else(|| CliError(format!("invalid object id for `{shown}`")))?;
-            let t = rg.scan_blob(&name, &blob_id, &bytes, only.as_deref());
+            // A rename or copy is scored whole: path-dependent rules change
+            // with the name, so the old content's verdict does not carry over.
+            let only = if f.from.is_some() {
+                None
+            } else {
+                only.as_deref()
+            };
+            let t = rg.scan_blob(&name, &blob_id, &bytes, only);
             match &t.status {
                 TargetStatus::Unscanned { reason } if blocks(git_cfg.on_error) => {
                     messages.push(unscanned_line(&shown, "not scanned", reason));
@@ -535,6 +555,7 @@ mod tests {
             scores: [(cat.clone(), score)].into(),
             evidence: vec![],
             suppressed: 0,
+            text: true,
         };
         assert_eq!(offences("x", &t(79.96), &cfg).len(), 1);
         assert!(offences("x", &t(79.94), &cfg).is_empty());

@@ -337,9 +337,11 @@ mod tests {
                     locations: vec![],
                     shape: vec![],
                     fingerprints: vec![],
+                    line_complete: false,
                 })
                 .collect(),
             suppressed: 0,
+            text: true,
         }
     }
 

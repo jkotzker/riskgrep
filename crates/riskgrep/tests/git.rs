@@ -245,13 +245,137 @@ fn deletions_only_allowed() {
 }
 
 #[test]
-fn rename_without_edits_allowed() {
+fn rename_is_scored_whole() {
+    // Path-dependent rules change with the name, so a rename or copy is
+    // judged on the whole file, not on its (empty) diff.
     let r = Repo::new();
     r.write("old.txt", keyed_text(&key(6)));
     r.stage("old.txt");
     r.git(&["commit", "-q", "--no-verify", "-m", "old"]);
     r.git(&["mv", "old.txt", "new.txt"]);
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "riskgrep: new.txt: secret 95.0 (aws_access_token, line 7)",
+        ));
+}
+
+#[test]
+fn symlink_replaced_by_a_file_with_a_secret_blocks() {
+    let r = Repo::new();
+    r.write("target.txt", "clean\n");
+    std::os::unix::fs::symlink("target.txt", r.root.join("conf.txt")).unwrap();
+    r.stage("target.txt");
+    r.stage("conf.txt");
+    commit_all(&r, "link");
+    fs::remove_file(r.root.join("conf.txt")).unwrap();
+    r.write("conf.txt", keyed_text(&key(40)));
+    r.stage("conf.txt");
+    for args in [
+        &["git", "pre-commit"][..],
+        &["git", "pre-commit", "--full-files"],
+    ] {
+        r.riskgrep(args)
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains(
+                "riskgrep: conf.txt: secret 95.0 (aws_access_token, line 7)",
+            ));
+    }
+}
+
+#[test]
+fn file_replaced_by_a_symlink_is_not_scanned() {
+    // The new blob is only the link's target path.
+    let r = Repo::new();
+    r.write("conf.txt", "clean\n");
+    r.stage("conf.txt");
+    commit_all(&r, "file");
+    fs::remove_file(r.root.join("conf.txt")).unwrap();
+    std::os::unix::fs::symlink(format!("{}.txt", key(41)), r.root.join("conf.txt")).unwrap();
+    r.stage("conf.txt");
     r.pre_commit().assert().code(0).stderr("");
+}
+
+/// A PKCS#1-shaped DER key: a SEQUENCE header and random bytes.
+fn der_key(seed: u64) -> Vec<u8> {
+    let mut body = vec![0u8; 0x40];
+    synth::Rng::new(seed).fill(&mut body);
+    let mut b = vec![0x30, 0x46, 0x02, 0x01, 0x00, 0x02];
+    b.extend(body);
+    b
+}
+
+#[test]
+fn pure_rename_into_a_key_extension_blocks() {
+    let r = Repo::new();
+    r.write("blob.bin", der_key(30));
+    r.stage("blob.bin");
+    commit_all(&r, "bin");
+    r.git(&["mv", "blob.bin", "blob.der"]);
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "riskgrep: blob.der: secret 90.0 (der_key_file",
+        ));
+}
+
+/// A SEC1 P-256 private key without its public key and with no NUL byte,
+/// so git diffs it as text. Its line 2 starts after the `0a` length byte of
+/// the curve parameters.
+fn sec1_without_nul(seed: u64, last: u8) -> Vec<u8> {
+    let mut scalar = vec![0u8; 32];
+    synth::Rng::new(seed).fill(&mut scalar);
+    for b in &mut scalar {
+        if *b == 0 || *b == b'\n' {
+            *b = 0x5a;
+        }
+    }
+    let mut k = vec![0x30, 0x31, 0x02, 0x01, 0x01, 0x04, 0x20];
+    k.extend(scalar);
+    k.extend([
+        0xa0, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, last,
+    ]);
+    assert!(!k.contains(&0));
+    k
+}
+
+#[test]
+fn text_diffed_binary_key_is_scored_whole() {
+    let r = Repo::new();
+    r.write("a.der", sec1_without_nul(31, 0x07));
+    r.stage("a.der");
+    commit_all(&r, "key");
+    // Only line 2 changes, so the diff's added lines exclude the header.
+    r.write("a.der", sec1_without_nul(31, 0x08));
+    r.stage("a.der");
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "riskgrep: a.der: secret 90.0 (der_key_file",
+        ));
+}
+
+#[test]
+fn second_private_key_appended_to_a_file_blocks() {
+    for f in synth::two_key_files(51) {
+        let r = Repo::new();
+        r.write(f.name, &f.head);
+        r.stage(f.name);
+        commit_all(&r, "first key");
+        r.write(f.name, f.whole());
+        r.stage(f.name);
+        r.pre_commit()
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains(format!(
+                "riskgrep: {}: secret 95.0 (private_key, line {})",
+                f.name, f.keys[1].0
+            )));
+    }
 }
 
 #[test]

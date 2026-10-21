@@ -340,3 +340,90 @@ pub fn source_text(len: usize, seed: u64) -> String {
     out.truncate(len);
     out
 }
+
+/// A fake PEM private key: `der_len` random bytes in base64, 64 characters
+/// per line, between `-----BEGIN <label>-----` and `-----END <label>-----`.
+/// No trailing newline.
+pub fn fake_pem(label: &str, der_len: usize, seed: u64) -> String {
+    let mut der = vec![0u8; der_len];
+    Rng::new(seed ^ 0x7065_6d00).fill(&mut der);
+    let body = base64(&der);
+    let lines: Vec<&str> = body
+        .as_bytes()
+        .chunks(64)
+        .map(|l| std::str::from_utf8(l).expect("ascii"))
+        .collect();
+    format!(
+        "-----BEGIN {label}-----\n{}\n-----END {label}-----",
+        lines.join("\n")
+    )
+}
+
+/// A file holding two private keys: `head` holds the first, `tail` appends
+/// the second. `keys` are the 1-based inclusive line ranges of both keys in
+/// `head + tail`.
+pub struct TwoKeys {
+    pub name: &'static str,
+    pub head: String,
+    pub tail: String,
+    pub keys: [(u32, u32); 2],
+}
+
+impl TwoKeys {
+    pub fn whole(&self) -> String {
+        format!("{}{}", self.head, self.tail)
+    }
+}
+
+/// Files with two private keys each, for tests that every key gets its own
+/// location: an RSA key then a short (Ed25519-sized) PKCS#8 key, the same in
+/// reverse order, two RSA-4096-sized keys back to back, and two JSON lines
+/// holding service-account-style keys with escaped newlines.
+pub fn two_key_files(seed: u64) -> Vec<TwoKeys> {
+    let lines = |s: &str| s.matches('\n').count() as u32;
+    let rsa = fake_pem("RSA PRIVATE KEY", 600, seed);
+    let ed = fake_pem("PRIVATE KEY", 48, seed + 1);
+    let big1 = fake_pem("RSA PRIVATE KEY", 2350, seed + 2);
+    let big2 = fake_pem("RSA PRIVATE KEY", 2350, seed + 3);
+    let pair = |name, a: &str, b: &str| {
+        let head = format!("config = 1\n{a}\nx = 1\ny = 2\nz = 3\n");
+        let tail = format!("{b}\nend = 1\n");
+        let a_start = 2;
+        let a_end = a_start + lines(a);
+        let b_start = lines(&head) + 1;
+        TwoKeys {
+            name,
+            keys: [(a_start, a_end), (b_start, b_start + lines(b))],
+            head,
+            tail,
+        }
+    };
+    let big_head = format!("{big1}\n");
+    let big = TwoKeys {
+        name: "two_rsa4096.txt",
+        keys: [
+            (1, 1 + lines(&big1)),
+            (lines(&big_head) + 1, lines(&big_head) + 1 + lines(&big2)),
+        ],
+        tail: format!("{big2}\n"),
+        head: big_head,
+    };
+    let sa = |pem: &str| {
+        format!(
+            "{{\"type\": \"service_account\", \"private_key\": \"{}\\n\", \"client_email\": \"a@b.example\"}}",
+            pem.replace('\n', "\\n")
+        )
+    };
+    let jsonl = TwoKeys {
+        name: "service_accounts.jsonl",
+        head: format!("{}\n{{\"note\": 1}}\n", sa(&ed)),
+        tail: format!("{}\n", sa(&rsa)),
+        keys: [(1, 1), (3, 3)],
+    };
+    vec![
+        pair("rsa_then_short.txt", &rsa, &ed),
+        pair("short_then_rsa.txt", &ed, &rsa),
+        big,
+        jsonl,
+    ]
+}

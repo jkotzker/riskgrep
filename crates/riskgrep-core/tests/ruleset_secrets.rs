@@ -148,6 +148,63 @@ fn pem_private_key() {
 }
 
 #[test]
+fn every_private_key_gets_its_own_location() {
+    for f in synth::two_key_files(31) {
+        let ev = scan(f.name, f.whole().as_bytes());
+        let pk: Vec<&Evidence> = ev.iter().filter(|e| e.rule == "private_key").collect();
+        assert_eq!(pk.len(), 1, "{}: one private_key evidence", f.name);
+        let lines: Vec<(u32, u32)> = pk[0]
+            .locations
+            .iter()
+            .map(|l| (l.line_start, l.line_end))
+            .collect();
+        assert_eq!(lines, f.keys, "{}", f.name);
+        assert_eq!(pk[0].count, 2, "{}", f.name);
+        assert_eq!(pk[0].fingerprints.len(), 2, "{}", f.name);
+    }
+}
+
+#[test]
+fn many_back_to_back_keys_each_get_one_location() {
+    // Each key's header starts a YARA match running to the last footer;
+    // every key must be located once, and no more.
+    let n = 2000;
+    let mut content = String::new();
+    for i in 0..n {
+        content.push_str(&synth::fake_pem("PRIVATE KEY", 48, i));
+        content.push('\n');
+    }
+    let ev = scan("keys.pem", content.as_bytes());
+    let pk: Vec<&Evidence> = ev.iter().filter(|e| e.rule == "private_key").collect();
+    assert_eq!(pk.len(), 1);
+    assert_eq!(pk[0].count as u64, n);
+    assert_eq!(pk[0].locations.len() as u64, n);
+    let lines: Vec<u32> = pk[0].locations.iter().map(|l| l.line_start).collect();
+    let want: Vec<u32> = (0..n as u32).map(|i| 1 + 3 * i).collect();
+    assert_eq!(lines, want);
+}
+
+#[test]
+fn line_complete_rules() {
+    let m = &fixture().meta;
+    let flag = |r: &str| m[&format!("{NS}:{r}")].line_complete;
+    for r in ["aws_access_token", "github_pat", "slack_bot_token"] {
+        assert!(flag(r), "{r}");
+    }
+    // Matches that can span lines, path rules, and binary key stores.
+    for r in [
+        "private_key",
+        "kubernetes_secret_yaml",
+        "generic_api_key",
+        "pkcs12_file",
+        "der_key_file",
+        "pkcs12_keystore",
+    ] {
+        assert!(!flag(r), "{r}");
+    }
+}
+
+#[test]
 fn generic_api_key_assignment() {
     let line = synth::fake_secret("generic_api_key_assignment", 7);
     let (content, at) = embed(&line);

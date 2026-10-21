@@ -267,6 +267,7 @@ mod tests {
             scores: BTreeMap::from([(Category("secret".into()), secret)]),
             evidence: vec![],
             suppressed: 0,
+            text: true,
         }
     }
 

@@ -22,6 +22,9 @@ pub use words::Stopwords;
 #[derive(Debug, Clone, PartialEq)]
 pub enum PostResult {
     Keep(Range<usize>),
+    /// Several ranges, each continuing through the rest of the chain on its
+    /// own (one per secret found in the match).
+    KeepAll(Vec<Range<usize>>),
     KeepWithShape(Range<usize>, ShapeFacts),
     Drop,
 }
@@ -40,6 +43,25 @@ pub trait Post: Send + Sync {
     /// rule's pattern matches (which only trigger the rule). `Some(vec![])`
     /// means the rule yields no evidence.
     fn runs(&self, _content: &[u8]) -> Option<Vec<Range<usize>>> {
+        None
+    }
+
+    /// True for processors that can turn one match into several ranges
+    /// ([`PostResult::KeepAll`]). The engine then runs them on every
+    /// distinct match rather than only on the outermost ones, so no secret
+    /// is lost to a match that contains another.
+    fn splits(&self) -> bool {
+        false
+    }
+
+    /// For a splitting processor that is first in its chain: the ranges it
+    /// yields over all of `windows`, merged, computed without repeating
+    /// work that overlapping windows share. `None` to apply it per window.
+    fn apply_windows(
+        &self,
+        _content: &[u8],
+        _windows: &[Range<usize>],
+    ) -> Option<Vec<Range<usize>>> {
         None
     }
 }

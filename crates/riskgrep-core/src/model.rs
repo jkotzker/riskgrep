@@ -64,6 +64,12 @@ pub struct Evidence {
     /// rules) carries one digest of all the bytes scanned. Never serialized.
     #[serde(skip)]
     pub fingerprints: Vec<[u8; 32]>,
+    /// The rule is marked `line_complete`: every match of it gets its own
+    /// location, and a match never spans more lines than its location, so
+    /// the locations bound what the file holds for this rule. Set from the
+    /// rule metadata when the target is scored; never stored.
+    #[serde(skip)]
+    pub line_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +90,11 @@ pub struct TargetReport {
     pub scores: BTreeMap<Category, f64>,
     pub evidence: Vec<Evidence>,
     pub suppressed: u32,
+    /// The content was scanned as text, so evidence line numbers count the
+    /// file's lines. False for binary formats read by structure (key stores,
+    /// tensor files) and for targets that were not scanned.
+    #[serde(skip)]
+    pub text: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

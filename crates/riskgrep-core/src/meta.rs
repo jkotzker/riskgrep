@@ -77,6 +77,11 @@ pub struct RuleMeta {
     pub family: Option<String>,
     pub family_cap: Option<f64>,
     pub post: Vec<PostSpec>,
+    /// Meta `line_complete = true`: the rule's locations cover every match,
+    /// each within its own lines, so a partial read that avoids them cannot
+    /// show a match. Used by the Claude Code hook's partial reads.
+    #[serde(default)]
+    pub line_complete: bool,
 }
 
 struct Raw<'a> {
@@ -170,6 +175,14 @@ impl<'a> Raw<'a> {
         }
     }
 
+    fn boolean(&self, key: &str) -> Result<Option<bool>, MetaError> {
+        match self.get(key) {
+            None => Ok(None),
+            Some(MetaValue::Bool(b)) => Ok(Some(*b)),
+            Some(_) => Err(self.err(format_args!("`{key}` must be true or false"))),
+        }
+    }
+
     fn need<T>(&self, v: Option<T>, key: &str, post: &str) -> Result<T, MetaError> {
         v.ok_or_else(|| self.err(format_args!("post `{post}` requires key `{key}`")))
     }
@@ -217,6 +230,7 @@ impl RuleMeta {
             family,
             family_cap,
             post,
+            line_complete: raw.boolean("line_complete")?.unwrap_or(false),
         })
     }
 
@@ -300,6 +314,25 @@ mod tests {
             group(&parse(" secret_group = \"first_nonempty\"").unwrap()),
             FIRST_NONEMPTY_GROUP
         );
+    }
+
+    fn rule(meta: &str) -> Result<RuleMeta, MetaError> {
+        let src =
+            format!("rule r {{ meta: category = \"secret\" weight = 80{meta} condition: true }}");
+        let rules = yara_x::compile(src.as_str()).unwrap();
+        let rule = rules.iter().next().unwrap();
+        RuleMeta::from_yara(&rule)
+    }
+
+    #[test]
+    fn line_complete_is_an_explicit_boolean() {
+        assert!(!rule("").unwrap().line_complete);
+        assert!(rule(" line_complete = true").unwrap().line_complete);
+        assert!(!rule(" line_complete = false").unwrap().line_complete);
+        for bad in [" line_complete = 1", " line_complete = \"yes\""] {
+            let e = rule(bad).unwrap_err();
+            assert!(e.0.contains("line_complete"), "{bad}: {e}");
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::lines::LineIndex;
 use crate::model::{Evidence, Location, ShapeFacts};
 use crate::post::{self, Post, PostResult};
 use regex::bytes::Regex;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::ops::Range;
@@ -73,6 +74,29 @@ fn dedupe(ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
         if out.is_empty() || r.end > max_end {
             max_end = max_end.max(r.end);
             out.push(r);
+        }
+    }
+    out
+}
+
+/// Drop ranges lying entirely inside another kept range (the same secret
+/// found from two overlapping matches), merging their shape facts into it.
+/// Sorted by start, then by end descending, a range is inside an earlier one
+/// exactly when it ends no later than the furthest end seen so far.
+fn drop_contained(
+    mut kept: Vec<(Range<usize>, Vec<ShapeFacts>)>,
+) -> Vec<(Range<usize>, Vec<ShapeFacts>)> {
+    kept.sort_by(|a, b| a.0.start.cmp(&b.0.start).then(b.0.end.cmp(&a.0.end)));
+    let mut out: Vec<(Range<usize>, Vec<ShapeFacts>)> = Vec::new();
+    // Index in `out` of the kept range with the furthest end.
+    let mut widest: Option<usize> = None;
+    for (r, mut shapes) in kept {
+        match widest {
+            Some(w) if r.end <= out[w].0.end => out[w].1.append(&mut shapes),
+            _ => {
+                widest = Some(out.len());
+                out.push((r, shapes));
+            }
         }
     }
     out
@@ -212,46 +236,96 @@ impl Engine {
                 locations: Vec::new(),
                 shape: Vec::new(),
                 fingerprints: Vec::new(),
+                line_complete: false,
             };
             if has_anchor {
                 let index = lines.get_or_insert_with(|| LineIndex::new(content));
                 // Verdicts of whole-content processors, computed once per rule.
                 let mut whole: Vec<Option<Option<ShapeFacts>>> = vec![None; chain.len()];
                 let mut kept: Vec<(Range<usize>, Vec<ShapeFacts>)> = Vec::new();
-                for mut range in dedupe(ranges) {
-                    let mut shapes: Vec<ShapeFacts> = Vec::new();
-                    let mut alive = true;
-                    for (i, post) in chain.iter().enumerate() {
-                        if producer_idx == Some(i) {
-                            continue;
-                        }
-                        let result = if post.whole_content() {
-                            let verdict =
-                                whole[i].get_or_insert_with(|| match post.apply(content, 0..0) {
-                                    PostResult::KeepWithShape(_, s) => Some(s),
-                                    _ => None,
-                                });
-                            match verdict {
-                                Some(s) => PostResult::KeepWithShape(range.clone(), s.clone()),
-                                None => PostResult::Drop,
-                            }
-                        } else {
-                            post.apply(content, range.clone())
-                        };
-                        match result {
-                            PostResult::Keep(r) => range = r,
-                            PostResult::KeepWithShape(r, s) => {
-                                range = r;
-                                shapes.push(s);
-                            }
-                            PostResult::Drop => {
-                                alive = false;
-                                break;
-                            }
+                // A processor that splits a match into several secrets runs
+                // on every distinct match: a match inside another may hold a
+                // secret that the outer one's leftmost search steps over.
+                let splits = chain.iter().any(|p| p.splits());
+                let windows = if splits {
+                    let mut w = ranges;
+                    w.sort_by_key(|r| (r.start, r.end));
+                    w.dedup();
+                    w
+                } else {
+                    dedupe(ranges)
+                };
+                // A splitting first processor handles all windows at once,
+                // sharing the work that nested windows repeat; its ranges
+                // continue from the next processor.
+                let seeds: Vec<(Range<usize>, usize)> = match chain.first() {
+                    Some(first) if producer_idx != Some(0) => {
+                        match first.apply_windows(content, &windows) {
+                            Some(rs) => rs.into_iter().map(|r| (r, 1)).collect(),
+                            None => windows.into_iter().map(|w| (w, 0)).collect(),
                         }
                     }
-                    if alive && range.start < range.end && range.end <= content.len() {
-                        kept.push((range, shapes));
+                    _ => windows.into_iter().map(|w| (w, 0)).collect(),
+                };
+                // Index in `kept` by range: a range found again only adds its
+                // shapes, so `kept` stays one entry per distinct range.
+                let mut kept_at: HashMap<(usize, usize), usize> = HashMap::new();
+                for (seed, start_at) in seeds {
+                    // (range, shapes so far, next processor): a split range
+                    // continues through the rest of the chain on its own.
+                    let mut work: Vec<(Range<usize>, Vec<ShapeFacts>, usize)> =
+                        vec![(seed, Vec::new(), start_at)];
+                    while let Some((mut range, mut shapes, from)) = work.pop() {
+                        let mut alive = true;
+                        for (i, post) in chain.iter().enumerate().skip(from) {
+                            if producer_idx == Some(i) {
+                                continue;
+                            }
+                            let result = if post.whole_content() {
+                                let verdict = whole[i].get_or_insert_with(|| {
+                                    match post.apply(content, 0..0) {
+                                        PostResult::KeepWithShape(_, s) => Some(s),
+                                        _ => None,
+                                    }
+                                });
+                                match verdict {
+                                    Some(s) => PostResult::KeepWithShape(range.clone(), s.clone()),
+                                    None => PostResult::Drop,
+                                }
+                            } else {
+                                post.apply(content, range.clone())
+                            };
+                            match result {
+                                PostResult::Keep(r) => range = r,
+                                PostResult::KeepAll(mut rs) => {
+                                    let Some(first) = (!rs.is_empty()).then(|| rs.remove(0)) else {
+                                        alive = false;
+                                        break;
+                                    };
+                                    for r in rs {
+                                        work.push((r, shapes.clone(), i + 1));
+                                    }
+                                    range = first;
+                                }
+                                PostResult::KeepWithShape(r, s) => {
+                                    range = r;
+                                    shapes.push(s);
+                                }
+                                PostResult::Drop => {
+                                    alive = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if alive && range.start < range.end && range.end <= content.len() {
+                            match kept_at.entry((range.start, range.end)) {
+                                Entry::Occupied(e) => kept[*e.get()].1.append(&mut shapes),
+                                Entry::Vacant(e) => {
+                                    e.insert(kept.len());
+                                    kept.push((range, shapes));
+                                }
+                            }
+                        }
                     }
                 }
                 // Post-processors can narrow distinct matches to one range.
@@ -263,6 +337,9 @@ impl Engine {
                     }
                     same
                 });
+                if splits {
+                    kept = drop_contained(kept);
+                }
                 for (range, shapes) in kept {
                     let (line_start, line_end) = index.lines(range.start as u64, range.end as u64);
                     ev.locations.push(Location {

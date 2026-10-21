@@ -127,6 +127,7 @@ mod tests {
             locations: locs,
             shape: vec![],
             fingerprints: vec![],
+            line_complete: false,
         }
     }
 
@@ -142,6 +143,7 @@ mod tests {
             scores: BTreeMap::from([(Category("secret".into()), score)]),
             evidence,
             suppressed: 0,
+            text: true,
         }
     }
 

@@ -333,11 +333,25 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** after a Claude Code update that changes these defaults, a `Grep` call may read files the hook did not scan, and no decision is given for them. Exclusions that Claude Code derives from permission rules are not mirrored, so the hook may scan more files than `Grep` reads.
 - **Planned fix:** re-check the mirrored behaviour against each Claude Code release the documentation is verified against.
 
+### Partial reads are offered for few secret rules
+
+- **Not covered:** a partial `Read` of a file whose findings include a rule not marked `line_complete`. Of the 222 converted gitleaks rules, 59 are marked; the others include `private_key`, `kubernetes_secret_yaml`, `generic_api_key`, `anthropic_api_key`, `openai_api_key`, `stripe_access_token`, and `npm_access_token`. No hand-written or biometric rule is marked.
+- **Why:** a rule is marked only when its `span_regex` cannot match a line feed. Many gitleaks regexes end with a delimiter class such as `[\x60'"\s;]` or allow whitespace between a key name and its value, so a match can include a line feed even when the secret itself sits on one line; the check does not distinguish those cases. The printed-float rules are not marked because a run broken by a value they do not parse (`nan`, a word) can leave floats outside every reported range.
+- **How it shows up:** the reason ends with `No partial read is available for this file; ask the user.`, and every `Read` of the file, with or without `offset` and `limit`, gets the decision.
+- **Planned fix:** none decided; checking only the part of the regex up to the end of the secret group would mark more rules.
+
+### Partial reads rely on Claude Code 2.1.301's line numbering
+
+- **Not covered:** a later Claude Code version whose `Read` numbers lines differently, returns lines outside `offset` and `limit`, or starts honouring them for notebooks.
+- **Why:** a range-limited `Read` gets no decision when its lines avoid every flagged line, which holds only while the tool reads the lines the hook expects. The behaviour was read from the 2.1.301 binary: `offset` is 1-based (0 reads as 1), `limit` counts lines, lines end at LF with one CR removed, and `.ipynb` files are read whole. The hook widens the request by one line on each side, so a difference of one line cannot expose a flagged line, and treats notebooks as having no partial read.
+- **How it shows up:** after a Claude Code update that changes line selection, a `Read` with `offset` and `limit` may return a flagged line without a decision.
+- **Planned fix:** re-check the mirrored behaviour against each Claude Code release the documentation is verified against.
+
 ### Files can change between the check and the read
 
 - **Not covered:** a file whose content changes after the hook scans it and before the tool reads it, including a file the same command writes before reading it.
 - **Why:** the hook runs before the tool call and cannot lock the file.
-- **How it shows up:** the earlier content is the one that was scored.
+- **How it shows up:** the earlier content is the one that was scored. For a `Read` with `offset` and `limit`, lines inserted or removed in between can also move a flagged line into the requested range after the hook allowed it.
 - **Planned fix:** none.
 
 ### Repository detection is by walking up for `.git`
@@ -363,10 +377,17 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **How it shows up:** a repository's `.riskgrep.toml` and baseline are not loaded for the command line in those layouts; the user configuration still applies.
 - **Planned fix:** none decided.
 
-### Type changes are not scanned by the git hook
+### Renamed, copied, and binary files are scored whole by the git hook
 
-- **Not covered:** staged changes that only change a file's type (for example a regular file replaced by a symlink), and submodule pointers (gitlinks).
-- **Why:** the hook lists staged files with `--diff-filter=ACMR`, which leaves out type changes; a gitlink holds a commit id, not content.
+- **Not covered (false positive):** limiting a renamed or copied file, or a binary file (key store or tensor file), to the lines a commit adds. A secret already in such a file blocks the commit that renames, copies, or edits it.
+- **Why:** rules can depend on the path (`der_key_file` needs a `.der` or `.key` name, `pkcs12_file` a `.p12` or `.pfx` name), so a renamed file's old verdict does not carry over; and the offsets of findings in a binary file are not lines of a diff (`cargo test -p riskgrep --test git -- rename_is_scored_whole pure_rename_into_a_key_extension_blocks text_diffed_binary_key_is_scored_whole`).
+- **How it shows up:** `git mv` of a file holding a secret blocks the commit until the secret is removed, baselined, or ignored. Baseline fingerprints include the repository-relative path (`crates/riskgrep-core/src/suppress.rs`), so a baseline entry recorded under the old path stops matching after a rename; regenerate it with `riskgrep baseline <path>`.
+- **Planned fix:** none decided.
+
+### Type changes into a symlink and submodule pointers are not scanned by the git hook
+
+- **Not covered:** a staged path that became a symlink through a type change (a regular file replaced by a symlink), and submodule pointers (gitlinks). Newly added or modified symlinks are scanned, and a type change into a regular file (a symlink replaced by a file) is scanned whole.
+- **Why:** the hook lists staged files with `--diff-filter=ACMRT` and does not score a type change whose new side is a symlink; a gitlink holds a commit id, not content (`cargo test -p riskgrep --test git -- symlink_replaced_by_a_file_with_a_secret_blocks file_replaced_by_a_symlink_is_not_scanned`).
 - **How it shows up:** nothing is scanned for those paths.
 - **Planned fix:** none decided.
 

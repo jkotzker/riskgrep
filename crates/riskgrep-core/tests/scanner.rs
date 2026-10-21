@@ -230,6 +230,92 @@ fn cache_hit_loads_no_bundle() {
     assert!(!g.bundle_loaded(), "a cache hit must not load the bundle");
 }
 
+/// A DER private key layout (PKCS#1 version 0) with random bytes after the
+/// header, generated at run time.
+fn der_key_bytes(seed: u64) -> Vec<u8> {
+    let mut body = vec![0u8; 0x40];
+    synth::Rng::new(seed).fill(&mut body);
+    let mut b = vec![0x30, 0x46, 0x02, 0x01, 0x00, 0x02];
+    b.extend(body);
+    b
+}
+
+#[test]
+fn text_flag_marks_line_addressable_content() {
+    let d = tempfile::tempdir().unwrap();
+    let txt = d.path().join("creds.rs");
+    fs::write(&txt, aws_line(21)).unwrap();
+    let der = d.path().join("id.der");
+    fs::write(&der, der_key_bytes(22)).unwrap();
+    let emb = d.path().join("emb.safetensors");
+    fs::write(
+        &emb,
+        synth::safetensors(&[("speaker_embedding", "F32", &[1, 192])]),
+    )
+    .unwrap();
+    let png = d.path().join("a.png");
+    fs::write(&png, b"\x89PNG\r\n\x1a\n0000").unwrap();
+    for f in [&txt, &der, &emb, &png] {
+        age(f);
+    }
+    let files = [txt.clone(), der.clone(), emb.clone(), png.clone()];
+    let first = scanner().scan_paths(&files);
+    let mut g = scanner();
+    let second = g.scan_paths(&files);
+    assert!(!g.bundle_loaded(), "second run is served from the cache");
+    for r in [&first, &second] {
+        let text: Vec<bool> = r.targets.iter().map(|t| t.text).collect();
+        assert_eq!(text, [true, false, false, false]);
+        assert!(r.targets[1].scores[&secret()] >= 90.0, "DER key found");
+    }
+    assert!(
+        scanner()
+            .scan_bytes("<stdin>", aws_line(23).as_bytes())
+            .targets[0]
+            .text
+    );
+    assert!(
+        scanner()
+            .scan_blob("a.rs", b"blob-text", aws_line(24).as_bytes(), None)
+            .text
+    );
+    assert!(
+        !scanner()
+            .scan_blob("k.der", b"blob-der", &der_key_bytes(25), None)
+            .text
+    );
+    let gone = scanner().scan_paths(&[d.path().join("absent.txt")]);
+    assert!(!only(&gone).text);
+}
+
+#[test]
+fn evidence_carries_its_rules_line_completeness() {
+    let d = tempfile::tempdir().unwrap();
+    let tok = d.path().join("creds.rs");
+    fs::write(&tok, aws_line(26)).unwrap();
+    let pem = d.path().join("key.txt");
+    fs::write(&pem, synth::fake_pem("RSA PRIVATE KEY", 144, 27)).unwrap();
+    for f in [&tok, &pem] {
+        age(f);
+    }
+    let files = [tok.clone(), pem.clone()];
+    let first = scanner().scan_paths(&files);
+    let mut g = scanner();
+    let second = g.scan_paths(&files);
+    assert!(!g.bundle_loaded());
+    for r in [&first, &second] {
+        let flags = |i: usize| -> Vec<(String, bool)> {
+            r.targets[i]
+                .evidence
+                .iter()
+                .map(|e| (e.rule.clone(), e.line_complete))
+                .collect()
+        };
+        assert_eq!(flags(0), [("aws_access_token".to_string(), true)]);
+        assert_eq!(flags(1), [("private_key".to_string(), false)]);
+    }
+}
+
 #[test]
 fn content_hit_after_racy_stat_loads_no_bundle() {
     let d = tempfile::tempdir().unwrap();

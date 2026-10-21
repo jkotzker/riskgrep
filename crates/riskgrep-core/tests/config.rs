@@ -249,6 +249,7 @@ fn meta(weight: f64) -> RuleMeta {
         family: None,
         family_cap: None,
         post: vec![],
+        line_complete: false,
     }
 }
 

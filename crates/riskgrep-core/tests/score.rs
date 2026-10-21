@@ -113,6 +113,7 @@ fn score_target_uses_meta_weights_and_tiers() {
         locations: vec![],
         shape: vec![],
         fingerprints: vec![],
+        line_complete: false,
     };
     let m = |w: f64, tiers: Option<&str>| RuleMeta {
         category: Category("secret".into()),
@@ -121,6 +122,7 @@ fn score_target_uses_meta_weights_and_tiers() {
         family: None,
         family_cap: None,
         post: vec![],
+        line_complete: false,
     };
     let meta = HashMap::from([
         ("ns:a".to_string(), m(50.0, None)),

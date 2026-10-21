@@ -188,7 +188,8 @@ fn read_biometric_denied() {
         "{reason}"
     );
     assert!(reason.contains("safetensors_named_embedding"), "{reason}");
-    assert!(reason.ends_with("Threshold: deny at 75."), "{reason}");
+    assert!(reason.contains("Threshold: deny at 75. "), "{reason}");
+    assert!(reason.ends_with(NO_PARTIAL), "{reason}");
     // Apart from the path, the only digits are the score and the threshold.
     let rest = reason.replace(&f.display().to_string(), "");
     assert_eq!(
@@ -219,6 +220,316 @@ fn read_generic_secret_asks() {
     assert_eq!(d, "ask");
     assert!(reason.contains("scored secret 80.0"), "{reason}");
     assert!(reason.contains("Threshold: ask at 80."), "{reason}");
+}
+
+const NO_PARTIAL: &str = "No partial read is available for this file; ask the user.";
+const SAFE_PATHS: &str = "Do not read this file by other means (Bash, Grep, scripts). To use the rest of it, Read it with offset and limit ranges that exclude the lines above, or ask the user.";
+
+/// `n` filler lines (`line N`), with `at` lines replaced: (line number, text).
+fn numbered(n: usize, at: &[(usize, String)]) -> String {
+    let mut out = String::new();
+    for i in 1..=n {
+        match at.iter().find(|(l, _)| *l == i) {
+            Some((_, text)) => out.push_str(text),
+            None => out.push_str(&format!("line {i}")),
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn aws_line(seed: u64) -> String {
+    format!("id = \"{}\"", synth::fake_secret("aws_access_key", seed))
+}
+
+/// The decision for a `Read` of `f` with optional `offset` and `limit`:
+/// `"none"` when the hook prints nothing.
+fn read_decision(e: &Env, f: &Path, offset: Option<u64>, limit: Option<u64>) -> (String, String) {
+    let mut input = json!({ "file_path": f });
+    if let Some(o) = offset {
+        input["offset"] = json!(o);
+    }
+    if let Some(l) = limit {
+        input["limit"] = json!(l);
+    }
+    let out = e.run("Read", input);
+    if out.stdout.is_empty() {
+        out.silent();
+        return ("none".into(), String::new());
+    }
+    out.decision()
+}
+
+#[test]
+fn read_range_around_a_secret_line() {
+    let e = Env::new();
+    let f = e.write("app.env", numbered(30, &[(10, aws_line(5))]).as_bytes());
+    let d = |o, l| read_decision(&e, &f, o, l).0;
+    assert_eq!(d(Some(1), Some(8)), "none");
+    // Widened by one line on each side, lines 1-9 touch line 10.
+    assert_eq!(d(Some(1), Some(9)), "deny");
+    assert_eq!(d(Some(12), Some(10)), "none");
+    assert_eq!(d(Some(5), Some(10)), "deny");
+    assert_eq!(d(None, Some(8)), "none");
+    assert_eq!(d(Some(12), None), "none");
+    assert_eq!(d(Some(11), None), "deny");
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "deny");
+    assert_eq!(
+        reason,
+        format!(
+            "RiskGrep: {} scored secret 95.0 (aws_access_token) on line 10. Threshold: deny at 95. {SAFE_PATHS}",
+            f.display()
+        )
+    );
+    // Values that are not positive integers judge the whole file.
+    for bad in [
+        json!({"offset": 0, "limit": 5}),
+        json!({"offset": 12.0, "limit": 5}),
+        json!({"offset": "12"}),
+    ] {
+        let mut input = bad.clone();
+        input["file_path"] = json!(f);
+        let (d, _) = e.run("Read", input).decision();
+        assert_eq!(d, "deny", "{bad}");
+    }
+}
+
+#[test]
+fn read_range_counts_crlf_lines_as_claude_code_does() {
+    // Claude Code 2.1.301 splits on LF and drops one CR before it; a lone
+    // CR does not end a line. RiskGrep counts LF bytes the same way.
+    let e = Env::new();
+    let mut text = numbered(30, &[(10, aws_line(13))]).replace('\n', "\r\n");
+    text = text.replacen("line 2\r\n", "line 2\rstill line 2\r\n", 1);
+    let f = e.write("crlf.env", text.as_bytes());
+    let (_, reason) = read_decision(&e, &f, None, None);
+    assert!(reason.contains(") on line 10."), "{reason}");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(8)).0, "none");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(9)).0, "deny");
+}
+
+#[test]
+fn no_partial_read_for_a_pem_block() {
+    // `private_key` can match across lines, so its locations are not
+    // complete and every read of the file is judged whole.
+    let e = Env::new();
+    let pem = synth::fake_pem("RSA PRIVATE KEY", 144, 6);
+    let at: Vec<(usize, String)> = pem
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (3 + i, l.to_string()))
+        .collect();
+    let f = e.write("key.txt", numbered(12, &at).as_bytes());
+    for (o, l) in [(1, 1), (2, 1), (9, 4), (5, 1)] {
+        let (d, reason) = read_decision(&e, &f, Some(o), Some(l));
+        assert_eq!(d, "deny", "offset {o} limit {l}");
+        assert!(reason.ends_with(NO_PARTIAL), "{reason}");
+    }
+}
+
+#[test]
+fn no_partial_read_reaches_a_second_private_key() {
+    let e = Env::new();
+    for k in synth::two_key_files(61) {
+        let f = e.write(k.name, k.whole().as_bytes());
+        let (first, last) = k.keys[1];
+        let (d, reason) =
+            read_decision(&e, &f, Some(first.into()), Some((last - first + 1).into()));
+        assert_eq!(d, "deny", "{}", k.name);
+        assert!(reason.ends_with(NO_PARTIAL), "{}: {reason}", k.name);
+        // A range that avoids both keys is judged whole too.
+        let (d, _) = read_decision(&e, &f, Some(u64::from(k.keys[1].1) + 2), Some(1));
+        assert_eq!(d, "deny", "{}", k.name);
+    }
+}
+
+#[test]
+fn no_partial_read_for_a_kubernetes_secret() {
+    let e = Env::new();
+    let mut lines = vec![
+        "apiVersion: v1".to_string(),
+        "kind: Secret".into(),
+        "metadata:".into(),
+        "  name: app".into(),
+        "type: Opaque".into(),
+        "data:".into(),
+    ];
+    let mut rng = synth::Rng::new(70);
+    for i in 0..4 {
+        let mut b = [0u8; 24];
+        rng.fill(&mut b);
+        let v: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        lines.push(format!("  key{i}: {v}"));
+    }
+    lines.push("---".into());
+    let f = e.write("secret.yaml", format!("{}\n", lines.join("\n")).as_bytes());
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "ask", "{reason}");
+    assert!(reason.contains("kubernetes_secret_yaml"), "{reason}");
+    assert!(reason.ends_with(NO_PARTIAL), "{reason}");
+    for line in 8..=10 {
+        let (d, _) = read_decision(&e, &f, Some(line), Some(1));
+        assert_eq!(d, "ask", "line {line}");
+    }
+}
+
+#[test]
+fn read_range_between_two_provider_tokens() {
+    let e = Env::new();
+    let gh = format!("x = \"{}\"", synth::fake_secret("github_pat", 14));
+    let f = e.write(
+        "tokens.env",
+        numbered(30, &[(5, aws_line(15)), (20, gh)]).as_bytes(),
+    );
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "deny");
+    assert!(reason.contains(") on lines 5, 20. Threshold"), "{reason}");
+    assert!(reason.ends_with(SAFE_PATHS), "{reason}");
+    // Lines 7-18, widened to 6-19, avoid both tokens; 7-19 touches line 20.
+    assert_eq!(read_decision(&e, &f, Some(7), Some(12)).0, "none");
+    assert_eq!(read_decision(&e, &f, Some(7), Some(13)).0, "deny");
+}
+
+#[test]
+fn read_range_between_two_secrets() {
+    let e = Env::new();
+    let f = e.write(
+        "two.env",
+        numbered(30, &[(5, aws_line(7)), (20, aws_line(8))]).as_bytes(),
+    );
+    let (_, reason) = read_decision(&e, &f, None, None);
+    assert!(
+        reason.contains("(aws_access_token) on lines 5, 20."),
+        "{reason}"
+    );
+    assert_eq!(read_decision(&e, &f, Some(8), Some(9)).0, "none");
+    assert_eq!(read_decision(&e, &f, Some(8), Some(14)).0, "deny");
+}
+
+#[test]
+fn read_range_for_an_ask_level_secret() {
+    let e = Env::new();
+    e.user_config("[claude_code.thresholds.secret]\ndeny = 99\n");
+    let f = e.write("app.env", numbered(30, &[(10, aws_line(16))]).as_bytes());
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "ask");
+    assert!(
+        reason.contains(") on line 10. Threshold: ask at 80."),
+        "{reason}"
+    );
+    assert!(reason.ends_with(SAFE_PATHS), "{reason}");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(8)).0, "none");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(9)).0, "ask");
+    assert_eq!(read_decision(&e, &f, Some(12), Some(5)).0, "none");
+}
+
+#[test]
+fn no_partial_read_for_a_printed_embedding() {
+    // The printed-float rules are not marked line-complete: a run broken
+    // by a value they do not parse can leave floats outside every range.
+    let e = Env::new();
+    let floats = synth::printed_floats(192, synth::FloatStyle::PythonList);
+    let f = e.write(
+        "vec.txt",
+        numbered(30, &[(10, format!("v = {floats}"))]).as_bytes(),
+    );
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "ask");
+    assert!(reason.contains("scored biometric 60.0 ("), "{reason}");
+    assert!(reason.ends_with(NO_PARTIAL), "{reason}");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(8)).0, "ask");
+}
+
+#[test]
+fn no_partial_read_for_a_sampled_file() {
+    let e = Env::new();
+    e.user_config("[claude_code]\ntime_budget_ms = 600000\n");
+    let mut text = numbered(30, &[(10, aws_line(9))]);
+    text.push_str(&synth::source_text(9 << 20, 3));
+    let f = e.write("big.env", text.as_bytes());
+    let (d, reason) = read_decision(&e, &f, Some(12), Some(5));
+    assert_eq!(d, "deny");
+    assert!(reason.ends_with(NO_PARTIAL), "{reason}");
+    assert!(!reason.contains(" on line"), "{reason}");
+}
+
+/// A PKCS#1-shaped DER key header followed by random bytes.
+fn der_key() -> Vec<u8> {
+    let mut b = vec![0x30, 0x46, 0x02, 0x01, 0x00, 0x02];
+    let mut body = vec![0u8; 0x40];
+    synth::Rng::new(10).fill(&mut body);
+    b.extend(body);
+    b
+}
+
+#[test]
+fn no_partial_read_for_structural_findings() {
+    let e = Env::new();
+    let cases = [
+        ("DER key", e.write("id.der", &der_key()), "ask"),
+        (
+            "embedding",
+            e.write("emb.safetensors", &embedding()),
+            "deny",
+        ),
+        (
+            "path rule",
+            e.write("cert.p12", b"line 1\nline 2\nline 3\n"),
+            "ask",
+        ),
+    ];
+    for (what, f, want) in &cases {
+        let (d, reason) = read_decision(&e, f, Some(2), Some(1));
+        assert_eq!(&d, want, "{what}: {reason}");
+        assert!(reason.ends_with(NO_PARTIAL), "{what}: {reason}");
+        assert!(!reason.contains(" on line"), "{what}: {reason}");
+    }
+}
+
+#[test]
+fn grep_and_bash_ignore_read_ranges() {
+    let e = Env::new();
+    let f = e.write("app.env", numbered(30, &[(10, aws_line(11))]).as_bytes());
+    let (d, _) = e
+        .run(
+            "Grep",
+            json!({ "pattern": "x", "path": f, "offset": 1, "limit": 8 }),
+        )
+        .decision();
+    assert_eq!(d, "deny");
+    let (d, _) = e
+        .run(
+            "Bash",
+            json!({ "command": "sed -n 1,8p app.env", "offset": 1, "limit": 8 }),
+        )
+        .decision();
+    assert_eq!(d, "deny");
+}
+
+#[test]
+fn cached_runs_decide_as_uncached_runs() {
+    let e = Env::new();
+    let text = e.write("app.env", numbered(30, &[(10, aws_line(12))]).as_bytes());
+    let der = e.write("id.der", &der_key());
+    let calls = [
+        (&text, None, None),
+        (&text, Some(1), Some(8)),
+        (&text, Some(1), Some(9)),
+        (&der, Some(5), Some(1)),
+        (&der, None, None),
+    ];
+    let first: Vec<(String, String)> = calls
+        .iter()
+        .map(|(f, o, l)| read_decision(&e, f, *o, *l))
+        .collect();
+    let second: Vec<(String, String)> = calls
+        .iter()
+        .map(|(f, o, l)| read_decision(&e, f, *o, *l))
+        .collect();
+    assert_eq!(first, second);
+    let kinds: Vec<&str> = first.iter().map(|d| d.0.as_str()).collect();
+    assert_eq!(kinds, ["deny", "none", "deny", "ask", "ask"]);
 }
 
 #[test]

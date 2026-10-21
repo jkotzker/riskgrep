@@ -14,6 +14,7 @@ fn target(name: &str, score: f64, status: TargetStatus) -> TargetReport {
         scores,
         evidence: vec![],
         suppressed: 0,
+        text: true,
     }
 }
 
@@ -37,6 +38,7 @@ fn report_json_shape() {
             name: None,
         }],
         fingerprints: vec![[0u8; 32]],
+        line_complete: false,
     });
     let r = Report::from_targets("0.1.0", "bundle-1", vec![t]);
     let v: serde_json::Value = serde_json::to_value(&r).unwrap();
@@ -171,6 +173,7 @@ fn fingerprints_not_serialized() {
         locations: vec![],
         shape: vec![],
         fingerprints: vec![[7u8; 32]],
+        line_complete: false,
     };
     let s = serde_json::to_string(&e).unwrap();
     assert!(!s.contains("fingerprints"));

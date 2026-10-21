@@ -284,6 +284,40 @@ fn json_matches_model() {
 }
 
 #[test]
+fn scan_locates_every_private_key() {
+    let dir = tempfile::tempdir().unwrap();
+    for f in synth::two_key_files(41) {
+        fs::write(dir.path().join(f.name), f.whole()).unwrap();
+        let out = riskgrep(dir.path())
+            .args(["scan", f.name, "--format", "json", "--no-cache"])
+            .assert()
+            .code(0)
+            .get_output()
+            .stdout
+            .clone();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let ev = v["targets"][0]["evidence"].as_array().unwrap();
+        let pk: Vec<&serde_json::Value> =
+            ev.iter().filter(|e| e["rule"] == "private_key").collect();
+        assert_eq!(pk.len(), 1, "{}", f.name);
+        assert_eq!(pk[0]["count"], 2, "{}", f.name);
+        let lines: Vec<(u64, u64)> = pk[0]["locations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| {
+                (
+                    l["line_start"].as_u64().unwrap(),
+                    l["line_end"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        let want: Vec<(u64, u64)> = f.keys.iter().map(|&(a, b)| (a.into(), b.into())).collect();
+        assert_eq!(lines, want, "{}", f.name);
+    }
+}
+
+#[test]
 fn text_format_line() {
     let (dir, _, key) = key_dir();
     let out = riskgrep(dir.path())

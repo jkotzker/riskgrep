@@ -24,6 +24,7 @@ fn ev(rule: &str, secrets: &[(&str, u64)]) -> Evidence {
             .iter()
             .map(|(s, _)| *blake3::hash(s.as_bytes()).as_bytes())
             .collect(),
+        line_complete: false,
     }
 }
 
@@ -34,6 +35,7 @@ fn target(path: &str, evidence: Vec<Evidence>) -> TargetReport {
         scores: BTreeMap::new(),
         evidence,
         suppressed: 0,
+        text: true,
     }
 }
 
