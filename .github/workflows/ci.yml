@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
@@ -79,3 +80,69 @@ jobs:
           else
             echo "::notice::bench/baseline-$os.json not found: benchmarks skipped for $RUNNER_OS. Generate one with 'cargo xtask bench --write-baseline' on that OS and commit it."
           fi
+
+  riskgrep:
+    # A stable name for the branch rulesets' required check. The scan uses the
+    # committed `.riskgrep.toml` and the scanner built from this checkout.
+    name: riskgrep scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      # Caches the cargo registry only: the build goes outside the checkout
+      # (below), so that the scan of `.` does not walk the build output.
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          cache-targets: "false"
+
+      - name: Build riskgrep
+        run: cargo build --release -p riskgrep --target-dir "$RUNNER_TEMP/target"
+
+      # HOME points at an empty directory, so no user configuration or cache
+      # applies. The summary lists rule ids, paths, and scores; the report
+      # never holds matched values.
+      - name: Scan the repository
+        shell: bash
+        run: |
+          # GitHub runs bash with -e; the exit status is kept and returned last.
+          set +e -uo pipefail
+          home="$RUNNER_TEMP/riskgrep-home"
+          report="$RUNNER_TEMP/riskgrep.json"
+          mkdir -p "$home"
+          HOME="$home" "$RUNNER_TEMP/target/release/riskgrep" scan . \
+            --fail-at secret=80,biometric=75 --on-error block \
+            --format json --no-cache > "$report"
+          status=$?
+          {
+            echo "## RiskGrep scan"
+            echo
+            echo "Fails at secret 80 or biometric 75, or when a target cannot be scanned."
+            echo
+            if [ -s "$report" ]; then
+              echo "| Target | secret | biometric | Status | Rules |"
+              echo "|---|---|---|---|---|"
+              jq -r '
+                .targets[]
+                | select(([.scores[]] | add // 0) > 0 or .status == "unscanned")
+                | "| `\(.target)` | \(.scores.secret // 0) | \(.scores.biometric // 0) | \(.status) | \([.evidence[].rule] | unique | join(", ")) |"
+              ' "$report"
+              echo
+              jq -r '.summary | "Total: \(.targets) targets (\(.scanned) scanned, \(.partial) partial, \(.skipped) skipped, \(.unscanned) unscanned); \(.suppressed) findings suppressed by the configuration; highest scores: secret \(.scores.secret // 0), biometric \(.scores.biometric // 0)."' "$report"
+            else
+              echo "No report was written."
+            fi
+            echo
+            case "$status" in
+              0) echo "**Pass:** no target reaches a threshold." ;;
+              1) echo "**Fail:** a target reaches a threshold." ;;
+              2) echo "**Fail:** a target could not be scanned." ;;
+              *) echo "**Fail:** riskgrep exited with status $status." ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

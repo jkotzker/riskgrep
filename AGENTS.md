@@ -9,6 +9,15 @@ RiskGrep is a local scanner that scores files from 0 to 100 per sensitive-data c
 - `crates/riskgrep-claude`: the Claude Code `PreToolUse` hook ([`docs/claude-code.md`](docs/claude-code.md)).
 - `xtask`: `cargo xtask eval`, `cargo xtask bench`, and `cargo xtask convert-gitleaks` (not published).
 
+## Setup
+
+After cloning, install the pre-commit hook: git never enables hooks from a clone by itself.
+
+```sh
+cargo install --path crates/riskgrep
+riskgrep git install-hook
+```
+
 ## Build and test
 
 The toolchain is pinned in `rust-toolchain.toml`; rustup installs it on first use. Run all of these before proposing a change; CI runs the same.
@@ -27,6 +36,7 @@ Test output must have no warnings. Write the failing test first, then the change
 
 - **Accuracy.** `cargo xtask eval --skip-oss` runs the synthetic corpus in seconds and is what CI runs. Any change to rules, classification, or scoring also needs the full `cargo xtask eval`, which clones 13 pinned public repositories into `eval/oss/` (gitignored, about 850 MB, needs network access). The release bar must pass, and `eval/baseline-metrics.json` changes only through `--write-baseline` with the reason stated in the pull request. See [`eval/README.md`](eval/README.md).
 - **Latency.** `cargo xtask bench` (needs `hyperfine`) checks the p95 targets in `bench/targets.toml` and the stored per-OS baseline. Run it on an otherwise idle machine. Relaxing a target needs the maintainer's approval.
+- **Repository scan.** CI runs `riskgrep scan . --fail-at secret=80,biometric=75 --on-error block` with the committed `.riskgrep.toml`. Add an `[ignore]` entry only for deliberate content (rule sources, upstream example keys, test data), scoped as narrowly as possible and commented with why it is safe.
 
 ## Rulesets
 
@@ -54,5 +64,5 @@ Anything private to a contributor or machine (plans, notes, scratch output, loca
 
 - Open a pull request to `main`; nothing is pushed to `main` directly.
 - Pull requests are merged with merge commits only (no squash or rebase merges).
-- CI must pass: `test (macos-latest)` and `test (ubuntu-latest)`.
+- CI must pass: `test (macos-latest)`, `test (ubuntu-latest)`, and `riskgrep scan`.
 - Commit subjects are under 72 characters and describe the change technically.

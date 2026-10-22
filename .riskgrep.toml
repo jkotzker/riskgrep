@@ -1,0 +1,19 @@
+# RiskGrep configuration for this repository, read by `riskgrep scan`, the
+# git pre-commit hook, and the CI `riskgrep scan` job.
+#
+# The CI job fails at these thresholds, the same as the git hook's defaults.
+[git.block_at]
+secret = 80
+biometric = 75
+
+# No [ignore] entries. A scan of the committed tree (2026-10-22, riskgrep
+# 1.0.0, `riskgrep scan . --format json --no-cache` with an empty HOME) found
+# no secret findings: gitleaks' own path allowlist skips the vendored
+# `xtask/upstream/gitleaks.toml`, the shipped rule sources do not match
+# themselves (`cargo test -p riskgrep-core --test ruleset_secrets
+# shipped_rule_sources_do_not_trip_the_rules`), and test fixtures that look
+# like secrets are generated at test run time. The only findings are
+# `path_biometric_name` (30, below every threshold) on the files under
+# `crates/riskgrep-core/rulesets/biometric-embeddings/`. Add an entry only for
+# deliberate content, scoped to explicit paths (`*` also matches `/`) and,
+# where one rule misfires, to that rule, with a comment saying why it is safe.

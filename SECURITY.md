@@ -22,3 +22,7 @@ Out of scope:
 
 - bypasses by a hostile agent or user running as the same user, such as editing the user configuration, writing cache rows, replacing the compiled rules bundle, or reading a file through a path RiskGrep does not see;
 - detection gaps and false positives, including those listed in [`docs/known-limitations.md`](docs/known-limitations.md); report these as ordinary GitHub issues.
+
+## Continuous integration
+
+On pull requests the CI workflow and the scanner run from the pull request's own code, so the `riskgrep scan` gate guards against honest mistakes, and code review guards changes to the scanner, its configuration, and the workflow.
