@@ -2236,6 +2236,94 @@ fn has_local_changes(dir: &Path) -> Result<bool, String> {
     Ok(!git(dir, &["status", "--porcelain", "--untracked-files=all"])?.is_empty())
 }
 
+/// Ignored files and directories present in a clone (build output left by a
+/// build run inside it): the count of ignored entries and their top-level
+/// names. They are not part of the corpus, which is the tracked files only.
+fn ignored_in_clone(dir: &Path) -> Result<(usize, BTreeSet<String>), String> {
+    let out = git(dir, &["status", "--porcelain", "--ignored"])?;
+    let mut n = 0;
+    let mut tops = BTreeSet::new();
+    for line in out.lines().filter_map(|l| l.strip_prefix("!! ")) {
+        n += 1;
+        let top = line.trim_end_matches('/').split('/').next().unwrap_or(line);
+        tops.insert(top.to_string());
+    }
+    Ok((n, tops))
+}
+
+/// Warn (never fail) when a clone holds ignored files.
+fn warn_ignored(dir: &Path, name: &str) {
+    if let Ok((n, tops)) = ignored_in_clone(dir) {
+        if n > 0 {
+            let tops: Vec<&str> = tops.iter().map(String::as_str).collect();
+            eprintln!(
+                "warning: {name}: {n} ignored entries in the clone ({}); they are not scanned, the corpus is the tracked files only",
+                tops.join(", ")
+            );
+        }
+    }
+}
+
+/// Upper bound on the bytes of path arguments for one scanner invocation,
+/// far below the OS argument limit (1 MiB on macOS, 2 MiB on Linux).
+const ARGV_BUDGET: usize = 128 * 1024;
+
+/// The corpus of a clone: regular files tracked at its checked-out commit,
+/// relative to `dir`. Untracked and ignored files, symlinks, and submodules
+/// are not included.
+fn tracked_files(dir: &Path) -> Result<Vec<String>, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "core.hooksPath=/dev/null", "ls-files", "-z"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("git ls-files: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git ls-files in {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let mut files = BTreeSet::new();
+    for raw in out.stdout.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        let rel = std::str::from_utf8(raw)
+            .map_err(|_| format!("{}: tracked path is not UTF-8", dir.display()))?;
+        let is_file = fs::symlink_metadata(dir.join(rel))
+            .map(|m| m.file_type().is_file())
+            .unwrap_or(false);
+        if is_file {
+            // A bare `-` would mean standard input to the scanner.
+            files.insert(if rel == "-" {
+                "./-".into()
+            } else {
+                rel.to_string()
+            });
+        }
+    }
+    Ok(files.into_iter().collect())
+}
+
+/// Split `paths` into batches whose combined length stays under `budget` bytes.
+fn batches(paths: &[String], budget: usize) -> Vec<&[String]> {
+    let mut out = Vec::new();
+    let (mut start, mut size) = (0, 0);
+    for (i, p) in paths.iter().enumerate() {
+        let cost = p.len() + 1;
+        if i > start && size + cost > budget {
+            out.push(&paths[start..i]);
+            start = i;
+            size = 0;
+        }
+        size += cost;
+    }
+    if start < paths.len() {
+        out.push(&paths[start..]);
+    }
+    out
+}
+
 /// A clean shallow checkout of `r` at its pinned commit under `oss`.
 fn ensure_clone(oss: &Path, r: &Repo) -> Result<PathBuf, String> {
     let dir = oss.join(&r.name);
@@ -2247,6 +2335,7 @@ fn ensure_clone(oss: &Path, r: &Repo) -> Result<PathBuf, String> {
                     dir.display()
                 ));
             }
+            warn_ignored(&dir, &r.name);
             return Ok(dir);
         }
     } else {
@@ -2274,6 +2363,7 @@ fn ensure_clone(oss: &Path, r: &Repo) -> Result<PathBuf, String> {
     if head != r.commit {
         return Err(format!("{}: HEAD is {head}, expected {}", r.name, r.commit));
     }
+    warn_ignored(&dir, &r.name);
     Ok(dir)
 }
 
@@ -2301,22 +2391,18 @@ fn oss(ctx: &Ctx, metrics: &mut BTreeMap<String, f64>) -> Result<(), String> {
     println!("\nOSS repositories");
     for r in &repos {
         let dir = ensure_clone(&oss_dir, r)?;
-        let mut entries: Vec<String> = Vec::new();
-        for e in fs::read_dir(&dir).map_err(|e| e.to_string())? {
-            let e = e.map_err(|e| e.to_string())?;
-            let ft = e.file_type().map_err(|e| e.to_string())?;
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name != ".git" && !ft.is_symlink() {
-                entries.push(name);
-            }
+        let tracked = tracked_files(&dir)?;
+        let mut targets: Vec<Target> = Vec::new();
+        for (i, batch) in batches(&tracked, ARGV_BUDGET).into_iter().enumerate() {
+            let report = scan(
+                ctx,
+                &dir,
+                batch,
+                &ctx.out_dir.join(format!("oss-{}-{i:03}.json", r.name)),
+            )?;
+            targets.extend(report.targets);
         }
-        entries.sort();
-        let report = scan(
-            ctx,
-            &dir,
-            &entries,
-            &ctx.out_dir.join(format!("oss-{}.json", r.name)),
-        )?;
+        let report = ScanReport { targets };
         let (mut scanned, mut skipped) = (0u64, 0u64);
         let repo_unscanned = unscanned(&report, &r.name);
         let mut repo_flags: BTreeMap<String, u64> = BTreeMap::new();
@@ -2592,6 +2678,85 @@ mod tests {
         assert!(!has_local_changes(d.path()).unwrap());
         fs::write(d.path().join("planted.txt"), "x").unwrap();
         assert!(has_local_changes(d.path()).unwrap());
+    }
+
+    fn tmp_repo() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        git(d.path(), &["init", "-q"]).unwrap();
+        d
+    }
+
+    fn commit_all(d: &Path) {
+        git(d, &["add", "-A"]).unwrap();
+        git(
+            d,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "x",
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn corpus_is_the_tracked_regular_files() {
+        let d = tmp_repo();
+        let p = d.path();
+        fs::write(p.join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(p.join("src")).unwrap();
+        fs::write(p.join("src/a.txt"), "a").unwrap();
+        fs::write(p.join("with space.txt"), "b").unwrap();
+        std::os::unix::fs::symlink("src/a.txt", p.join("link.txt")).unwrap();
+        commit_all(p);
+        fs::create_dir_all(p.join("target")).unwrap();
+        fs::write(p.join("target/build.log"), "ignored").unwrap();
+        fs::write(p.join("untracked.txt"), "u").unwrap();
+
+        let files = tracked_files(p).unwrap();
+        assert_eq!(files, vec![".gitignore", "src/a.txt", "with space.txt"]);
+    }
+
+    #[test]
+    fn ignored_entries_are_reported_by_top_level_name() {
+        let d = tmp_repo();
+        let p = d.path();
+        fs::write(p.join(".gitignore"), "target/\n").unwrap();
+        fs::write(p.join("a.txt"), "a").unwrap();
+        commit_all(p);
+        assert_eq!(ignored_in_clone(p).unwrap().0, 0);
+        fs::create_dir_all(p.join("m/target")).unwrap();
+        fs::write(p.join("m/target/x.log"), "x").unwrap();
+        fs::create_dir_all(p.join("target")).unwrap();
+        fs::write(p.join("target/y.log"), "y").unwrap();
+        let (n, tops) = ignored_in_clone(p).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(
+            tops.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["m", "target"]
+        );
+        // Ignored files are a warning, not a local change.
+        assert!(!has_local_changes(p).unwrap());
+    }
+
+    #[test]
+    fn batches_respect_the_byte_budget() {
+        let paths: Vec<String> = (0..10).map(|i| format!("file{i}")).collect();
+        let b = batches(&paths, 20);
+        assert!(b
+            .iter()
+            .all(|c| c.iter().map(|p| p.len() + 1).sum::<usize>() <= 20));
+        assert_eq!(b.iter().map(|c| c.len()).sum::<usize>(), 10);
+        assert!(batches(&[], 20).is_empty());
+        let long = vec!["x".repeat(50)];
+        assert_eq!(batches(&long, 20).len(), 1);
     }
 
     fn ev(rule: &str, cat: &str, weight: f64, lines: &[u32]) -> Ev {
