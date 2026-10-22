@@ -220,8 +220,18 @@ fn no_values_in_db() {
 
 #[test]
 fn refuses_foreign_directory() {
-    // A root-owned directory is refused (or cannot be created into).
-    assert!(Cache::open(Path::new("/private/var/root")).is_none());
+    // A directory owned by another user is refused. As a normal user `/` is
+    // root-owned on macOS and Linux; as root, a temp directory is handed to
+    // `nobody` (65534) instead.
+    use std::os::unix::fs::MetadataExt;
+    let probe = tempfile::tempdir().unwrap();
+    if std::fs::metadata(probe.path()).unwrap().uid() == 0 {
+        let d = tempfile::tempdir().unwrap();
+        std::os::unix::fs::chown(d.path(), Some(65534), Some(65534)).unwrap();
+        assert!(Cache::open(d.path()).is_none());
+    } else {
+        assert!(Cache::open(Path::new("/")).is_none());
+    }
 }
 
 #[test]
