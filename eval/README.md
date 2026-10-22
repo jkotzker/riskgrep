@@ -160,7 +160,7 @@ Secret metrics did not change (OSS 0.45, synthetic 0.0). The probes did not chan
 
 ## Caveats
 
-Detection limits these measurements show; each is also in [`docs/known-limitations.md`](../docs/known-limitations.md).
+Detection limits these measurements show; [`docs/known-limitations.md`](../docs/known-limitations.md) summarises them for users.
 
 - **Banks are found by a name and structure heuristic.** A checkpoint whose parameter names fall outside the exclusion lists (and are flat) can still score high when 3 or more of its tensors share one embedding shape and make up more than half its float tensors. A real bank stored under hierarchical names (`model.speakers.0.vec`, `model_p225`) or alongside at least as many other float tensors as bank vectors scores as a single unnamed tensor (70) or not at all.
 - **Single unnamed embeddings under underscore-indexed keys** (`spk_12_emb`, `speaker_0_vec`, `19_198_0001`) score 25 (safetensors) or 30 (npz): the single-tensor rules treat `_N_` as an index segment, which keeps scipy-style reference vectors (`dct_1_128`) at 30. Banks of such keys are still found (85 to 97).
