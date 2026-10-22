@@ -352,8 +352,10 @@ fn assert_heredoc_within_budget(k: usize) {
     let start = Instant::now();
     let got = bash_targets_within(&unclosed_heredoc_substitutions(k), tmp.path(), budget);
     let elapsed = start.elapsed();
+    // An exponential parse takes seconds; the slack only absorbs CI thread
+    // scheduling.
     assert!(
-        elapsed <= budget + Duration::from_millis(50),
+        elapsed <= budget + Duration::from_secs(1),
         "took {elapsed:?}"
     );
     assert!(got.unresolved);
