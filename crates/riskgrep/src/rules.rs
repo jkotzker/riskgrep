@@ -3,19 +3,16 @@
 use crate::cli::RulesCommand;
 use crate::scan::load_config;
 use crate::{spec, CliError};
-use include_dir::{include_dir, Dir};
 use riskgrep_core::bundle::{compile_uncached, load_or_compile, Bundle};
 use riskgrep_core::config::{Config, Overrides};
 use riskgrep_core::engine::Engine;
-use riskgrep_core::ruleset::Ruleset;
+use riskgrep_core::ruleset::{builtin_test_files, Ruleset};
 use riskgrep_core::scanner::resolve_rulesets;
 use riskgrep_core::{Category, RiskGrep, TargetReport};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-
-static BUILTIN: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../rulesets");
 
 /// Scores are printed to one decimal, so cases compare at that precision.
 const SCORE_TOLERANCE: f64 = 0.05;
@@ -117,7 +114,7 @@ struct TestFile {
 struct Case {
     /// Bare rule id the case is about.
     rule: String,
-    /// Generator spec; see `rulesets/README.md`.
+    /// Generator spec; see `crates/riskgrep-core/rulesets/README.md`.
     synth: String,
     /// A score for the rule's category (the rule must fire), or `"none"`
     /// (the rule must not fire).
@@ -152,21 +149,17 @@ fn embedded_suites() -> Result<Vec<Suite>, CliError> {
         id: String,
     }
     let mut out = Vec::new();
-    for dir in BUILTIN.dirs() {
-        let Some(tests) = dir.get_file(dir.path().join("tests.toml")) else {
-            continue;
-        };
-        let name = dir.path().display();
-        let manifest = dir
-            .get_file(dir.path().join("ruleset.toml"))
-            .and_then(|f| f.contents_utf8())
+    for file in builtin_test_files() {
+        let name = file.dir;
+        let manifest = file
+            .manifest
+            .and_then(|b| std::str::from_utf8(b).ok())
             .ok_or_else(|| CliError(format!("{name}: no ruleset.toml")))?;
         let id = toml::from_str::<Manifest>(manifest)
             .map_err(|e| CliError(format!("{name}/ruleset.toml: {e}")))?
             .id;
-        let text = tests
-            .contents_utf8()
-            .ok_or_else(|| CliError(format!("{name}/tests.toml is not UTF-8")))?;
+        let text = std::str::from_utf8(file.tests)
+            .map_err(|_| CliError(format!("{name}/tests.toml is not UTF-8")))?;
         let file: TestFile =
             toml::from_str(text).map_err(|e| CliError(format!("{name}/tests.toml: {e}")))?;
         out.push(Suite {

@@ -1268,7 +1268,7 @@ fn shipped_rule_sources_do_not_trip_the_rules() {
     let engine = Engine::new(compile_uncached(&refs).unwrap()).unwrap();
     engine.validate_all().unwrap();
     let mut sc = yara_x::Scanner::new(engine.rules());
-    let mut files = files_under(&repo.join("rulesets"));
+    let mut files = files_under(&repo.join("crates/riskgrep-core/rulesets"));
     files.push(repo.join("xtask/upstream/gitleaks.toml"));
     assert!(files.len() > 10, "found {} files", files.len());
     let mut hits = Vec::new();

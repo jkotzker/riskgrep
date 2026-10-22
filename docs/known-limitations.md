@@ -50,7 +50,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 ### Coverage is gitleaks v8.30.1 plus local key-store rules
 
 - **Not covered:** credential formats gitleaks does not define or that were added after v8.30.1, internal token formats of your own services, and secrets that are encoded, split across lines, built at run time, or stored encrypted. A small share of matches differ from gitleaks: of 5,206 generated matches for the 217 converted rules that have a regex and no path condition, 5,203 agree, 3 are missed (2 for `contentful_delivery_api_token`, 1 for `discord_client_secret`, where YARA-X keeps a different one of a regex's overlapping alternatives), and 1 is reported that gitleaks drops (a `curl_auth_header` value whose entropy equals the threshold).
-- **Why:** the 222 rules converted from one pinned gitleaks release (`rulesets/secrets-core/UPSTREAM.md`) and two hand-written key-store rules are the only credential rules. The local changes to upstream are listed in `UPSTREAM.md`.
+- **Why:** the 222 rules converted from one pinned gitleaks release (`crates/riskgrep-core/rulesets/secrets-core/UPSTREAM.md`) and two hand-written key-store rules are the only credential rules. The local changes to upstream are listed in `UPSTREAM.md`.
 - **How it shows up:** no evidence for such a credential unless the generic rule happens to match.
 
 ### Generic-secret limits
@@ -62,7 +62,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 ### gitleaks' global path allowlist skips lockfiles, `node_modules`, and similar
 
-- **Not covered:** secrets in files whose path matches gitleaks' global path allowlist, which every converted rule skips (the hand-written key-store rules still apply): any path containing `gitleaks.toml`; `node_modules/`, `bower_components/`, `vendor/` Go module directories, and Ruby and Python library directories; lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Pipfile.lock`, `poetry.lock`, `go.sum`, `gradle.lockfile`); `gradlew` and `mvnw` wrappers; and files ending in `.bin`, `.pdf`, `.docx`, `.xlsx`, `.exe`, `.pdb`, and font and image extensions. The list is `gitleaks_global_path_allowlist` in `rulesets/secrets-core/gitleaks.yar`.
+- **Not covered:** secrets in files whose path matches gitleaks' global path allowlist, which every converted rule skips (the hand-written key-store rules still apply): any path containing `gitleaks.toml`; `node_modules/`, `bower_components/`, `vendor/` Go module directories, and Ruby and Python library directories; lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Pipfile.lock`, `poetry.lock`, `go.sum`, `gradle.lockfile`); `gradlew` and `mvnw` wrappers; and files ending in `.bin`, `.pdf`, `.docx`, `.xlsx`, `.exe`, `.pdb`, and font and image extensions. The list is `gitleaks_global_path_allowlist` in `crates/riskgrep-core/rulesets/secrets-core/gitleaks.yar`.
 - **Why:** it is converted unchanged from gitleaks, whose defaults assume that vendored and generated files hold no first-party secrets.
 - **How it shows up:** no evidence from the converted rules for a secret in such a path, including a real one in a file named like a lockfile or inside `node_modules/`.
 

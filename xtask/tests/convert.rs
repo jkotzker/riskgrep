@@ -82,7 +82,9 @@ fn newline_reachability() {
 
 /// The `meta:` block of rule `ident` in the committed `gitleaks.yar`.
 fn rule_meta(ident: &str) -> String {
-    let src = fs::read_to_string(repo().join("rulesets/secrets-core/gitleaks.yar")).unwrap();
+    let src =
+        fs::read_to_string(repo().join("crates/riskgrep-core/rulesets/secrets-core/gitleaks.yar"))
+            .unwrap();
     let start = src
         .find(&format!("rule {ident} {{"))
         .unwrap_or_else(|| panic!("rule {ident}"));
@@ -120,7 +122,7 @@ fn convert_to_temp() -> tempfile::TempDir {
 fn converted_ruleset_compiles() {
     let d = convert_to_temp();
     fs::copy(
-        repo().join("rulesets/secrets-core/ruleset.toml"),
+        repo().join("crates/riskgrep-core/rulesets/secrets-core/ruleset.toml"),
         d.path().join("ruleset.toml"),
     )
     .unwrap();
@@ -137,7 +139,7 @@ fn converted_ruleset_compiles() {
 #[test]
 fn committed_output_is_current() {
     let d = convert_to_temp();
-    let shipped = repo().join("rulesets/secrets-core");
+    let shipped = repo().join("crates/riskgrep-core/rulesets/secrets-core");
     for name in ["gitleaks.yar", "UPSTREAM.md"] {
         let want = fs::read(d.path().join(name)).unwrap();
         let got = fs::read(shipped.join(name)).unwrap();

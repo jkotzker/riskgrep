@@ -1,4 +1,4 @@
-# Cases for `riskgrep rules test`; the generator language is in rulesets/README.md.
+# Cases for `riskgrep rules test`; the generator language is in ../README.md.
 
 [[case]]
 rule = "path_biometric_name"

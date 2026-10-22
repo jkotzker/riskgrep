@@ -2,8 +2,15 @@
 name = "riskgrep-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "Scoring engine of RiskGrep: scores files from 0 to 100 for secrets and biometric embeddings with YARA-X rules and structural checks, without recording matched values"
+keywords = ["secrets", "scanner", "yara", "biometrics", "security"]
+categories = ["development-tools", "filesystem"]
 
 [dependencies]
 yara-x = { version = "=1.21.0", default-features = false, features = ["constant-folding", "exact-atoms", "fast-regexp", "math-module", "string-module", "native-code-serialization"] }

@@ -1127,7 +1127,7 @@ fn upstream_md(
          | Rules | {} |\n\n\
          The configuration is kept at `xtask/upstream/gitleaks.toml`. To regenerate, replace that file with the new release's `config/gitleaks.toml`, update `PINNED_TAG` in `xtask/src/convert.rs`, and run:\n\n\
          ```sh\n\
-         cargo xtask convert-gitleaks --config xtask/upstream/gitleaks.toml --tag {tag} --out rulesets/secrets-core\n\
+         cargo xtask convert-gitleaks --config xtask/upstream/gitleaks.toml --tag {tag} --out crates/riskgrep-core/rulesets/secrets-core\n\
          ```\n",
         cfg.rules.len()
     )

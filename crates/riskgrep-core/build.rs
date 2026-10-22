@@ -1,6 +1,6 @@
-//! Computes the digest of each built-in ruleset (the repository's
-//! `rulesets/` directory, which the library embeds) so that the rules-bundle
-//! key needs no hashing of the embedded sources at run time.
+//! Computes the digest of each built-in ruleset (the crate's `rulesets/`
+//! directory, which the library embeds) so that the rules-bundle key needs no
+//! hashing of the embedded sources at run time.
 
 #[path = "src/ruleset_digest.rs"]
 mod ruleset_digest;
@@ -36,7 +36,7 @@ fn ruleset_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    let root = manifest.join("../../rulesets");
+    let root = manifest.join("rulesets");
     println!("cargo:rerun-if-changed={}", root.display());
     println!("cargo:rerun-if-changed=src/ruleset_digest.rs");
     let mut dirs: Vec<PathBuf> = fs::read_dir(&root)

@@ -11,7 +11,7 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
-static BUILTIN: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../../rulesets");
+static BUILTIN: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/rulesets");
 
 include!(concat!(env!("OUT_DIR"), "/builtin_digests.rs"));
 
@@ -184,7 +184,7 @@ fn build_digest(name: &str) -> Option<[u8; 32]> {
         .map(|(_, digest)| *digest)
 }
 
-/// Rulesets embedded from the repository's `rulesets/` directory: every
+/// Rulesets embedded from the crate's `rulesets/` directory: every
 /// subdirectory that contains a `ruleset.toml`. Their digests come from the
 /// build script, so nothing is hashed here.
 pub fn builtin_rulesets() -> Vec<Ruleset> {
@@ -202,9 +202,50 @@ pub fn builtin_rulesets() -> Vec<Ruleset> {
     out
 }
 
+/// The test cases of one embedded ruleset directory, as raw bytes.
+#[derive(Debug, Clone, Copy)]
+pub struct BuiltinTestFile {
+    /// The directory name under `rulesets/`.
+    pub dir: &'static str,
+    /// The directory's `ruleset.toml`, if it has one.
+    pub manifest: Option<&'static [u8]>,
+    /// The directory's `tests.toml`.
+    pub tests: &'static [u8],
+}
+
+/// Every embedded ruleset directory that holds a `tests.toml`. Used by
+/// `riskgrep rules test`.
+pub fn builtin_test_files() -> Vec<BuiltinTestFile> {
+    BUILTIN
+        .dirs()
+        .filter_map(|dir| {
+            let tests = dir.get_file(dir.path().join("tests.toml"))?;
+            let manifest = dir.get_file(dir.path().join("ruleset.toml"));
+            Some(BuiltinTestFile {
+                dir: dir.path().to_str().unwrap_or_default(),
+                manifest: manifest.map(|f| f.contents()),
+                tests: tests.contents(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_test_files_cover_the_shipped_rulesets() {
+        // `riskgrep rules test` reads the test cases through this list, so
+        // it must reach every shipped ruleset's `tests.toml` and manifest.
+        let files = builtin_test_files();
+        let mut dirs: Vec<&str> = files.iter().map(|f| f.dir).collect();
+        dirs.sort();
+        assert_eq!(dirs, ["biometric-embeddings", "secrets-core"]);
+        assert!(files
+            .iter()
+            .all(|f| f.manifest.is_some() && !f.tests.is_empty()));
+    }
 
     #[test]
     fn runtime_digest_matches_the_build_time_one() {

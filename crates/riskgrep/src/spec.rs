@@ -1,6 +1,7 @@
 //! The generator mini-language of `tests.toml`: a `synth` string such as
 //! `secret:aws_access_key` or `npy:<f4:10x192` becomes the bytes of a
-//! synthetic test file. The grammar is documented in `rulesets/README.md`.
+//! synthetic test file. The grammar is documented in
+//! `crates/riskgrep-core/rulesets/README.md`.
 
 use riskgrep_core::synth::{self, FloatStyle, Rng};
 

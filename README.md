@@ -123,4 +123,4 @@ CI (`.github/workflows/ci.yml`) runs the same checks on macOS and Ubuntu.
 
 ## Licence
 
-MIT or Apache-2.0, at your option: see [`LICENSE-MIT`](LICENSE-MIT) and [`LICENSE-APACHE`](LICENSE-APACHE). The `secrets-core` ruleset is converted from gitleaks (MIT); see `rulesets/secrets-core/UPSTREAM.md`.
+MIT or Apache-2.0, at your option: see [`LICENSE-MIT`](LICENSE-MIT) and [`LICENSE-APACHE`](LICENSE-APACHE). The `secrets-core` ruleset is converted from gitleaks (MIT); see [`UPSTREAM.md`](crates/riskgrep-core/rulesets/secrets-core/UPSTREAM.md).
