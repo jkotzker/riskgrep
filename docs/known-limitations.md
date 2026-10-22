@@ -97,7 +97,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 ### The Bash analysis is a best-effort static reading, and unresolved commands get no decision by default
 
 - **Not covered:** variables, functions, and aliases defined elsewhere; files a program opens at run time; anything a script or interpreter does. A program outside the analysis tables is resolved as reading only the files it names as arguments. A command whose files the analysis cannot determine (a recursive search without a named file, an interpreter, a git subcommand that prints repository content, a word built from a variable other than `HOME` and `PWD`) is `unresolved`, and with the default `claude_code.on_unresolved = "allow"` it gets no decision unless a file it does name crosses a threshold.
-- **Why:** the parser (brush-parser 0.4.0, pinned) sees syntax only, and classification is by command name and hand-written tables, so an executor missing from them is invisible. The default keeps routine commands (`grep -rn`, `git diff`, `python3 script.py`) from prompting on every call. Detail: [`docs/decisions/shell-parser.md`](decisions/shell-parser.md).
+- **Why:** the parser (brush-parser 0.4.0, pinned) sees syntax only, and classification is by command name and hand-written tables, so an executor missing from them is invisible. The default keeps routine commands (`grep -rn`, `git diff`, `python3 script.py`) from prompting on every call.
 - **How it shows up:** the command runs without a prompt. Measured with the release `riskgrep-claude`, an isolated HOME, and `a.txt` holding a generated AWS key that scores secret 95:
 
 | Command | Default (`allow`) | `on_unresolved = "deny"` |
