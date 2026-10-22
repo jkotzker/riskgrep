@@ -47,6 +47,7 @@ Test output must have no warnings. Write the failing test first, then the change
 - Never commit matched secrets or real biometric data. Generate fixtures that look like secrets, and random-float embeddings, at test run time, so the repository itself never trips a secret scanner.
 - Never print embedding vectors or file contents that hold them, in tests, tools, or logs; assert shapes and counts.
 - No report, hook output, log line, error message, cache row, or baseline entry may contain matched bytes. `Evidence` has no field that can hold match content; keep it that way.
+- Vendored or generated files that hold secret-shaped strings on purpose (upstream rule sets, published example keys, test vectors) are reviewed before they land. In the same change, add each such file to `paths-ignore` in `.github/secret_scanning.yml`, by exact path rather than directory, so GitHub secret scanning does not alert on reviewed content. Real secrets anywhere else stay scanned, and the repository scan in CI still covers these files.
 
 ## Private files
 
