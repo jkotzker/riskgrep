@@ -14,7 +14,7 @@ RiskGrep is a local scanner that scores files from 0 to 100 per sensitive-data c
 After cloning, install the pre-commit hook: git never enables hooks from a clone by itself.
 
 ```sh
-cargo install --path crates/riskgrep
+cargo install --locked --path crates/riskgrep
 riskgrep git install-hook
 ```
 
