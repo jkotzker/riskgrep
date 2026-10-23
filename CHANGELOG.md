@@ -2,6 +2,12 @@
 
 All notable changes to RiskGrep are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- GitHub releases link to each crate's version on crates.io and attach the published `.crate` files with a `SHA256SUMS` file. The Release workflow adds them after publishing, once each file's checksum matches the crates.io index.
+
 ## [1.0.1] – 2026-10-23
 
 ### Fixed
@@ -49,5 +55,6 @@ p95 latency targets, checked by `cargo xtask bench` on the release build with a 
 | `riskgrep scan -`, 1 MB | 50 ms | 17.05 ms |
 | `riskgrep git pre-commit`, 20 staged text files, uncached | 100 ms | 90.15 ms |
 
+[Unreleased]: https://github.com/jkotzker/riskgrep/compare/v1.0.1...HEAD
 [1.0.1]: https://github.com/jkotzker/riskgrep/releases/tag/v1.0.1
 [1.0.0]: https://github.com/jkotzker/riskgrep/releases/tag/v1.0.0
