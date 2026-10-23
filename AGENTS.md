@@ -67,3 +67,9 @@ Anything private to a contributor or machine (plans, notes, scratch output, loca
 - Pull requests are merged with merge commits only (no squash or rebase merges).
 - CI must pass: `test (macos-latest)`, `test (ubuntu-latest)`, and `riskgrep scan`.
 - Commit subjects are under 72 characters and describe the change technically.
+
+## Releases
+
+- A release bumps `version` in the root `Cargo.toml` (and the `riskgrep-core` path-dependency versions), adds a dated `CHANGELOG.md` entry, and lands through a pull request like any other change.
+- The maintainer tags the merge commit with a signed tag `v<version>` and publishes a GitHub release from it. `.github/workflows/release.yml` then publishes the three crates to crates.io through Trusted Publishing, after the maintainer approves the job in the `release` environment. The job fails if the tag does not match the workspace version.
+- Never publish to crates.io by hand, and never add a crates.io API token to the repository.

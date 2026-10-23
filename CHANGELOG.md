@@ -12,6 +12,7 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 - A "Fresh dependencies" CI workflow builds both binaries without `Cargo.lock` on every pull request, on every push to `main`, and weekly, so an upstream release that breaks installation is caught in CI.
 - The README describes installing from crates.io.
+- A "Release" workflow publishes the three crates to crates.io when a GitHub release is published, through crates.io Trusted Publishing: no API token is stored, and the job waits for the maintainer's approval in the `release` environment.
 
 ## [1.0.0] – 2026-10-22
 
