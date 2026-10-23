@@ -12,7 +12,7 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ### Fixed
 
-- `cargo install riskgrep` and `cargo install riskgrep-claude` without `--locked` failed to compile: yara-x 1.21.0 accepts version 1.22.0 of its own `yara-x-macros` and `yara-x-parser` crates, which does not compile against it. `riskgrep-core` now pins both to 1.21.0, matching its yara-x pin. Detection and scores are unchanged.
+- `cargo install riskgrep` and `cargo install riskgrep-claude` without `--locked` failed to compile: yara-x 1.21.0 accepts version 1.22.0 of its own `yara-x-macros` crate, which does not compile against it. `riskgrep-core` now pins `yara-x-macros` to 1.21.0, matching its yara-x pin, and pins `yara-x-parser` to 1.21.0 as well to keep them aligned. Detection and scores are unchanged. Reported upstream as [VirusTotal/yara-x#819](https://github.com/VirusTotal/yara-x/issues/819).
 
 ### Added
 
