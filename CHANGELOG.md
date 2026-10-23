@@ -2,11 +2,17 @@
 
 All notable changes to RiskGrep are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- GitHub releases link to each crate's version on crates.io and attach the published `.crate` files with a `SHA256SUMS` file. The Release workflow adds them after publishing, once each file's checksum matches the crates.io index.
+
 ## [1.0.1] – 2026-10-23
 
 ### Fixed
 
-- `cargo install riskgrep` and `cargo install riskgrep-claude` without `--locked` failed to compile: yara-x 1.21.0 accepts version 1.22.0 of its own `yara-x-macros` and `yara-x-parser` crates, which does not compile against it. `riskgrep-core` now pins both to 1.21.0, matching its yara-x pin. Detection and scores are unchanged.
+- `cargo install riskgrep` and `cargo install riskgrep-claude` without `--locked` failed to compile: yara-x 1.21.0 accepts version 1.22.0 of its own `yara-x-macros` crate, which does not compile against it. `riskgrep-core` now pins `yara-x-macros` to 1.21.0, matching its yara-x pin, and pins `yara-x-parser` to 1.21.0 as well to keep them aligned. Detection and scores are unchanged. Reported upstream as [VirusTotal/yara-x#819](https://github.com/VirusTotal/yara-x/issues/819).
 
 ### Added
 
@@ -49,5 +55,6 @@ p95 latency targets, checked by `cargo xtask bench` on the release build with a 
 | `riskgrep scan -`, 1 MB | 50 ms | 17.05 ms |
 | `riskgrep git pre-commit`, 20 staged text files, uncached | 100 ms | 90.15 ms |
 
+[Unreleased]: https://github.com/jkotzker/riskgrep/compare/v1.0.1...HEAD
 [1.0.1]: https://github.com/jkotzker/riskgrep/releases/tag/v1.0.1
 [1.0.0]: https://github.com/jkotzker/riskgrep/releases/tag/v1.0.0

@@ -71,5 +71,5 @@ Anything private to a contributor or machine (plans, notes, scratch output, loca
 ## Releases
 
 - A release bumps `version` in the root `Cargo.toml` (and the `riskgrep-core` path-dependency versions), adds a dated `CHANGELOG.md` entry, and lands through a pull request like any other change.
-- The maintainer tags the merge commit with a signed tag `v<version>` and publishes a GitHub release from it. `.github/workflows/release.yml` then publishes the three crates to crates.io through Trusted Publishing, after the maintainer approves the job in the `release` environment. The job fails if the tag does not match the workspace version.
+- The maintainer tags the merge commit with a signed tag `v<version>` and publishes a GitHub release from it. `.github/workflows/release.yml` then publishes the three crates to crates.io through Trusted Publishing, after the maintainer approves the job in the `release` environment. The job fails if the tag does not match the workspace version. After publishing, it runs `.github/scripts/crates_release_assets.py`, which checks each published `.crate` file against the checksum in the crates.io index, then adds a "Published to crates.io" section to the release notes and attaches the `.crate` files and `SHA256SUMS`.
 - Never publish to crates.io by hand, and never add a crates.io API token to the repository.
