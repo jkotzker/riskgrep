@@ -14,6 +14,12 @@ categories = ["development-tools", "filesystem"]
 
 [dependencies]
 yara-x = { version = "=1.21.0", default-features = false, features = ["constant-folding", "exact-atoms", "fast-regexp", "math-module", "string-module", "native-code-serialization"] }
+# yara-x 1.21.0 accepts any 1.x of its own macros and parser crates, but does
+# not compile against 1.22.0. Pinned here so an install that resolves
+# dependencies without Cargo.lock (`cargo install riskgrep`) gets 1.21.0.
+# Not used directly; move these with the yara-x pin.
+yara-x-macros = "=1.21.0"
+yara-x-parser = "=1.21.0"
 serde = { version = "1", features = ["derive"] }
 blake3 = "1.8.7"
 include_dir = "0.7.4"

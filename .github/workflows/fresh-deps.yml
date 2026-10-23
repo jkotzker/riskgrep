@@ -1,0 +1,45 @@
+name: Fresh dependencies
+
+# Builds the published binaries the way `cargo install riskgrep` does: without
+# Cargo.lock, so every dependency resolves to its newest compatible version.
+# Catches an upstream release that breaks the build for users before they hit
+# it. Not a required check: an upstream break should not block unrelated pull
+# requests; the weekly run surfaces it when nothing in this repository changed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fresh:
+    name: fresh dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      # `cargo install --path` without --locked ignores Cargo.lock.
+      - name: Install riskgrep and riskgrep-claude without the lockfile
+        run: |
+          cargo install --path crates/riskgrep --root "$RUNNER_TEMP/bin" --target-dir "$RUNNER_TEMP/target"
+          cargo install --path crates/riskgrep-claude --root "$RUNNER_TEMP/bin" --target-dir "$RUNNER_TEMP/target"
+
+      - name: Run the installed binaries
+        run: |
+          "$RUNNER_TEMP/bin/bin/riskgrep" --version
+          "$RUNNER_TEMP/bin/bin/riskgrep-claude" print-config > /dev/null

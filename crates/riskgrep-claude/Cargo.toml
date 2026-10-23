@@ -20,7 +20,7 @@ name = "riskgrep-claude"
 path = "src/main.rs"
 
 [dependencies]
-riskgrep-core = { path = "../riskgrep-core", version = "1.0.0" }
+riskgrep-core = { path = "../riskgrep-core", version = "1.0.1" }
 serde_json = "1"
 ignore = "0.4"
 glob = "0.3.4"

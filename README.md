@@ -24,14 +24,20 @@ Use it as one layer alongside those controls, not in place of them.
 
 ## Install
 
-RiskGrep is built from source with the stable Rust release pinned in `rust-toolchain.toml` (rustup installs it on first use). Nothing is published to a registry yet.
+RiskGrep is published on crates.io and builds from source with Rust 1.99.1 or later ([rustup](https://rustup.rs) installs Rust). Install both binaries with:
 
 ```sh
-cargo install --path crates/riskgrep
-cargo install --path crates/riskgrep-claude
+cargo install --locked riskgrep riskgrep-claude
 ```
 
-This puts `riskgrep` and `riskgrep-claude` in `~/.cargo/bin`. Run `riskgrep rules compile` once afterwards, from any directory: it compiles the rulesets the Claude Code hook uses (the defaults and your user configuration) and stores them in the cache directory, so the first scan or hook call does not pay for it (about one second). It prints `already compiled` when the cache already holds them. Add `--repo` to compile the rulesets a repository's `.riskgrep.toml` selects instead; run it from inside that repository.
+`--locked` builds with the exact dependency versions RiskGrep was tested with. To build from a clone of this repository instead, which uses the toolchain pinned in `rust-toolchain.toml`:
+
+```sh
+cargo install --locked --path crates/riskgrep
+cargo install --locked --path crates/riskgrep-claude
+```
+
+Either way, `riskgrep` and `riskgrep-claude` go to `~/.cargo/bin`. Run `riskgrep rules compile` once afterwards, from any directory: it compiles the rulesets the Claude Code hook uses (the defaults and your user configuration) and stores them in the cache directory, so the first scan or hook call does not pay for it (about one second). It prints `already compiled` when the cache already holds them. Add `--repo` to compile the rulesets a repository's `.riskgrep.toml` selects instead; run it from inside that repository.
 
 ## Command line
 
