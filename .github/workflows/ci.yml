@@ -34,7 +34,7 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -97,7 +97,7 @@ jobs:
 
       # Caches the cargo registry only: the build goes outside the checkout
       # (below), so that the scan of `.` does not walk the build output.
-      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-targets: "false"
 
