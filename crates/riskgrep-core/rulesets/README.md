@@ -81,4 +81,5 @@ Samples are generated at run time from fixed seeds, so nothing sensitive is stor
 | `csv:ROWSxCOLS` | CSV of random floats |
 | `der:HEX[:SEED]` | The hex bytes, then 300 random bytes (DER key and key-store headers) |
 | `prices:N`, `log:N` | N lines of price-list CSV or log text with small decimals (hard negatives for float rules) |
+| `file:KIND[:SEED]` | Whole-file text from `riskgrep_core::synth::credential_file`: one-time-password URIs, password-manager exports, and two-factor recovery codes, each with a hard-negative variant (kinds in `synth::CREDENTIAL_FILE_KINDS`) |
 | `text:LITERAL` | The literal text; `\n` and `\t` are escapes |

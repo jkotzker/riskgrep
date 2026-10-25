@@ -103,5 +103,10 @@
     "rule": "private_key",
     "path": "terraform/internal/releaseauth/testdata/sample.private.key",
     "line": 1
+  },
+  {
+    "rule": "otpauth_totp_seed",
+    "path": "mdn-content/files/en-us/web/security/authentication/otp/index.md",
+    "line": 123
   }
 ]

@@ -10,6 +10,12 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ### Added
 
+- Credential-file rules in `secrets-core` (`credentials.yar`, `vaults.yar`), each recognising a file by its structure so that the Claude Code hook and the git hook decide on files that scored secret 0 before:
+  - `otpauth://totp/` and `otpauth://hotp/` URIs with a base32 `secret` parameter, and Google Authenticator `otpauth-migration://` export links, score 95 (deny). The public example seeds from one-time-password documentation are ignored.
+  - Plaintext password-manager exports score 95: Bitwarden JSON (`"encrypted": false`) and CSV, 1Password `export.data` JSON, and LastPass, Chrome, and Apple Passwords CSV files, matched by header row or JSON layout rather than by the passwords inside.
+  - Two-factor backup and recovery codes: a file under 8 KiB with at least six code-shaped lines (GitHub-style hex pairs, two groups of four digits, or ten-character alphanumeric codes) scores 90 when its name contains "recovery codes" or "backup codes" and 80 when only a "recovery codes" or "backup codes" heading appears in its first 512 bytes.
+  - Encrypted vaults, recognised by magic bytes, score 85 (ask): KeePass `.kdb` and `.kdbx`, macOS keychain files (`.keychain`, `.keychain-db`), Password Safe v3 (`.psafe3`), and the known files of a 1Password OPVault bundle. These binary files are now read for their first 64 bytes instead of being skipped.
+- `riskgrep rules test` accepts the `file:KIND` generator for credential-file samples.
 - GitHub releases link to each crate's version on crates.io and attach the published `.crate` files with a `SHA256SUMS` file. The Release workflow adds them after publishing, once each file's checksum matches the crates.io index.
 
 ## [1.0.1] – 2026-10-23

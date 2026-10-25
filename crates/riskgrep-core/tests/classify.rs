@@ -543,3 +543,52 @@ fn other_classes_read_nothing() {
         assert!(c.partial.is_none());
     }
 }
+
+#[test]
+fn password_vaults_are_recognised_by_magic() {
+    let kdbx = pad(vec![0x03, 0xD9, 0xA2, 0x9A, 0x67, 0xFB, 0x4B, 0xB5], 64);
+    let kdb1 = pad(vec![0x03, 0xD9, 0xA2, 0x9A, 0x65, 0xFB, 0x4B, 0xB5], 64);
+    let kych = pad(b"kych\0\x01\0\0".to_vec(), 64);
+    let pws3 = pad(b"PWS3".to_vec(), 64);
+    for (name, head) in [
+        ("Passwords.kdbx", &kdbx),
+        ("renamed.dat", &kdbx),
+        ("old.kdb", &kdb1),
+        ("login.keychain-db", &kych),
+        ("noext", &kych),
+        ("vault.psafe3", &pws3),
+        ("VAULT.PSAFE3", &pws3),
+    ] {
+        assert_eq!(
+            classify(name, head),
+            FileClass::KnownBinary(Known::Vault),
+            "{name}"
+        );
+    }
+    // PWS3 needs the extension; other KeePass-like signatures are not vaults.
+    let mut pws3_bin = pws3.clone();
+    pws3_bin[8] = 0;
+    assert_eq!(classify("vault.dat", &pws3_bin), FileClass::UnknownBinary);
+    let other = pad(vec![0x03, 0xD9, 0xA2, 0x9A, 0x00, 0xFB, 0x4B, 0xB5], 64);
+    assert_eq!(classify("a.kdbx", &other), FileClass::UnknownBinary);
+    // The word `kych` at the start of ordinary text is text.
+    assert_eq!(classify("notes.txt", b"kych is a word\n"), FileClass::Text);
+}
+
+#[test]
+fn password_vaults_read_the_header_only() {
+    let data = pad(
+        vec![0x03, 0xD9, 0xA2, 0x9A, 0x67, 0xFB, 0x4B, 0xB5],
+        100_000,
+    );
+    let (_t, f) = temp_with(&data);
+    let c = read_for_scan(
+        &f,
+        100_000,
+        &FileClass::KnownBinary(Known::Vault),
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(c.bytes, &data[..64]);
+    assert!(c.partial.is_none());
+}

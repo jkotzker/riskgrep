@@ -166,3 +166,253 @@ rule = "der_key_file"
 synth = "text:not a der file\n"
 path = "keys/server.key"
 expect = "none"
+
+# ---- credential files (credentials.yar) -----------------------------------------
+# The generator `file:` kinds are in riskgrep_core::synth::CREDENTIAL_FILE_KINDS.
+
+[[case]]
+rule = "otpauth_totp_seed"
+synth = "file:otpauth_totp"
+path = "seeds.txt"
+expect = 95
+
+[[case]]
+rule = "otpauth_totp_seed"
+synth = "file:otpauth_hotp"
+path = "hotp.txt"
+expect = 95
+
+[[case]]
+# A QR-export-style list, one URI per line.
+rule = "otpauth_totp_seed"
+synth = "file:otpauth_list_text"
+path = "authenticator-export.txt"
+expect = 95
+
+[[case]]
+rule = "otpauth_totp_seed"
+synth = "file:otpauth_list_json"
+path = "accounts.json"
+expect = 95
+
+[[case]]
+rule = "otpauth_migration_export"
+synth = "file:otpauth_migration"
+path = "export.txt"
+expect = 95
+
+[[case]]
+rule = "otpauth_totp_seed"
+synth = "file:otpauth_no_secret"
+path = "seeds.txt"
+expect = "none"
+
+[[case]]
+rule = "otpauth_totp_seed"
+synth = "file:otpauth_short_secret"
+path = "seeds.txt"
+expect = "none"
+
+[[case]]
+# The public example seed from one-time-password documentation.
+rule = "otpauth_totp_seed"
+synth = "file:otpauth_example_secret"
+path = "README.md"
+expect = "none"
+
+[[case]]
+rule = "otpauth_totp_seed"
+synth = "file:base32_outside_uri"
+path = "config.toml"
+expect = "none"
+
+[[case]]
+rule = "bitwarden_json_export"
+synth = "file:bitwarden_json"
+path = "bitwarden_export.json"
+expect = 95
+
+[[case]]
+rule = "bitwarden_json_export"
+synth = "file:bitwarden_encrypted_json"
+path = "bitwarden_export.json"
+expect = "none"
+
+[[case]]
+rule = "onepassword_json_export"
+synth = "file:onepassword_json"
+path = "export.data"
+expect = 95
+
+[[case]]
+rule = "lastpass_csv_export"
+synth = "file:lastpass_csv"
+path = "lastpass_vault_export.csv"
+expect = 95
+
+[[case]]
+# A header row alone (an import template) is not an export.
+rule = "lastpass_csv_export"
+synth = "file:lastpass_header_only"
+path = "template.csv"
+expect = "none"
+
+[[case]]
+rule = "chrome_csv_export"
+synth = "file:chrome_csv"
+path = "passwords.csv"
+expect = 95
+
+[[case]]
+rule = "chrome_csv_export"
+synth = "file:users_csv"
+path = "users.csv"
+expect = "none"
+
+[[case]]
+rule = "apple_csv_export"
+synth = "file:apple_csv"
+path = "passwords.csv"
+expect = 95
+
+[[case]]
+rule = "bitwarden_csv_export"
+synth = "file:bitwarden_csv"
+path = "bitwarden_export.csv"
+expect = 95
+
+[[case]]
+rule = "recovery_codes_named_file"
+synth = "file:recovery_github"
+path = "github-recovery-codes.txt"
+expect = 90
+
+[[case]]
+rule = "recovery_codes_named_file"
+synth = "file:recovery_google"
+path = "backup_codes.txt"
+expect = 90
+
+[[case]]
+rule = "recovery_codes_named_file"
+synth = "file:recovery_alnum"
+path = "2fa-recovery-codes.txt"
+expect = 90
+
+[[case]]
+# Code-shaped lines without a name or heading signal are not recovery codes.
+rule = "recovery_codes_named_file"
+synth = "file:hex_pairs_unlabelled"
+path = "ids.txt"
+expect = "none"
+
+[[case]]
+rule = "recovery_codes_named_file"
+synth = "file:recovery_few_codes"
+path = "recovery-codes.txt"
+expect = "none"
+
+[[case]]
+rule = "recovery_codes_headed_file"
+synth = "file:recovery_google"
+path = "notes.txt"
+expect = 80
+
+[[case]]
+rule = "recovery_codes_headed_file"
+synth = "file:recovery_alnum"
+path = "notes.txt"
+expect = 80
+
+[[case]]
+rule = "recovery_codes_headed_file"
+synth = "file:recovery_prose"
+path = "README.md"
+expect = "none"
+
+[[case]]
+rule = "recovery_codes_headed_file"
+synth = "file:hex_pairs_unlabelled"
+path = "ids.txt"
+expect = "none"
+
+[[case]]
+rule = "recovery_codes_headed_file"
+synth = "file:recovery_few_codes"
+path = "notes.txt"
+expect = "none"
+
+[[case]]
+# Documents over 8 KiB are prose, not a saved list of codes.
+rule = "recovery_codes_headed_file"
+synth = "file:recovery_large_document"
+path = "notes.md"
+expect = "none"
+
+# ---- password-manager vaults (vaults.yar) --------------------------------------
+
+[[case]]
+# KeePass database: signature 9AA2D903 then B54BFB67 (KDBX), then random bytes.
+rule = "keepass_database"
+synth = "der:03d9a29a67fb4bb5"
+path = "Passwords.kdbx"
+expect = 85
+
+[[case]]
+# KeePass 1.x database (.kdb): second signature B54BFB65.
+rule = "keepass_database"
+synth = "der:03d9a29a65fb4bb5"
+path = "old.kdb"
+expect = 85
+
+[[case]]
+# The magic is what counts, not the name.
+rule = "keepass_database"
+synth = "der:03d9a29a67fb4bb5"
+path = "backup.dat"
+expect = 85
+
+[[case]]
+rule = "keepass_database"
+synth = "text:not a vault, only named like one"
+path = "notes.kdbx"
+expect = "none"
+
+[[case]]
+# macOS keychain file: `kych`, version 1.0.
+rule = "macos_keychain_file"
+synth = "der:6b79636800010000"
+path = "login.keychain-db"
+expect = 85
+
+[[case]]
+rule = "macos_keychain_file"
+synth = "text:kych is also a word"
+path = "notes.txt"
+expect = "none"
+
+[[case]]
+# Password Safe v3 database: `PWS3` and the .psafe3 extension.
+rule = "password_safe_database"
+synth = "der:50575333"
+path = "vault.psafe3"
+expect = 85
+
+[[case]]
+# 1Password OPVault bundle files (the bundle is a directory).
+rule = "opvault_bundle_file"
+synth = "text:var profile={};"
+path = "My.opvault/default/profile.js"
+expect = 85
+
+[[case]]
+rule = "opvault_bundle_file"
+synth = "text:ld({});"
+path = "My.opvault/default/band_A.js"
+expect = 85
+
+[[case]]
+rule = "opvault_bundle_file"
+synth = "text:var profile={};"
+path = "profile.js"
+expect = "none"
