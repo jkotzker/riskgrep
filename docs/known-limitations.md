@@ -20,7 +20,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 ### Files are checked, command output is not
 
-- **Not covered:** the output of a command or program (a database client, `env`, a script that prints a credential), and data that never passes through a file the hook can name. Tools other than `Read`, `NotebookRead`, `Grep`, and `Bash` (other MCP tools, web fetches) are not checked at all.
+- **Not covered:** the output of a command or program (a database client, `env`, a script that prints a credential), and data that never passes through a file the hook can name. Tools other than `Read`, `NotebookRead`, `Grep`, `Glob`, `Bash`, and MCP tools (web fetches, for example) are not checked at all, and an MCP tool without a `claude_code.mcp_tools` entry gets no decision unless `on_unresolved` says otherwise.
 - **Why:** the hook runs before a tool call and reasons about the files the call would read.
 - **How it shows up:** the hook produces no decision and the call proceeds.
 
@@ -50,7 +50,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 ### Coverage is gitleaks v8.30.1 plus local key-store rules
 
 - **Not covered:** credential formats gitleaks does not define or that were added after v8.30.1, internal token formats of your own services, and secrets that are encoded, split across lines, built at run time, or stored encrypted. A small share of matches differ from gitleaks: of 5,206 generated matches for the 217 converted rules that have a regex and no path condition, 5,203 agree, 3 are missed (2 for `contentful_delivery_api_token`, 1 for `discord_client_secret`, where YARA-X keeps a different one of a regex's overlapping alternatives), and 1 is reported that gitleaks drops (a `curl_auth_header` value whose entropy equals the threshold).
-- **Why:** the 222 rules converted from one pinned gitleaks release (`crates/riskgrep-core/rulesets/secrets-core/UPSTREAM.md`) and two hand-written key-store rules are the only credential rules. The local changes to upstream are listed in `UPSTREAM.md`.
+- **Why:** the 222 rules converted from one pinned gitleaks release (`crates/riskgrep-core/rulesets/secrets-core/UPSTREAM.md`) plus the hand-written key-store, credential-file, and vault rules are the only credential rules. The local changes to upstream are listed in `UPSTREAM.md`.
 - **How it shows up:** no evidence for such a credential unless the generic rule happens to match.
 
 ### Generic-secret limits
@@ -72,19 +72,31 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **Why:** a `.der` or `.key` file of at most 1 MiB that starts with a DER SEQUENCE header (`30` and a short-form length, `81`, or `82`) is read as a key store, and the `der_key_file` rule reports SEC1, PKCS#1, PKCS#8, and RFC 5958 version 2 private keys in it; other files are classified by content, and DER is binary.
 - **How it shows up:** a non-DER binary key or a DER key under another name is skipped as a binary of unknown format (`on_skipped` applies: allow by default). An encrypted PKCS#8 key in a `.der` or `.key` file is read and scores 0. PEM-encoded keys are found by `private_key` under any name.
 
+### Credential files are recognised by structure, in the forms listed
+
+- **Not covered:** one-time-password seeds other than `otpauth://` URIs and Google Authenticator `otpauth-migration://` links with a `secret` or `data` value (a bare base32 seed in a config file, a percent-encoded URI inside a QR-code image link); password-manager exports other than the Bitwarden (JSON and CSV), 1Password `export.data` (JSON), LastPass, Chrome, and Apple Passwords layouts, and any of those with reordered or renamed columns, or whose first line is not the header row; recovery codes that are not GitHub-style hex pairs, two groups of four digits, or ten-character alphanumeric codes containing a digit, in a file over 8 KiB, with fewer than six codes, or without "recovery codes" or "backup codes" in the file name or in the first 512 bytes; encrypted vaults other than KeePass (`.kdb`, `.kdbx`), macOS keychain files, Password Safe v3 (`.psafe3`), and 1Password OPVault bundle files.
+- **Why:** each rule matches a documented or observed layout; looser matching would flag ordinary CSV files, lists of identifiers, and documentation. The Chrome and Apple Passwords column lists come from observed exports, not from vendor documentation.
+- **How it shows up:** the export, seed, and recovery-code rules score 95 or 90 (deny or near deny in the Claude Code hook), so a documentation page that quotes an example in the same layout can be flagged. Encrypted vaults score 85, which asks in the Claude Code hook and blocks a commit in the git hook. A 1Password `.1pux` export (a zip) and 1Password's SQLite database are still reported unscanned, so only `on_error` applies; the plaintext `export.data` is detected once unzipped.
+
 ## File handling
 
 ### Large text files are scanned only at their ends
 
 - **Not covered:** the middle of a text file above 8 MiB. Only the first and last 1 MiB are read, and the report says `partial`. Findings in the last MiB carry their true byte offsets but no line numbers.
-- **Why:** bounds scan time and memory; both limits (`limits.text_max`, `limits.sample`) are configurable.
+- **Why:** bounds scan time and memory; both limits (`limits.text_max`, `limits.sample`) are configurable. For UTF-16 and UTF-32 text both limits apply to the file's bytes, not to the transcoded text, and each sample ends on a code-unit boundary.
 - **How it shows up:** a `partial` status with the unread byte range; a secret inside that range is not found. Text output and git pre-commit messages show `line unknown` for findings in the last MiB; JSON output keeps `line_start` and `line_end` at 0 for them. For a partly read staged file the git hook scores every finding in the sample, not only those on added lines.
 
-### Archives, PDFs, SQLite, images, UTF-16 text, and unknown binaries are not scanned
+### Archives, PDFs, SQLite, images, and unknown binaries are not scanned
 
-- **Not covered:** the contents of archives and containers recognised by header (zip other than `.npz`, gzip, tar, 7z, PDF, SQLite), images, binary files of unknown format, and text whose first 8 KiB contains a NUL byte, which includes UTF-16 and UTF-32 text. Only `.npy`, `.npz`, safetensors, and key-store files (PKCS#12, DER) are read as binaries, so a secret inside a compiled binary or a database file is not found.
+- **Not covered:** the contents of archives and containers recognised by header (zip other than `.npz`, gzip, tar, 7z, PDF, SQLite), images, binary files of unknown format, and text whose first 8 KiB contains a NUL byte unless it is recognised as UTF-16 or UTF-32 (next entry). Only `.npy`, `.npz`, safetensors, key-store files (PKCS#12, DER), and password-vault headers (the first 64 bytes) are read as binaries, so a secret inside a compiled binary or a database file is not found.
 - **Why:** unpacking archives adds decompression risk and time, and a NUL byte in the sniff window marks a file as binary.
-- **How it shows up:** archives are reported `unscanned` (so `on_error` applies: ask in the Claude Code hook, block in the git hook); images, unknown binaries, and UTF-16 text are reported `skipped` (so `on_skipped` applies: allow by default). Measured with the release build: a UTF-16 file holding a generated AWS key is skipped, while its ASCII form scores secret 95.
+- **How it shows up:** archives are reported `unscanned` (so `on_error` applies: ask in the Claude Code hook, block in the git hook); images and unknown binaries are reported `skipped` (so `on_skipped` applies: allow by default).
+
+### UTF-16 and UTF-32 text is recognised by its byte-order mark or by mostly ASCII content
+
+- **Not covered:** UTF-16 or UTF-32 text without a byte-order mark whose first 8 KiB is not more than half ASCII characters (for example CJK text), or holds U+0000, a control character other than tab, LF, VT, FF, CR, and ESC, or an invalid code unit; text with a byte-order mark whose first 8 KiB after the mark holds U+0000 or more than one invalid code point in 16; and other encodings (UTF-7, legacy code pages, EBCDIC), which are scanned as bytes like any other text. Text read from standard input (`riskgrep scan -`) is always scanned as bytes.
+- **Why:** without a byte-order mark the encoding is inferred from the code units of the sniff window, and the test has to reject binaries whose bytes include NULs. A UTF-16 or UTF-32 file of ASCII characters shows the NUL pattern of its encoding form; a binary with runs of NULs holds U+0000 in every form.
+- **How it shows up:** text that is not recognised is skipped as a binary of unknown format. Recognised text is transcoded to UTF-8 for the rules and scores as the same text in UTF-8 does: measured with the release build (`riskgrep scan --format json` over generated files), a generated AWS key scores secret 95 in ASCII and in UTF-16 and UTF-32 of either byte order, with and without a mark. Locations are byte offsets in the file and lines are lines of the file; invalid code units are read as U+FFFD and the file is still reported `scanned`. In the Claude Code hook a partial `Read` is available only for UTF-16 LE text with a byte-order mark: measured by reading generated files of numbered lines with the `Read` tool of Claude Code 2.1.309, it decodes that form and numbers its lines as RiskGrep does, but reads UTF-16 BE, UTF-32, and text without a mark as bytes split at 0x0A bytes, which a code unit other than LF can hold. The git hook checks every staged UTF-16 or UTF-32 file whole rather than only its added lines: git reports such a file as a binary change (an LF code unit holds a NUL byte; `git diff --numstat` prints `-` for its line counts), and git numbers lines at 0x0A bytes in any case.
 
 ### The time budget can leave a file unscanned
 
@@ -112,8 +124,8 @@ Setting `on_unresolved = "ask"` or `"deny"` under `[claude_code]` prompts or blo
 
 ### Partial reads are conservative
 
-- **Not covered:** a partial `Read` of a file with a finding from a rule not marked `line_complete`. Of the 222 converted gitleaks rules, 59 are marked; the others include `private_key`, `kubernetes_secret_yaml`, `generic_api_key`, `anthropic_api_key`, and `openai_api_key`. No hand-written or biometric rule is marked, and binary, sampled (`partial`), and structural findings never allow a partial read.
-- **Why:** a rule is marked only when its regex cannot match a line feed, so that every match lies on the lines its location names. Many gitleaks regexes can include a line feed through a trailing delimiter or whitespace even when the secret sits on one line.
+- **Not covered:** a partial `Read` of a file with a finding from a rule not marked `line_complete`. Of the 222 converted gitleaks rules, 111 are marked (`grep -c 'line_complete = true' crates/riskgrep-core/rulesets/secrets-core/gitleaks.yar`, also stated in `crates/riskgrep-core/rulesets/secrets-core/UPSTREAM.md`); the others include `private_key`, `kubernetes_secret_yaml`, `generic_api_key`, and the provider-context rules such as `adafruit_api_key` that allow whitespace between a provider name and the value. No hand-written or biometric rule is marked, and binary, sampled (`partial`), and structural findings, and findings in UTF-16 or UTF-32 text other than UTF-16 LE with a byte-order mark, never allow a partial read.
+- **Why:** a rule is marked only when every match stays on the line of its secret: nothing up to the end of the secret can match a line feed, and after it at most one byte can (gitleaks' trailing delimiter). A regex that allows whitespace before the secret can put a provider name and its value on different lines, so the rule is not marked even when most values sit on one line. The key-store rules locate only a binary file's header, the path and tensor rules have no text lines, and the printed-float rules do not locate runs shorter than 64 floats or arrays of other lengths.
 - **How it shows up:** the reason ends with `No partial read is available for this file; ask the user.`, and every `Read` of the file, with or without `offset` and `limit`, gets the decision.
 
 ### Files can change between the check and the read
@@ -127,6 +139,12 @@ Setting `on_unresolved = "ask"` or `"deny"` under `[claude_code]` prompts or blo
 - **Not covered:** files that Claude Code's `Grep` would search but the hook does not walk, if a later Claude Code version changes how `Grep` runs ripgrep, and a later version whose `Read` numbers lines differently for partial reads. The hook mirrors version 2.1.301: hidden files are searched, the directories `.git`, `.svn`, `.hg`, `.bzr`, `.jj`, and `.sl` are excluded, `.gitignore` is honoured, symlinks are not followed, the `glob` field is split on whitespace and then on commas, and a leading `~` or `~/` in `path` is expanded from `HOME`.
 - **Why:** the hook predicts which files the tool will read; it does not run the search itself.
 - **How it shows up:** after a Claude Code update that changes these defaults, a `Grep` call may read files the hook did not scan, and no decision is given for them. Exclusions that Claude Code derives from permission rules are not mirrored, so the hook may scan more files than `Grep` reads.
+
+### MCP tools and Glob are judged from their inputs
+
+- **Not covered:** files an MCP tool reads through input fields its `claude_code.mcp_tools` entry does not name, or reads in a way its kind does not describe (a server that follows links, or whose search honours different exclusions); the content a search tool mapped as `names` reads, such as Desktop Commander's `start_search` with `searchType` `content`, whose matching lines reach the agent while only the file names under its path are judged; MCP tools without an entry, which are unresolved and get no decision under the default `on_unresolved = "allow"`; and, for `Glob` and `names` tools, names past `limits.walk_files` entries. The built-in entries cover the official filesystem server and Desktop Commander under their usual server names only. A relative path in an MCP tool's input is resolved against the hook's `cwd`, while the server resolves it against its own working directory, so a server started elsewhere may read a different file than the one scanned.
+- **Why:** the hook cannot see what an MCP server does; it predicts the files from the tool input. File names alone are low risk, so a walk that stops at the limit is not treated as an error for names. Scanning the content of every file under a search path, as `Grep` is handled, does not fit the hook's time budget on large trees, so `start_search` is judged by names.
+- **How it shows up:** the call proceeds with no decision. In the other direction, `Glob` and `names` tools are judged on every entry the walk finds, hidden and ignored files included, where `Glob` itself returns at most 100 files; and only the path rules (`pkcs12_file` asks by default, `path_biometric_name` scores 30, below the default thresholds) apply to names.
 
 ## Git hook
 
@@ -146,6 +164,24 @@ Setting `on_unresolved = "ask"` or `"deny"` under `[claude_code]` prompts or blo
 
 ### The cache is trusted when it passes ownership and mode checks
 
-- **Not covered:** a same-user process writing cache rows or replacing the rules bundle (see the threat model above), and orphaned temporary bundle files left by a killed writer.
+- **Not covered:** a same-user process writing cache rows or replacing the rules bundle (see the threat model above).
 - **Why:** cache integrity beyond ownership and mode checks is outside the threat model.
-- **How it shows up:** forged evidence rows are believed; temporary files stay in the cache directory until removed by hand.
+- **How it shows up:** forged evidence rows are believed.
+
+### Pruning removes by age and size, not by use
+
+- **Not covered:** keeping a row or a bundle because it was used recently. Rows are aged by the time they were written, because a cache hit never writes (the Claude Code hook's cached-read path stays read-only), and a bundle is aged by its files' modification time. After the maximum age (`[cache] max_age_days`, default 30) a row that is still in use is removed and rewritten by the next scan of that file, and a bundle that is not the selection the command line resolves in the current directory, nor the Claude Code hook's selection outside a trusted repository, in the current repository, or in a repository listed in `trusted_repos` (for example one made by `--ruleset`) is compiled again once.
+- **Why:** recording a last-used time on every hit adds a database write to a path with a 5 ms p95 target.
+- **How it shows up:** a periodic rescan of files that did not change, and one recompile of a bundle used only with non-default options. The scores do not change.
+
+### Pruning runs only from the command line and the git hook
+
+- **Not covered:** a machine that uses RiskGrep only through the Claude Code hook never prunes: the hook does not, so the cache keeps growing until `riskgrep scan`, `riskgrep git pre-commit`, or `riskgrep cache prune` runs.
+- **Why:** the hook's time budget is short and its cached-read path stays read-only.
+- **How it shows up:** the cache directory grows with the number of files the hook has seen and with each rules change.
+
+### Pruning shrinks the database with VACUUM, which blocks other writers
+
+- **Not covered:** a scan that writes to the database while a prune is running. A prune that removes rows rewrites the database file (`VACUUM`) and holds the write lock while it does.
+- **Why:** deleted rows leave free pages in the file, and only `VACUUM` returns them to the file system.
+- **How it shows up:** a concurrent scan waits up to two seconds for the lock and then runs uncached for that run, with one `cache bypassed` line on standard error.

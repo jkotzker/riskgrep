@@ -392,6 +392,28 @@ fn read_range_between_two_provider_tokens() {
 }
 
 #[test]
+fn read_range_around_tokens_that_end_their_lines() {
+    // These rules' trailing delimiter can be the line feed that ends the
+    // line; each token is still located on its own line.
+    let e = Env::new();
+    let openai = format!("id = {}", synth::fake_secret("openai_key", 3));
+    let stripe = format!("other = {}", synth::fake_secret("stripe_key", 4));
+    let f = e.write(
+        "keys.env",
+        numbered(30, &[(10, openai), (11, stripe)]).as_bytes(),
+    );
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "deny");
+    assert!(reason.contains("openai_api_key"), "{reason}");
+    assert!(reason.contains("stripe_access_token"), "{reason}");
+    assert!(reason.ends_with(SAFE_PATHS), "{reason}");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(8)).0, "none");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(9)).0, "deny");
+    assert_eq!(read_decision(&e, &f, Some(13), None).0, "none");
+    assert_eq!(read_decision(&e, &f, Some(12), None).0, "deny");
+}
+
+#[test]
 fn read_range_between_two_secrets() {
     let e = Env::new();
     let f = e.write(
@@ -883,6 +905,14 @@ fn unknown_tool_silent() {
 }
 
 #[test]
+fn unknown_non_mcp_tool_silent_even_when_unresolved_asks() {
+    let e = Env::new();
+    e.user_config("[claude_code]\non_unresolved = \"ask\"\n");
+    e.run("WebFetch", json!({ "url": "https://example.com" }))
+        .silent();
+}
+
+#[test]
 fn malformed_input_asks_and_exits_zero() {
     let e = Env::new();
     for bad in [&b"not json"[..], b"[]", b"{}", b""] {
@@ -928,7 +958,7 @@ fn print_config_outputs_settings_block() {
     assert_eq!(o.status.code(), Some(0));
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
     let h = &v["hooks"]["PreToolUse"][0];
-    assert_eq!(h["matcher"], "Read|NotebookRead|Grep|Bash");
+    assert_eq!(h["matcher"], "^(Read|NotebookRead|Grep|Glob|Bash|mcp__.*)$");
     assert_eq!(h["hooks"][0]["command"], "riskgrep-claude");
     assert_eq!(h["hooks"][0]["timeout"], 5);
     assert_eq!(
@@ -941,4 +971,322 @@ fn print_config_outputs_settings_block() {
     assert!(String::from_utf8(o.stderr)
         .unwrap()
         .contains("settings.json"));
+}
+
+// ---- MCP tools and Glob ----
+
+const FS_READ: &str = "mcp__filesystem__read_text_file";
+const FS_MANY: &str = "mcp__filesystem__read_multiple_files";
+const DC_READ: &str = "mcp__plugin_desktop-commander_desktop-commander__read_file";
+
+#[test]
+fn mcp_read_of_flagged_file_denies() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    for tool in [FS_READ, DC_READ] {
+        let (d, reason) = e.run(tool, json!({ "path": f })).decision();
+        assert_eq!(d, "deny", "{tool}");
+        assert!(reason.contains("config.env scored secret 95.0"), "{reason}");
+    }
+    // A relative path resolves against the hook's cwd, as for Read.
+    let (d, _) = e.run(FS_READ, json!({ "path": "config.env" })).decision();
+    assert_eq!(d, "deny");
+}
+
+#[test]
+fn mcp_read_of_clean_or_missing_file_prints_nothing() {
+    let e = Env::new();
+    let f = e.write("clean.txt", b"nothing here\n");
+    e.run(FS_READ, json!({ "path": f })).silent();
+    e.run(FS_READ, json!({ "path": "missing.txt" })).silent();
+    e.run(FS_READ, json!({ "path": e.dir() })).silent();
+}
+
+#[test]
+fn mcp_list_of_paths_scans_each() {
+    let e = Env::new();
+    let clean = e.write("clean.txt", b"nothing here\n");
+    let emb = e.write("emb.safetensors", &embedding());
+    let (d, reason) = e.run(FS_MANY, json!({ "paths": [clean, emb] })).decision();
+    assert_eq!(d, "deny");
+    assert!(
+        reason.contains("emb.safetensors scored biometric"),
+        "{reason}"
+    );
+    e.run(FS_MANY, json!({ "paths": [clean] })).silent();
+}
+
+#[test]
+fn mcp_malformed_path_field_is_unresolved() {
+    let e = Env::new();
+    let clean = e.write("clean.txt", b"nothing here\n");
+    let bad = [
+        json!({}),
+        json!({ "path": 7 }),
+        json!({ "path": { "p": "clean.txt" } }),
+    ];
+    for input in &bad {
+        e.run(FS_READ, input.clone()).silent();
+    }
+    e.run(FS_MANY, json!({ "paths": [clean, 3] })).silent();
+    e.user_config("[claude_code]\non_unresolved = \"ask\"\n");
+    for input in &bad {
+        let (d, reason) = e.run(FS_READ, input.clone()).decision();
+        assert_eq!(d, "ask", "{input}");
+        assert_eq!(
+            reason,
+            format!("RiskGrep: could not determine the files {FS_READ} reads")
+        );
+    }
+    let (d, _) = e.run(FS_MANY, json!({ "paths": [clean, 3] })).decision();
+    assert_eq!(d, "ask");
+}
+
+#[test]
+fn unmapped_mcp_tool_follows_on_unresolved() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    let tool = "mcp__other__open_file";
+    // The default, `allow`: no decision.
+    e.run(tool, json!({ "path": f })).silent();
+    e.user_config("[claude_code]\non_unresolved = \"ask\"\n");
+    let (d, reason) = e.run(tool, json!({ "path": f })).decision();
+    assert_eq!(d, "ask");
+    assert_eq!(
+        reason,
+        format!("RiskGrep: could not determine the files {tool} reads")
+    );
+    // A tool mapped as reading nothing gets no decision.
+    e.run("mcp__filesystem__write_file", json!({ "path": f }))
+        .silent();
+}
+
+#[test]
+fn user_added_mcp_entry_is_used() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[claude_code.mcp_tools.\"mcp__notes__open\"]\npaths = [\"file\"]\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__*\"]\nkind = \"none\"\n",
+    );
+    let (d, _) = e.run("mcp__notes__open", json!({ "file": f })).decision();
+    assert_eq!(d, "deny");
+    e.run("mcp__notes__list", json!({ "file": f })).silent();
+}
+
+#[test]
+fn malformed_mcp_entry_is_a_configuration_error() {
+    let e = Env::new();
+    e.user_config("[claude_code.mcp_tools.\"mcp__notes__open\"]\nkind = \"read\"\n");
+    let (d, reason) = e.run("mcp__notes__open", json!({ "file": "x" })).decision();
+    assert_eq!(d, "ask");
+    assert!(
+        reason.starts_with("RiskGrep: configuration error ("),
+        "{reason}"
+    );
+}
+
+/// A user entry of kind `walk`: no built-in tool is one.
+const WALK_CONFIG: &str =
+    "[claude_code.mcp_tools.\"mcp__t__search\"]\npaths = [\"path\"]\nkind = \"walk\"\n";
+
+#[test]
+fn mcp_walk_scans_files_under_the_directory() {
+    let e = Env::new();
+    e.user_config(WALK_CONFIG);
+    e.write("a/emb.safetensors", &embedding());
+    e.write("a/clean.txt", b"nothing here\n");
+    e.write("b/clean.txt", b"nothing here\n");
+    let tool = "mcp__t__search";
+    let (d, reason) = e.run(tool, json!({ "path": e.dir().join("a") })).decision();
+    assert_eq!(d, "deny");
+    assert!(
+        reason.contains("emb.safetensors scored biometric"),
+        "{reason}"
+    );
+    e.run(tool, json!({ "path": "b" })).silent();
+}
+
+#[test]
+fn desktop_commander_search_is_judged_by_names() {
+    let e = Env::new();
+    e.write("a/emb.safetensors", &embedding());
+    e.write("a/config.env", aws_file().as_bytes());
+    e.write(&format!("k/{KEY_NAME}"), b"x");
+    for tool in [
+        "mcp__desktop-commander__start_search",
+        "mcp__plugin_desktop-commander_desktop-commander__start_search",
+    ] {
+        for search_type in ["files", "content"] {
+            let input =
+                |path: &str| json!({ "path": path, "pattern": "x", "searchType": search_type });
+            // Content is not scanned, whatever the search type.
+            e.run(tool, input("a")).silent();
+            let (d, reason) = e.run(tool, input("k")).decision();
+            assert_eq!(d, "ask", "{tool} {search_type}");
+            assert!(reason.contains("pkcs12_file"), "{reason}");
+        }
+    }
+}
+
+/// A name the path rules flag at secret 90 (`pkcs12_file`): `ask` by
+/// default. The content is not read, so it is irrelevant.
+const KEY_NAME: &str = "cert.p12";
+
+#[test]
+fn glob_revealing_a_flagged_name_asks() {
+    let e = Env::new();
+    e.write(&format!("keys/{KEY_NAME}"), b"x");
+    e.write("src/main.rs", b"fn main() {}\n");
+    let (d, reason) = e.run("Glob", json!({ "pattern": "**/*.p12" })).decision();
+    assert_eq!(d, "ask");
+    assert!(
+        reason.starts_with(&format!(
+            "RiskGrep: file name keys/{KEY_NAME} scored secret 90.0 (pkcs12_file)"
+        )),
+        "{reason}"
+    );
+    assert!(!reason.contains("Do not read"), "{reason}");
+    // `path` narrows the search.
+    let (d, _) = e
+        .run(
+            "Glob",
+            json!({ "pattern": "*", "path": e.dir().join("keys") }),
+        )
+        .decision();
+    assert_eq!(d, "ask");
+    e.run("Glob", json!({ "pattern": "*", "path": "src" }))
+        .silent();
+}
+
+#[test]
+fn glob_judges_names_not_content() {
+    let e = Env::new();
+    e.write("config.env", aws_file().as_bytes());
+    e.write("emb.safetensors", &embedding());
+    e.run("Glob", json!({ "pattern": "**/*" })).silent();
+    e.run("Glob", json!({ "pattern": "*.txt" })).silent();
+}
+
+#[test]
+fn glob_name_rule_weight_meets_configured_threshold() {
+    let e = Env::new();
+    e.write("voices/voiceprint_a.bin", b"x");
+    // `path_biometric_name` weighs 30, below the default ask threshold.
+    e.run("Glob", json!({ "pattern": "voices/*" })).silent();
+    e.user_config("[claude_code.thresholds.biometric]\nask = 30\n");
+    let (d, reason) = e.run("Glob", json!({ "pattern": "voices/*" })).decision();
+    assert_eq!(d, "ask");
+    assert!(reason.contains("path_biometric_name"), "{reason}");
+}
+
+#[test]
+fn mcp_names_tool_respects_depth() {
+    let e = Env::new();
+    e.write(&format!("top/{KEY_NAME}"), b"x");
+    e.write(&format!("deep/sub/{KEY_NAME}"), b"x");
+    let list = "mcp__filesystem__list_directory";
+    let (d, _) = e.run(list, json!({ "path": "top" })).decision();
+    assert_eq!(d, "ask");
+    e.run(list, json!({ "path": "deep" })).silent();
+    let (d, _) = e
+        .run("mcp__filesystem__directory_tree", json!({ "path": "deep" }))
+        .decision();
+    assert_eq!(d, "ask");
+}
+
+#[test]
+fn names_follow_a_symlinked_root() {
+    let e = Env::new();
+    e.write(&format!("real/keys/{KEY_NAME}"), b"x");
+    std::os::unix::fs::symlink(e.dir().join("real"), e.dir().join("link")).unwrap();
+    let (d, _) = e
+        .run("mcp__filesystem__directory_tree", json!({ "path": "link" }))
+        .decision();
+    assert_eq!(d, "ask");
+    let (d, _) = e
+        .run("Glob", json!({ "pattern": "**/*.p12", "path": "link" }))
+        .decision();
+    assert_eq!(d, "ask");
+}
+
+#[test]
+fn glob_pattern_may_climb_out_of_path() {
+    let e = Env::new();
+    e.write(&format!("keys/{KEY_NAME}"), b"x");
+    e.write("sub/clean.txt", b"x");
+    for pattern in ["../keys/*.p12", "./../keys/*"] {
+        let (d, _) = e
+            .run("Glob", json!({ "pattern": pattern, "path": "sub" }))
+            .decision();
+        assert_eq!(d, "ask", "{pattern}");
+    }
+    let (d, _) = e.run("Glob", json!({ "pattern": "./keys/*" })).decision();
+    assert_eq!(d, "ask");
+}
+
+#[test]
+fn mcp_walk_limit_names_the_root_that_reached_it() {
+    let e = Env::new();
+    e.write("small/a.txt", b"x\n");
+    for i in 0..3 {
+        e.write(&format!("big/f{i}.txt"), b"x\n");
+    }
+    e.user_config(
+        "[limits]\nwalk_files = 2\n\n\
+         [claude_code.mcp_tools.\"mcp__t__search\"]\npaths = [\"paths\"]\nkind = \"walk\"\n",
+    );
+    let (d, reason) = e
+        .run("mcp__t__search", json!({ "paths": ["small", "big"] }))
+        .decision();
+    assert_eq!(d, "ask");
+    assert!(reason.contains("big (walk limit)"), "{reason}");
+    assert!(!reason.contains("small"), "{reason}");
+}
+
+#[test]
+fn mcp_walk_does_not_follow_links_below_the_root() {
+    let e = Env::new();
+    e.write("elsewhere/emb.safetensors", &embedding());
+    e.write("proj/clean.txt", b"nothing here\n");
+    std::os::unix::fs::symlink(e.dir().join("elsewhere"), e.dir().join("proj/link")).unwrap();
+    std::os::unix::fs::symlink(
+        e.dir().join("elsewhere/emb.safetensors"),
+        e.dir().join("proj/emb-link"),
+    )
+    .unwrap();
+    e.user_config(WALK_CONFIG);
+    e.run("mcp__t__search", json!({ "path": "proj" })).silent();
+}
+
+#[test]
+fn read_range_in_a_utf16_file() {
+    // UTF-16 text is transcoded for the rules; its flagged lines are lines
+    // of the file, so a partial read around them works as for UTF-8.
+    let e = Env::new();
+    let text = numbered(30, &[(10, aws_line(17))]).replace('\n', "\r\n");
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let f = e.write("export.reg", &bytes);
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "deny");
+    assert!(reason.contains(") on line 10."), "{reason}");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(8)).0, "none");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(9)).0, "deny");
+    assert_eq!(read_decision(&e, &f, Some(12), None).0, "none");
+}
+
+#[test]
+fn no_partial_read_for_utf16_be_text() {
+    // Claude Code reads UTF-16 BE as bytes and splits lines at 0x0A bytes,
+    // which a code unit other than LF can hold, so its lines are not used.
+    let e = Env::new();
+    let text = numbered(30, &[(10, aws_line(19))]);
+    let mut bytes = vec![0xFE, 0xFF];
+    bytes.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
+    let f = e.write("export.txt", &bytes);
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "deny");
+    assert!(!reason.contains(" on line"), "{reason}");
+    assert_eq!(read_decision(&e, &f, Some(20), Some(5)).0, "deny");
 }

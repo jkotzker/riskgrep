@@ -37,7 +37,7 @@ cargo install --locked --path crates/riskgrep
 cargo install --locked --path crates/riskgrep-claude
 ```
 
-Either way, `riskgrep` and `riskgrep-claude` go to `~/.cargo/bin`. Run `riskgrep rules compile` once afterwards, from any directory: it compiles the rulesets the Claude Code hook uses (the defaults and your user configuration) and stores them in the cache directory, so the first scan or hook call does not pay for it (about one second). It prints `already compiled` when the cache already holds them. Add `--repo` to compile the rulesets a repository's `.riskgrep.toml` selects instead; run it from inside that repository.
+Either way, `riskgrep` and `riskgrep-claude` go to `~/.cargo/bin`. Upgrade the two together: they share the evidence cache, and when they expect different cache schema versions, each run of either resets the cache, so cached reads miss until both are at the same version. Run `riskgrep rules compile` once afterwards, from any directory: it compiles the rulesets the Claude Code hook uses (the defaults and your user configuration) and stores them in the cache directory, so the first scan or hook call does not pay for it (about one second). It prints `already compiled` when the cache already holds them. Add `--repo` to compile the rulesets a repository's `.riskgrep.toml` selects instead; run it from inside that repository.
 
 ## Command line
 
@@ -49,6 +49,7 @@ riskgrep scan . --fail-at secret=80,biometric=75
 riskgrep baseline .                             # record current findings as known
 riskgrep rules list                             # every rule, category, and weight
 riskgrep rules test                             # run the rulesets' own test cases
+riskgrep cache prune --dry-run                  # what pruning the cache would remove
 ```
 
 `--fail-at CATEGORY=N[,CATEGORY=N…]` makes the exit status 1 when a target's score for that category is at or above `N`. A target meets a threshold when its score rounded to one decimal, the number every output shows, is at least the threshold; `--fail-at`, the git hook's `block_at`, and the Claude Code hook's `ask` and `deny` thresholds all use that one rule (`cargo test -p riskgrep --test cli fail_at_is_inclusive`). Exit status 2 means a target could not be scanned and `--on-error block` applies; 3 is a usage or configuration error. When standard output is closed early (`riskgrep scan … | head -1`), the command stops writing without a message and keeps the exit status the scan computed, so a gate in a pipeline with `set -o pipefail` still fails on 1 or 2; a scan that passed exits 0 (`cargo test -p riskgrep --test epipe`). `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
@@ -64,7 +65,7 @@ The hook scores the lines added by the staged changes (`--full-files` or `git.fu
 
 ## Claude Code hook
 
-`riskgrep-claude` checks `Read`, `NotebookRead`, `Grep`, and `Bash` tool calls before they run. It finds the files the call would read, scans them, and answers `ask` or `deny` when a score reaches its threshold (defaults: `biometric` ask at 50 and deny at 75, `secret` ask at 80 and deny at 95). It never answers `allow`, and any other tool is untouched. When every finding in a text file comes from a rule whose locations cover every match on their own lines, the reason names the flagged line numbers and tells the agent to read the rest with `offset` and `limit`, and a `Read` whose requested lines, widened by one line on each side, avoid every flagged line gets no decision; other files get no partial read (see [Partial reads](docs/claude-code.md#partial-reads)). A Bash command whose files the analysis cannot determine gets no decision by default (`claude_code.on_unresolved = "allow"`); set it to `"ask"` or `"deny"` to prompt or block on such commands (see [Known limitations](docs/known-limitations.md#the-bash-analysis-is-a-best-effort-static-reading-and-unresolved-commands-get-no-decision-by-default)).
+`riskgrep-claude` checks `Read`, `NotebookRead`, `Grep`, `Bash`, and MCP tool calls before they run, and judges the file names a `Glob` call would reveal (see [MCP tools](docs/claude-code.md#mcp-tools)). It finds the files the call would read, scans them, and answers `ask` or `deny` when a score reaches its threshold (defaults: `biometric` ask at 50 and deny at 75, `secret` ask at 80 and deny at 95). It never answers `allow`, and any other tool is untouched. When every finding in a text file comes from a rule whose locations cover every match on their own lines, the reason names the flagged line numbers and tells the agent to read the rest with `offset` and `limit`, and a `Read` whose requested lines, widened by one line on each side, avoid every flagged line gets no decision; other files get no partial read (see [Partial reads](docs/claude-code.md#partial-reads)). A Bash command whose files the analysis cannot determine gets no decision by default (`claude_code.on_unresolved = "allow"`); set it to `"ask"` or `"deny"` to prompt or block on such commands (see [Known limitations](docs/known-limitations.md#the-bash-analysis-is-a-best-effort-static-reading-and-unresolved-commands-get-no-decision-by-default)).
 
 ```sh
 riskgrep rules compile        # warm the rules cache before the first call (any directory)
@@ -96,6 +97,14 @@ Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weigh
 Trust: the Claude Code hook reads a repository's `.riskgrep.toml` and `.riskgrep-baseline.json` only when the repository is listed in `trusted_repos` in the user config. An agent can write files in a repository, so an untrusted repository file is never allowed to loosen the checks. The command line and the git hook read the repository files without this restriction. `trusted_repos` in a repository file is ignored.
 
 The cache (compiled rules and per-file evidence, with no file content) is in `~/Library/Caches/riskgrep` on macOS and `$XDG_CACHE_HOME/riskgrep` or `~/.cache/riskgrep` on Linux.
+
+The cache is pruned so it does not grow without limit. `riskgrep cache prune` removes compiled rule bundles that are no longer in use (those of a rule set no configuration you use resolves to, once older than the maximum age), the evidence written under bundles that are gone, rows older than the maximum age, rows for files that no longer exist, and the oldest rows when the database is over the maximum size. `riskgrep cache prune --dry-run` lists what would go and the sizes first. `riskgrep scan` and `riskgrep git pre-commit` prune on their own at most once a day, after they finish; the check is one `stat` of the file `last-prune` in the cache directory. The Claude Code hook never prunes. A pruned row or bundle costs a rescan or a recompile and never changes a score. The limits are set in the user configuration only (a repository file cannot size the cache every repository shares):
+
+```toml
+[cache]
+max_age_days = 30   # default; at least 1
+max_size_mb = 256   # default; at least 1; the database file after pruning, 1 MB = 10^6 bytes
+```
 
 ## Changes users may notice
 

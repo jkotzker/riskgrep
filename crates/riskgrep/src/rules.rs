@@ -25,7 +25,7 @@ pub fn run(cmd: RulesCommand) -> Result<i32, CliError> {
     }
 }
 
-fn enabled() -> Result<(Config, Vec<Ruleset>), CliError> {
+pub fn enabled() -> Result<(Config, Vec<Ruleset>), CliError> {
     let (cfg, root) = load_config(Overrides::default())?;
     let base = root.or_else(|| std::env::current_dir().ok());
     let sets = resolve_rulesets(&cfg, base.as_deref())?;
@@ -34,7 +34,7 @@ fn enabled() -> Result<(Config, Vec<Ruleset>), CliError> {
 
 /// The rulesets the Claude Code hook resolves outside a trusted repository:
 /// defaults and the user configuration only.
-fn hook_rulesets() -> Result<Vec<Ruleset>, CliError> {
+pub fn hook_rulesets() -> Result<Vec<Ruleset>, CliError> {
     let cfg = riskgrep_core::config::load(
         riskgrep_core::config::Mode::ClaudeCode,
         None,

@@ -90,9 +90,13 @@ pub struct TargetReport {
     pub scores: BTreeMap<Category, f64>,
     pub evidence: Vec<Evidence>,
     pub suppressed: u32,
-    /// The content was scanned as text, so evidence line numbers count the
-    /// file's lines. False for binary formats read by structure (key stores,
-    /// tensor files) and for targets that were not scanned.
+    /// The content was scanned as text and its evidence line numbers are the
+    /// lines the consumer numbers, so line ranges may be matched against
+    /// them. False for binary formats read by structure (key stores, tensor
+    /// files), for targets that were not scanned, for UTF-16 and UTF-32 text
+    /// other than UTF-16 LE with a byte-order mark (see
+    /// [`crate::classify::FileClass::is_text`]), and for every UTF-16 and
+    /// UTF-32 git blob, whose lines git numbers at 0x0A bytes.
     #[serde(skip)]
     pub text: bool,
 }

@@ -34,6 +34,7 @@ Post-processors and their arguments:
 | `stopwords` | `stopwords` (required): list name; drops matches containing a listed word |
 | `allow_regex` | `allow_regex` (required): drops matches the regex accepts |
 | `float_run` | `min_floats` (required): finds maximal runs of at least that many printed floats (separators: commas, whitespace, brackets) in one linear pass. It supplies the evidence ranges itself, so the rule's patterns (any name) are only a cheap trigger |
+| `code_lines` | `min_codes` (required): finds lines shaped like two-factor recovery codes (two groups of five lowercase hex characters joined by `-`, two groups of four digits joined by a space, or ten letters and digits with at least one digit; each after optional indentation and a list number or bullet) and keeps the lines of the most common shape when at least `min_codes` have it. It supplies its own evidence ranges, like `float_run` |
 | `float_array` | `embedding_dims` (required): finds single bracketed arrays (`[...]`, also inside `array([...])` and JSON) holding only floats separated by commas or whitespace, whose element count is in `embedding_dims`; each innermost row of a nested array is judged on its own. Supplies its own evidence ranges, like `float_run` |
 | `npy_header` | `min_dim` (required), `embedding_dims` (optional): `.npy` float array with a dimension >= `min_dim`; with `embedding_dims`, also embedding-shaped (below) |
 | `npz_members` | `min_dim` (required), `embedding_dims`, `exclude_name_regex`, `min_bank`, `min_bank_share` (optional): `.npz` with such a float member and, if given, an embedding shape and a member name (without `.npy`) not matching `exclude_name_regex`; with `min_bank`, at least that many qualifying members of one identical shape (an embedding bank) |
@@ -54,6 +55,8 @@ Pattern identifiers starting with `$re`, `$hdr`, or `$hit` are evidence anchors:
 Header conditions that read integers (`uint32(0)`, `uint32(4)`) must guard against short files and unrelated data themselves: the safetensors rules check `uint32(4) == 0` (a header length below 2^32), `uint32(0) > 1`, and `uint32(0) + 8 <= filesize` before the post-processor parses the header.
 
 Regexes are compiled without Unicode, so use `(?i)` for ASCII case folding; YARA-X regexes have no lookaround.
+
+UTF-16 and UTF-32 text reaches the rules transcoded to UTF-8, without its byte-order mark, so text patterns need no `wide` modifier, and `filesize` and offsets in conditions refer to the transcoded text. Evidence locations are moved back to byte offsets in the file after the scan.
 
 ## Rule tests (`tests.toml`)
 
@@ -81,4 +84,5 @@ Samples are generated at run time from fixed seeds, so nothing sensitive is stor
 | `csv:ROWSxCOLS` | CSV of random floats |
 | `der:HEX[:SEED]` | The hex bytes, then 300 random bytes (DER key and key-store headers) |
 | `prices:N`, `log:N` | N lines of price-list CSV or log text with small decimals (hard negatives for float rules) |
+| `file:KIND[:SEED]` | Whole-file text from `riskgrep_core::synth::credential_file`: one-time-password URIs, password-manager exports, and two-factor recovery codes, each with a hard-negative variant (kinds in `synth::CREDENTIAL_FILE_KINDS`) |
 | `text:LITERAL` | The literal text; `\n` and `\t` are escapes |

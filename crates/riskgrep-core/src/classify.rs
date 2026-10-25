@@ -2,6 +2,7 @@
 //! much of it the scan engine sees. Reads container structure (an `.npz`
 //! archive's directory) only to choose what to read; never judges content.
 
+use crate::encoding::{self, Decoded, Encoding, Utf};
 use crate::post::{NPZ_MAX_MEMBERS, NPZ_MEMBER_BYTES};
 use std::cell::Cell;
 use std::fs::File;
@@ -16,15 +17,35 @@ pub enum Known {
     Npz,
     Safetensors,
     KeyStore,
+    /// Password-vault and keychain files, read for their header only.
+    Vault,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileClass {
     Text,
+    /// UTF-16 or UTF-32 text, transcoded to UTF-8 for the scan engine.
+    EncodedText(Encoding),
     KnownBinary(Known),
     Archive(&'static str),
     Image(&'static str),
     UnknownBinary,
+}
+
+impl FileClass {
+    /// Text whose evidence line numbers are the lines other tools number
+    /// (see [`crate::model::TargetReport::text`]): UTF-8 text, and UTF-16 LE
+    /// text with a byte-order mark, which Claude Code's `Read` decodes
+    /// (2.1.309). It reads other UTF-16 and UTF-32 text as bytes and splits
+    /// lines at 0x0A bytes, which a code unit other than LF can hold, so its
+    /// line numbers may differ and no partial read may rely on them.
+    pub fn is_text(&self) -> bool {
+        match self {
+            FileClass::Text => true,
+            FileClass::EncodedText(e) => e.utf == Utf::Utf16Le && e.bom == 2,
+            _ => false,
+        }
+    }
 }
 
 /// Scan limits. Defaults are the global constraints.
@@ -59,6 +80,9 @@ pub struct Content {
     /// Set when the file could not be read well enough to scan; `bytes` is
     /// then empty and the target is reported unscanned with this reason.
     pub unscanned: Option<String>,
+    /// Set for UTF-16 or UTF-32 text: `bytes` is its UTF-8 transcoding, and
+    /// this maps offsets in `bytes` back to the file (`tail` is then unset).
+    pub decoded: Option<Decoded>,
 }
 
 /// Content offsets from `at` onward hold the file's last bytes, which start
@@ -77,6 +101,7 @@ impl Content {
             partial,
             tail: None,
             unscanned: None,
+            decoded: None,
         }
     }
 
@@ -86,7 +111,14 @@ impl Content {
             partial: None,
             tail: None,
             unscanned: Some(reason),
+            decoded: None,
         }
+    }
+
+    /// The bytes the evidence-cache key hashes: for transcoded text the
+    /// file's bytes, whose offsets its evidence holds; else the bytes scanned.
+    pub fn cache_bytes(&self) -> &[u8] {
+        self.decoded.as_ref().map_or(&self.bytes, |d| &d.head)
     }
 }
 
@@ -142,6 +174,22 @@ fn image_kind(head: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// Bytes read from a password-vault or keychain file: the header rules look at
+/// the first bytes only, and the rest is encrypted.
+const VAULT_HEADER_BYTES: u64 = 64;
+
+/// Magic bytes of an encrypted password vault: KeePass (`03 D9 A2 9A`, then
+/// `65 FB 4B B5` for KDB 1.x or `67 FB 4B B5` for KDBX), a macOS keychain
+/// file (`kych`, version 1.0), or a Password Safe v3 database (`PWS3`, with
+/// the `.psafe3` extension: four letters alone are too common).
+fn is_vault(name: &str, head: &[u8]) -> bool {
+    matches!(
+        head,
+        [0x03, 0xD9, 0xA2, 0x9A, 0x65 | 0x67, 0xFB, 0x4B, 0xB5, ..]
+    ) || head.starts_with(b"kych\0\x01\0\0")
+        || (head.starts_with(b"PWS3") && ends_with_ignore_case(name, ".psafe3"))
+}
+
 /// The largest `.der` or `.key` file read as a key store (1 MiB). Larger
 /// files take the text or binary path, so a text file whose first bytes
 /// happen to look like a DER header is scanned like any other text.
@@ -167,6 +215,9 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
     }
     if is_safetensors(head) {
         return FileClass::KnownBinary(Known::Safetensors);
+    }
+    if is_vault(name, head) {
+        return FileClass::KnownBinary(Known::Vault);
     }
     let has_ext = |exts: &[&str]| exts.iter().any(|ext| ends_with_ignore_case(name, ext));
     // DER SEQUENCE: `30 82` (two-byte length) for PKCS #12 files; for
@@ -202,6 +253,9 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
     }
     if let Some(kind) = image_kind(head) {
         return FileClass::Image(kind);
+    }
+    if let Some(e) = encoding::detect(head) {
+        return FileClass::EncodedText(e);
     }
     if head.contains(&0) {
         FileClass::UnknownBinary
@@ -415,6 +469,28 @@ fn read_from<S: Source + ?Sized>(
                     file_offset: size - s,
                 }),
                 unscanned: None,
+                decoded: None,
+            })
+        }
+        FileClass::EncodedText(e) => {
+            // Limits apply to the file's bytes; samples hold whole code units.
+            let unit = e.utf.unit() as u64;
+            let (head, tail, partial) = if size <= limits.text_max {
+                (src.range(0, size)?, None, None)
+            } else {
+                let s = limits.sample.min(size / 2) / unit * unit;
+                let tail_start = ((size - s).div_ceil(unit) * unit).min(size);
+                let tail = src.range(tail_start, size - tail_start)?;
+                let note = format!("bytes {s}..{tail_start} not read");
+                (src.range(0, s)?, Some((tail_start, tail)), Some(note))
+            };
+            let (decoded, bytes) = Decoded::new(*e, head, tail);
+            Ok(Content {
+                bytes,
+                partial,
+                tail: None,
+                unscanned: None,
+                decoded: Some(decoded),
             })
         }
         FileClass::KnownBinary(Known::Npy) => {
@@ -429,6 +505,7 @@ fn read_from<S: Source + ?Sized>(
         FileClass::KnownBinary(Known::Npz) if size > limits.text_max => {
             Ok(npz_member_headers(src, size))
         }
+        FileClass::KnownBinary(Known::Vault) => read_prefix(src, size, VAULT_HEADER_BYTES, false),
         FileClass::KnownBinary(Known::Npz | Known::KeyStore) => {
             read_prefix(src, size, limits.text_max, true)
         }

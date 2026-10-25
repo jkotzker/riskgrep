@@ -307,3 +307,140 @@ fn meta_sidecar_written_private_and_read_back() {
     assert!(!b2.compiled);
     assert!(riskgrep_core::bundle::load_meta_sidecar(c.path(), &b.hash).is_some());
 }
+
+// ---- pruning ----
+
+mod pruning {
+    use riskgrep_core::bundle::prune_bundles;
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+
+    const DAY: u64 = 86_400;
+
+    fn key(c: char) -> String {
+        c.to_string().repeat(64)
+    }
+
+    /// Write `name` in `bundles/` with `bytes` bytes, last modified `age_days` ago.
+    fn put(cache: &Path, name: &str, bytes: usize, age_days: f64, now: SystemTime) -> PathBuf {
+        let dir = cache.join("bundles");
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        fs::write(&p, vec![0u8; bytes]).unwrap();
+        let f = fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(now - Duration::from_secs_f64(age_days * DAY as f64))
+            .unwrap();
+        p
+    }
+
+    fn set(keys: &[String]) -> BTreeSet<String> {
+        keys.iter().cloned().collect()
+    }
+
+    #[test]
+    fn removes_old_unprotected_bundles_with_their_metadata() {
+        let d = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let (cur, old, young) = (key('a'), key('b'), key('c'));
+        let kept = [
+            put(d.path(), &format!("{cur}.yxb"), 100, 90.0, now),
+            put(d.path(), &format!("{cur}.meta.json"), 10, 90.0, now),
+            put(d.path(), &format!("{young}.yxb"), 100, 5.0, now),
+        ];
+        let gone = [
+            put(d.path(), &format!("{old}.yxb"), 100, 40.0, now),
+            put(d.path(), &format!("{old}.meta.json"), 10, 40.0, now),
+        ];
+        let r = prune_bundles(
+            d.path(),
+            &set(std::slice::from_ref(&cur)),
+            Duration::from_secs(30 * DAY),
+            now,
+            false,
+        )
+        .unwrap();
+        assert_eq!(r.removed_keys, vec![old]);
+        assert_eq!((r.removed_files, r.removed_bytes), (2, 110));
+        assert_eq!(r.kept_keys, set(&[cur, young]));
+        assert_eq!(r.kept_bytes, 210);
+        assert!(kept.iter().all(|p| p.exists()));
+        assert!(gone.iter().all(|p| !p.exists()));
+    }
+
+    #[test]
+    fn a_recent_metadata_file_keeps_the_bundle() {
+        let d = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let k = key('d');
+        let bundle = put(d.path(), &format!("{k}.yxb"), 100, 90.0, now);
+        put(d.path(), &format!("{k}.meta.json"), 10, 1.0, now);
+        let r = prune_bundles(
+            d.path(),
+            &set(&[]),
+            Duration::from_secs(30 * DAY),
+            now,
+            false,
+        )
+        .unwrap();
+        assert!(r.removed_keys.is_empty());
+        assert!(bundle.exists());
+    }
+
+    #[test]
+    fn removes_stray_temporary_files_after_a_day_and_ignores_other_names() {
+        let d = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let k = key('e');
+        let old_tmp = put(d.path(), &format!("{k}.yxb.tmp-1-0"), 50, 2.0, now);
+        let new_tmp = put(d.path(), &format!("{k}.yxb.tmp-2-0"), 50, 0.1, now);
+        let other = put(d.path(), "notes.txt", 50, 400.0, now);
+        let short = put(d.path(), "abc.yxb", 50, 400.0, now);
+        let r = prune_bundles(
+            d.path(),
+            &set(&[]),
+            Duration::from_secs(30 * DAY),
+            now,
+            false,
+        )
+        .unwrap();
+        assert_eq!((r.removed_files, r.removed_bytes), (1, 50));
+        assert!(r.removed_keys.is_empty());
+        assert!(!old_tmp.exists());
+        assert!([new_tmp, other, short].iter().all(|p| p.exists()));
+    }
+
+    #[test]
+    fn dry_run_reports_and_deletes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let k = key('f');
+        let p = put(d.path(), &format!("{k}.yxb"), 100, 90.0, now);
+        let r = prune_bundles(
+            d.path(),
+            &set(&[]),
+            Duration::from_secs(30 * DAY),
+            now,
+            true,
+        )
+        .unwrap();
+        assert_eq!((r.removed_keys.len(), r.removed_bytes), (1, 100));
+        assert!(p.exists());
+    }
+
+    #[test]
+    fn a_missing_bundle_directory_is_nothing_to_prune() {
+        let d = tempfile::tempdir().unwrap();
+        let r = prune_bundles(
+            d.path(),
+            &set(&[]),
+            Duration::ZERO,
+            SystemTime::now(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(r.removed_files, 0);
+        assert!(!d.path().join("bundles").exists());
+    }
+}

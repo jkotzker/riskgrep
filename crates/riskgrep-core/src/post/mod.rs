@@ -1,5 +1,6 @@
 //! Post-processors: Rust refinements applied to each YARA match.
 
+mod codes;
 mod entropy;
 mod floats;
 mod span;
@@ -12,6 +13,7 @@ use regex::bytes::{Regex, RegexBuilder};
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+pub use codes::{code_line_runs, CodeLines};
 pub use entropy::Entropy;
 pub use floats::{float_arrays, FloatArray, FloatRun};
 pub use span::{AllowRegex, Span};
@@ -93,6 +95,9 @@ pub fn build(
             Box::new(Stopwords::new(words))
         }
         PostSpec::AllowRegex { regex } => Box::new(AllowRegex::new(re("allow_regex", regex)?)),
+        PostSpec::CodeLines { min_codes } => Box::new(CodeLines {
+            min_codes: *min_codes,
+        }),
         PostSpec::FloatRun { min_floats } => Box::new(FloatRun {
             min_floats: *min_floats,
         }),

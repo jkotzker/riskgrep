@@ -44,6 +44,9 @@ pub enum PostSpec {
     FloatRun {
         min_floats: u64,
     },
+    CodeLines {
+        min_codes: u64,
+    },
     NpyHeader {
         min_dim: u64,
         embedding_dims: Option<Vec<u64>>,
@@ -248,6 +251,9 @@ impl RuleMeta {
             },
             "allow_regex" => PostSpec::AllowRegex {
                 regex: raw.need(raw.string("allow_regex")?, "allow_regex", name)?,
+            },
+            "code_lines" => PostSpec::CodeLines {
+                min_codes: raw.need(raw.uint("min_codes")?, "min_codes", name)?,
             },
             "float_run" => PostSpec::FloatRun {
                 min_floats: raw.need(raw.uint("min_floats")?, "min_floats", name)?,

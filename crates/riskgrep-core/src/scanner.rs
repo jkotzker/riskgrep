@@ -195,7 +195,7 @@ fn not_scanned(class: &FileClass) -> Option<TargetStatus> {
         FileClass::Archive(kind) => Some(unscanned(&format!("{kind} not scanned in v1"))),
         FileClass::Image(kind) => Some(skipped(&format!("{kind} image not scanned in v1"))),
         FileClass::UnknownBinary => Some(skipped("binary file of unknown format")),
-        FileClass::Text | FileClass::KnownBinary(_) => None,
+        FileClass::Text | FileClass::EncodedText(_) | FileClass::KnownBinary(_) => None,
     }
 }
 
@@ -435,6 +435,41 @@ impl RiskGrep {
         self.report(targets)
     }
 
+    /// Score file names without their content: each name is scanned as an
+    /// empty text file of that name, so only rules that need no content
+    /// (path rules) can match. One scan engine serves every name; never
+    /// cached.
+    pub fn scan_names(&mut self, names: &[String]) -> Report {
+        self.load_engine();
+        let engine = match &self.engine {
+            EngineState::Loaded(e) => Some(&**e),
+            _ => None,
+        };
+        let mut scanner = engine.map(|e| new_scanner(e, &self.cfg));
+        let mut raws = Vec::with_capacity(names.len());
+        for name in names {
+            let raw = match classify::slice_for_scan(b"", &FileClass::Text, &self.cfg.limits) {
+                Err(e) => Raw::status(name.clone(), unreadable(&e)),
+                Ok(content) => self.finish(
+                    engine.zip(scanner.as_mut()),
+                    Pending {
+                        target: name.clone(),
+                        rel: name.clone(),
+                        path_ext: name.clone(),
+                        ekey: String::new(),
+                        content,
+                        text: true,
+                        hash: None,
+                        stat: None,
+                    },
+                ),
+            };
+            raws.push(raw);
+        }
+        let targets = self.finalize(raws);
+        self.report(targets)
+    }
+
     /// Scan one git blob. `name` is its repository-relative path; results are
     /// cached by `blob_id`. With `only_lines`, evidence located outside those
     /// lines is dropped before scoring, unless the blob was only partly read
@@ -464,6 +499,10 @@ impl RiskGrep {
         if let Some(s) = not_scanned(&class) {
             return Raw::status(name.to_string(), s);
         }
+        // Git numbers a blob's lines at 0x0A bytes, which a UTF-16 or
+        // UTF-32 code unit other than LF can hold, so only UTF-8 text has
+        // lines a diff's line ranges can be matched against.
+        let blob_text = class == FileClass::Text;
         let ekey = format!("{}:{name}", self.key);
         let mut h = blake3::Hasher::new();
         h.update(b"riskgrep-git-blob\0");
@@ -479,7 +518,7 @@ impl RiskGrep {
                 name.into(),
                 TargetStatus::Scanned,
                 ev,
-                class == FileClass::Text,
+                blob_text,
             );
         }
         match classify::slice_for_scan(bytes, &class, &self.cfg.limits) {
@@ -495,7 +534,7 @@ impl RiskGrep {
                 ekey,
                 hash: content.partial.is_none().then_some(blob_key),
                 content,
-                text: class == FileClass::Text,
+                text: blob_text,
                 stat: None,
             }),
         }
@@ -618,7 +657,7 @@ impl RiskGrep {
         let ekey = format!("{}:{path_ext}", self.key);
         let rel = relative_to(self.rel_base.as_deref(), &real);
         let cache = self.cache.as_ref();
-        let text = class == FileClass::Text;
+        let text = class.is_text();
         let hit = |ev: Vec<Evidence>| {
             Ok(Step::Done(Raw::scanned(
                 target.to_string(),
@@ -656,7 +695,7 @@ impl RiskGrep {
         let hash = content
             .partial
             .is_none()
-            .then(|| *blake3::hash(&content.bytes).as_bytes());
+            .then(|| *blake3::hash(content.cache_bytes()).as_bytes());
         if let (Some(c), Some(h)) = (cache, hash) {
             if let Some(ev) = c.evidence(h, &ekey) {
                 if stable {
@@ -688,7 +727,9 @@ impl RiskGrep {
             Err(ScanError::Timeout) => return Raw::status(p.target, unscanned("timeout")),
             Err(ScanError::Yara(_)) => return Raw::status(p.target, unscanned("scan error")),
         };
-        if let Some(tail) = p.content.tail {
+        if let Some(d) = &p.content.decoded {
+            d.place(&mut ev);
+        } else if let Some(tail) = p.content.tail {
             place_tail(&mut ev, tail);
         }
         if let (Some(c), Some(h)) = (self.cache.as_ref(), p.hash) {

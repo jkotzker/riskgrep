@@ -364,3 +364,141 @@ fn load_records_mode() {
         assert_eq!(load(mode, None, Overrides::default()).unwrap().mode, mode);
     }
 }
+
+#[test]
+fn mcp_tool_defaults_cover_common_servers() {
+    use riskgrep_core::config::McpKind;
+    let _e = env(None, None);
+    let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
+    let cc = &c.claude_code;
+    let read = cc.mcp_tool("mcp__filesystem__read_text_file").unwrap();
+    assert_eq!(read.kind, McpKind::Read);
+    assert_eq!(read.paths, ["path"]);
+    let many = cc
+        .mcp_tool("mcp__plugin_desktop-commander_desktop-commander__read_multiple_files")
+        .unwrap();
+    assert_eq!(many.paths, ["paths"]);
+    assert_eq!(
+        cc.mcp_tool("mcp__desktop-commander__start_search")
+            .unwrap()
+            .kind,
+        McpKind::Names
+    );
+    let list = cc.mcp_tool("mcp__filesystem__list_directory").unwrap();
+    assert_eq!((list.kind, list.max_depth), (McpKind::Names, Some(1)));
+    assert_eq!(
+        cc.mcp_tool("mcp__filesystem__write_file").unwrap().kind,
+        McpKind::None
+    );
+    assert!(cc.mcp_tool("mcp__other__read_file").is_none());
+    assert!(cc.mcp_tool("Read").is_none());
+}
+
+#[test]
+fn mcp_tool_user_entry_adds_and_replaces() {
+    use riskgrep_core::config::McpKind;
+    let _e = env(
+        Some(
+            "[claude_code.mcp_tools.\"mcp__notes__open\"]\npaths = [\"file\", \"files\"]\n\n\
+             [claude_code.mcp_tools.\"mcp__db_*__query\"]\nkind = \"none\"\n\n\
+             [claude_code.mcp_tools.\"mcp__filesystem__read_file\"]\npaths = [\"other\"]\n",
+        ),
+        None,
+    );
+    let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
+    let cc = &c.claude_code;
+    let open = cc.mcp_tool("mcp__notes__open").unwrap();
+    assert_eq!(
+        (open.kind, open.paths.as_slice()),
+        (
+            McpKind::Read,
+            &["file".to_string(), "files".to_string()][..]
+        )
+    );
+    assert_eq!(
+        cc.mcp_tool("mcp__db_main__query").unwrap().kind,
+        McpKind::None
+    );
+    assert!(cc.mcp_tool("mcp__db_main__drop").is_none());
+    assert_eq!(
+        cc.mcp_tool("mcp__filesystem__read_file").unwrap().paths,
+        ["other"]
+    );
+    // Built-in entries the user did not name stay.
+    assert!(cc.mcp_tool("mcp__filesystem__read_text_file").is_some());
+}
+
+#[test]
+fn mcp_tool_malformed_entries_rejected() {
+    for bad in [
+        // Not an MCP tool name.
+        "[claude_code.mcp_tools.Read]\npaths = [\"file_path\"]\n",
+        // A reading kind without fields.
+        "[claude_code.mcp_tools.\"mcp__x__y\"]\nkind = \"read\"\n",
+        "[claude_code.mcp_tools.\"mcp__x__y\"]\npaths = []\n",
+        // Unknown kind, unknown key, wrong type.
+        "[claude_code.mcp_tools.\"mcp__x__y\"]\npaths = [\"p\"]\nkind = \"write\"\n",
+        "[claude_code.mcp_tools.\"mcp__x__y\"]\npaths = [\"p\"]\nfield = \"p\"\n",
+        "[claude_code.mcp_tools.\"mcp__x__y\"]\npaths = \"p\"\n",
+    ] {
+        let _e = env(Some(bad), None);
+        let err = load(Mode::ClaudeCode, None, Overrides::default()).unwrap_err();
+        assert!(
+            err.0.contains("config") || err.0.contains("mcp_tools"),
+            "{bad}: {err}"
+        );
+    }
+}
+
+// ---- [cache] ----
+
+#[test]
+fn cache_defaults() {
+    let e = env(None, None);
+    let _ = &e.home;
+    let c = load(Mode::Cli, None, Overrides::default()).unwrap();
+    assert_eq!((c.cache.max_age_days, c.cache.max_size_mb), (30, 256));
+    assert_eq!(c.cache.max_age(), Duration::from_secs(30 * 86_400));
+    assert_eq!(c.cache.max_db_bytes(), 256_000_000);
+}
+
+#[test]
+fn cache_section_is_read_from_the_user_file() {
+    let e = env(Some("[cache]\nmax_age_days = 7\nmax_size_mb = 64\n"), None);
+    let c = load(Mode::Cli, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!((c.cache.max_age_days, c.cache.max_size_mb), (7, 64));
+    // `env` holds a lock until the previous one is dropped.
+    drop(e);
+    let e = env(Some("[cache]\nmax_size_mb = 10\n"), None);
+    let c = load(Mode::Cli, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!((c.cache.max_age_days, c.cache.max_size_mb), (30, 10));
+}
+
+#[test]
+fn cache_section_in_a_repository_file_is_ignored() {
+    // The cache is shared by every repository, so one repository cannot size it.
+    let e = env(None, Some("[cache]\nmax_age_days = 1\nmax_size_mb = 1\n"));
+    let c = load(Mode::Cli, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!((c.cache.max_age_days, c.cache.max_size_mb), (30, 256));
+}
+
+#[test]
+fn a_zero_cache_limit_in_a_repository_file_is_ignored_with_the_section() {
+    let e = env(None, Some("[cache]\nmax_age_days = 0\n"));
+    let c = load(Mode::Cli, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!(c.cache.max_age_days, 30);
+}
+
+#[test]
+fn cache_limits_must_be_positive_and_keys_known() {
+    for bad in [
+        "[cache]\nmax_age_days = 0\n",
+        "[cache]\nmax_size_mb = 0\n",
+        "[cache]\nmax_age = 3\n",
+    ] {
+        let e = env(Some(bad), None);
+        let err = load(Mode::Cli, None, Overrides::default()).unwrap_err();
+        assert!(err.0.contains("config.toml"), "{err}");
+        drop(e);
+    }
+}

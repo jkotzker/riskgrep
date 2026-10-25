@@ -528,3 +528,64 @@ fn line_index() {
     assert_eq!(li.lines(0, 9), (1, 4));
     assert_eq!(li.lines(5, 5), (3, 3));
 }
+
+#[test]
+fn code_lines_count_the_most_common_shape() {
+    use riskgrep_core::post::code_line_runs;
+    let text = |lines: &[&str]| lines.join("\n").into_bytes();
+    // Hex pairs, the first line included, with CRLF endings and a trailing note.
+    let hex = b"a1b2c-d3e4f\r\n0123a-4567b (used)\r\nabcde-12345\r\nfedcb-98765\r\n11111-22222\r\n33333-44444\r\n";
+    let runs = code_line_runs(hex, 6);
+    assert_eq!(runs.len(), 6);
+    assert_eq!(&hex[runs[0].clone()], b"a1b2c-d3e4f");
+    assert!(code_line_runs(hex, 7).is_empty());
+    // Numbered Google-style digit pairs and bulleted alphanumeric codes.
+    let digits = text(&[
+        "1. 1234 5678",
+        "2) 2345 6789",
+        "  3. 3456 7890",
+        "4. 4567 8901",
+        "5. 5678 9012",
+        "6. 6789 0123",
+    ]);
+    assert_eq!(code_line_runs(&digits, 6).len(), 6);
+    let alnum = text(&[
+        "- 1abcdefghi",
+        "- abcdefghi1",
+        "* ab3defghij",
+        "k7mnopqrst",
+        "  uvwxyz0123",
+        "abcd5fghij",
+    ]);
+    assert_eq!(code_line_runs(&alnum, 6).len(), 6);
+    // Ten-letter words, 11-character tokens, and 9-character tokens are not codes.
+    let words = text(&[
+        "background",
+        "javascript(x)",
+        "definition;",
+        "initialize",
+        "expression",
+        "assertThat(1)",
+    ]);
+    assert!(code_line_runs(&words, 1).is_empty());
+    let off_by_one = text(&[
+        "abcdefghij1",
+        "abcdefgh1",
+        "abcde-1234g",
+        "12345 6789",
+        "1234  5678",
+        "ABCDE-12345",
+    ]);
+    assert!(code_line_runs(&off_by_one, 1).is_empty());
+    // Shapes are not pooled: three of each is below a minimum of four.
+    let mixed = text(&[
+        "a1b2c-d3e4f",
+        "0123a-4567b",
+        "abcde-12345",
+        "1234 5678",
+        "2345 6789",
+        "3456 7890",
+    ]);
+    assert!(code_line_runs(&mixed, 4).is_empty());
+    assert_eq!(code_line_runs(&mixed, 3).len(), 3);
+}

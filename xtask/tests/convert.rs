@@ -5,7 +5,8 @@ use riskgrep_core::ruleset::Ruleset;
 use std::fs;
 use std::path::{Path, PathBuf};
 use xtask::{
-    can_match_newline, convert_gitleaks, lazy_to_greedy, sets_multi_line, steer_atoms, PINNED_TAG,
+    can_match_newline, convert_gitleaks, lazy_to_greedy, line_complete, sets_multi_line,
+    steer_atoms, PINNED_TAG,
 };
 
 fn repo() -> PathBuf {
@@ -80,6 +81,47 @@ fn newline_reachability() {
     assert!(can_match_newline("(").is_err());
 }
 
+#[test]
+fn line_complete_allows_one_trailing_byte_after_the_secret() {
+    // gitleaks' provider form: the trailing delimiter can be a line feed.
+    let provider = r#"\b(sk_live_[a-z0-9]{24})(?:[\x60'"\s;]|\\[nr]|$)"#;
+    for (re, group) in [
+        (provider, Some(1)),
+        (r"AKIA[A-Z2-7]{16}", Some(0)),
+        (r"AKIA[A-Z2-7]{16}", None),
+        (r"x(tok)\s", Some(1)),
+        (r"x(tok)[\s;]?\b", Some(1)),
+        (r"x(tok)(?:\s|;;|$)", Some(1)),
+        (r"x((tok))(?:\s|$)", Some(2)),
+        (r"x(tok)(?:(\s)|$)", Some(1)),
+        // The secret group nested in an element: nothing up to that
+        // element's end can match a line feed either.
+        (r"(?:x(tok)|y)\s", Some(1)),
+    ] {
+        assert!(line_complete(re, group).unwrap(), "{re}");
+    }
+    for (re, group) in [
+        // The whole match or an unknown group is the secret: no line feed at all.
+        (provider, Some(0)),
+        (provider, None),
+        (r"\b(tok)\s", Some(0)),
+        // A line feed before or inside the secret.
+        (r"key\s*=\s*(tok)", Some(1)),
+        (r"x(to\sk)", Some(1)),
+        (r"(?:^|\s)(tok)(?:\s|$)", Some(1)),
+        // More than one trailing byte that can be a line feed.
+        (r"x(tok)\s\s", Some(1)),
+        (r"x(tok)\s+", Some(1)),
+        (r"x(tok)(?:\s;|$)", Some(1)),
+        (r"x(tok);\s", Some(1)),
+        // The regex is not a sequence the secret can be found in.
+        (r"x(tok)\s|y", Some(1)),
+    ] {
+        assert!(!line_complete(re, group).unwrap(), "{re}");
+    }
+    assert!(line_complete("(", Some(1)).is_err());
+}
+
 /// The `meta:` block of rule `ident` in the committed `gitleaks.yar`.
 fn rule_meta(ident: &str) -> String {
     let src =
@@ -94,7 +136,15 @@ fn rule_meta(ident: &str) -> String {
 
 #[test]
 fn line_complete_marks_rules_whose_matches_stay_on_one_line() {
-    for ident in ["aws_access_token", "github_pat", "slack_bot_token"] {
+    for ident in [
+        "aws_access_token",
+        "github_pat",
+        "slack_bot_token",
+        // A trailing delimiter that can be the line feed ending the line.
+        "openai_api_key",
+        "anthropic_api_key",
+        "stripe_access_token",
+    ] {
         assert!(rule_meta(ident).contains("line_complete = true"), "{ident}");
     }
     for ident in [
@@ -102,6 +152,11 @@ fn line_complete_marks_rules_whose_matches_stay_on_one_line() {
         "kubernetes_secret_yaml",
         "pkcs12_file",
         "generic_api_key",
+        // Whitespace before the secret.
+        "adafruit_api_key",
+        "azure_ad_client_secret",
+        // The secret is the whole match, trailing delimiter included.
+        "sentry_org_token",
     ] {
         assert!(!rule_meta(ident).contains("line_complete"), "{ident}");
     }

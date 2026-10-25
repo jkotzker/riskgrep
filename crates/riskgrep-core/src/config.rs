@@ -50,6 +50,9 @@ pub struct ClaudeCodeConfig {
     pub on_skipped: Action,
     pub on_unresolved: Action,
     pub time_budget_ms: u64,
+    /// MCP tools whose input names files, keyed by tool name (see
+    /// [`McpTool`]).
+    pub mcp_tools: BTreeMap<String, McpTool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +61,26 @@ pub struct GitConfig {
     pub on_error: Action,
     pub on_skipped: Action,
     pub full_files: bool,
+}
+
+/// Limits for pruning the cache directory (`riskgrep cache prune`, and the
+/// automatic daily prune of `riskgrep scan` and the git pre-commit hook).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheConfig {
+    /// Compiled bundles and cache rows older than this many days are removed.
+    pub max_age_days: u64,
+    /// The evidence database is kept under this many megabytes (10^6 bytes).
+    pub max_size_mb: u64,
+}
+
+impl CacheConfig {
+    pub fn max_age(&self) -> Duration {
+        Duration::from_secs(self.max_age_days.saturating_mul(24 * 60 * 60))
+    }
+
+    pub fn max_db_bytes(&self) -> u64 {
+        self.max_size_mb.saturating_mul(1_000_000)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +94,8 @@ pub struct Config {
     pub claude_code: ClaudeCodeConfig,
     pub git: GitConfig,
     pub trusted_repos: Vec<PathBuf>,
+    /// Read from the user file only: the cache is shared by every repository.
+    pub cache: CacheConfig,
     /// Set by the `--no-cache` override; the cache is on otherwise.
     pub no_cache: bool,
     /// The integration this configuration was loaded for (set by [`load`]);
@@ -128,6 +153,7 @@ impl Default for Config {
                 on_skipped: Action::Allow,
                 on_unresolved: Action::Allow,
                 time_budget_ms: 2000,
+                mcp_tools: default_mcp_tools(),
             },
             git: GitConfig {
                 block_at: BTreeMap::from([(cat("secret"), 80.0), (cat("biometric"), 75.0)]),
@@ -136,6 +162,10 @@ impl Default for Config {
                 full_files: false,
             },
             trusted_repos: Vec::new(),
+            cache: CacheConfig {
+                max_age_days: 30,
+                max_size_mb: 256,
+            },
             no_cache: false,
             mode: Mode::Cli,
         }
@@ -162,6 +192,7 @@ struct ClaudeLayer {
     on_skipped: Option<Action>,
     on_unresolved: Option<Action>,
     time_budget_ms: Option<u64>,
+    mcp_tools: Option<BTreeMap<String, McpTool>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -171,6 +202,13 @@ struct GitLayer {
     on_error: Option<Action>,
     on_skipped: Option<Action>,
     full_files: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CacheLayer {
+    max_age_days: Option<u64>,
+    max_size_mb: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -192,6 +230,7 @@ struct Layer {
     ignore: Option<IgnoreLayer>,
     claude_code: Option<ClaudeLayer>,
     git: Option<GitLayer>,
+    cache: Option<CacheLayer>,
 }
 
 fn read_layer(path: &Path) -> Result<Option<Layer>, ConfigError> {
@@ -205,9 +244,9 @@ fn read_layer(path: &Path) -> Result<Option<Layer>, ConfigError> {
             )))
         }
     };
-    toml::from_str(&text)
-        .map(Some)
-        .map_err(|e| ConfigError(format!("invalid config {}: {e}", path.display())))
+    let invalid = |e: String| ConfigError(format!("invalid config {}: {e}", path.display()));
+    let layer: Layer = toml::from_str(&text).map_err(|e| invalid(e.to_string()))?;
+    Ok(Some(layer))
 }
 
 impl Layer {
@@ -299,6 +338,17 @@ impl Config {
             }
             if let Some(v) = x.time_budget_ms {
                 self.claude_code.time_budget_ms = v;
+            }
+            if let Some(v) = x.mcp_tools {
+                merge_map(&mut self.claude_code.mcp_tools, v);
+            }
+        }
+        if let Some(x) = l.cache.filter(|_| trust) {
+            if let Some(v) = x.max_age_days {
+                self.cache.max_age_days = v;
+            }
+            if let Some(v) = x.max_size_mb {
+                self.cache.max_size_mb = v;
             }
         }
         if let Some(x) = l.git {
@@ -397,6 +447,20 @@ pub fn load(
     let mut spec = IgnoreSpec::default();
     if let Some(path) = user_config_path() {
         if let Some(mut layer) = read_layer(&path)? {
+            // Only the user file sizes the cache, so only it is checked.
+            if let Some(c) = &layer.cache {
+                for (name, v) in [
+                    ("max_age_days", c.max_age_days),
+                    ("max_size_mb", c.max_size_mb),
+                ] {
+                    if v == Some(0) {
+                        return Err(ConfigError(format!(
+                            "invalid config {}: [cache] {name} must be at least 1",
+                            path.display()
+                        )));
+                    }
+                }
+            }
             if let Some(dir) = path.parent() {
                 layer.resolve_paths(dir);
             }
@@ -413,6 +477,7 @@ pub fn load(
         }
     }
     cfg.ignore = IgnoreRules::new(spec).map_err(|e| ConfigError(e.0))?;
+    validate_mcp_tools(&cfg.claude_code.mcp_tools)?;
     if let Some(c) = cli_overrides.categories {
         cfg.categories = Some(c);
     }
@@ -433,4 +498,172 @@ pub fn baseline_path(mode: Mode, repo_root: Option<&Path>, cfg: &Config) -> Opti
         return None;
     }
     Some(root.join(BASELINE_FILE))
+}
+
+// ---- Claude Code: MCP tools that read files ----
+
+/// What an MCP tool does with the paths its input names.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpKind {
+    /// Reads each named file; a directory or missing path reads nothing.
+    #[default]
+    Read,
+    /// Reads every file under each named directory (a content search).
+    Walk,
+    /// Reveals the names of each named path and, for a directory, of the
+    /// entries under it; judged by the path rules alone, as `Glob` is.
+    Names,
+    /// Reads no file; never gets a decision.
+    None,
+}
+
+/// A `[claude_code.mcp_tools."<tool name>"]` entry: the `tool_input`
+/// fields that hold a path or a list of paths, and what the tool does
+/// with them.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpTool {
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub kind: McpKind,
+    /// For `names`: how deep under a directory names are revealed (1: its
+    /// entries only). Unbounded when absent.
+    pub max_depth: Option<usize>,
+}
+
+impl ClaudeCodeConfig {
+    /// The entry for MCP tool `name`: an exact key, else the first key
+    /// (in key order) with `*` wildcards that matches it.
+    pub fn mcp_tool(&self, name: &str) -> Option<&McpTool> {
+        if !name.starts_with("mcp__") {
+            return None;
+        }
+        self.mcp_tools.get(name).or_else(|| {
+            self.mcp_tools
+                .iter()
+                .find(|(k, _)| k.contains('*') && wildcard(k, name))
+                .map(|(_, v)| v)
+        })
+    }
+}
+
+/// Whether `name` matches `pat`, where `*` stands for any run of
+/// characters and every other character for itself.
+fn wildcard(pat: &str, name: &str) -> bool {
+    let mut parts = pat.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = name.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        return rest.is_empty();
+    };
+    for p in middle {
+        match rest.find(p) {
+            Some(i) => rest = &rest[i + p.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
+fn validate_mcp_tools(tools: &BTreeMap<String, McpTool>) -> Result<(), ConfigError> {
+    for (name, t) in tools {
+        if !name.starts_with("mcp__") {
+            return Err(ConfigError(format!(
+                "claude_code.mcp_tools: `{name}` is not an MCP tool name (mcp__<server>__<tool>)"
+            )));
+        }
+        if t.kind != McpKind::None && (t.paths.is_empty() || t.paths.iter().any(String::is_empty)) {
+            return Err(ConfigError(format!(
+                "claude_code.mcp_tools: `{name}` needs `paths`, the input fields that hold paths"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Server names the built-in entries are registered under: the usual
+/// `mcpServers` keys, and Desktop Commander as the Claude Code plugin names
+/// it.
+const FILESYSTEM_SERVERS: [&str; 1] = ["filesystem"];
+const DESKTOP_COMMANDER_SERVERS: [&str; 2] = [
+    "desktop-commander",
+    "plugin_desktop-commander_desktop-commander",
+];
+
+/// Built-in entries. Field names are from each server's published input
+/// schemas:
+/// - the official filesystem server, `src/filesystem/server.ts` in
+///   github.com/modelcontextprotocol/servers at commit 6d536b2e (2026-10);
+/// - Desktop Commander, the input schemas its plugin server reported to
+///   Claude Code on 2026-10-25 (`read_file` and `get_file_info` take
+///   `path`, `read_multiple_files` takes `paths`, `start_search` and
+///   `list_directory` take `path`).
+fn default_mcp_tools() -> BTreeMap<String, McpTool> {
+    use McpKind::{Names, None as Reads, Read};
+    let t = |kind, field: &str, max_depth| McpTool {
+        paths: if field.is_empty() {
+            Vec::new()
+        } else {
+            vec![field.to_string()]
+        },
+        kind,
+        max_depth,
+    };
+    let filesystem = [
+        ("read_file", t(Read, "path", None)),
+        ("read_text_file", t(Read, "path", None)),
+        ("read_media_file", t(Read, "path", None)),
+        ("read_multiple_files", t(Read, "paths", None)),
+        ("list_directory", t(Names, "path", Some(1))),
+        ("list_directory_with_sizes", t(Names, "path", Some(1))),
+        ("directory_tree", t(Names, "path", None)),
+        ("search_files", t(Names, "path", None)),
+        ("get_file_info", t(Reads, "", None)),
+        ("list_allowed_directories", t(Reads, "", None)),
+        ("write_file", t(Reads, "", None)),
+        ("edit_file", t(Reads, "", None)),
+        ("create_directory", t(Reads, "", None)),
+        ("move_file", t(Reads, "", None)),
+    ];
+    let desktop_commander = [
+        ("read_file", t(Read, "path", None)),
+        ("read_multiple_files", t(Read, "paths", None)),
+        // A content search too is judged by the names it may reveal:
+        // scanning every file under its path does not fit the time budget.
+        ("start_search", t(Names, "path", None)),
+        ("list_directory", t(Names, "path", None)),
+        ("get_file_info", t(Reads, "", None)),
+    ];
+    let mut out = BTreeMap::new();
+    for (servers, tools) in [
+        (&FILESYSTEM_SERVERS[..], &filesystem[..]),
+        (&DESKTOP_COMMANDER_SERVERS[..], &desktop_commander[..]),
+    ] {
+        for server in servers {
+            for (tool, entry) in tools {
+                out.insert(format!("mcp__{server}__{tool}"), entry.clone());
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod mcp_tests {
+    use super::wildcard;
+
+    #[test]
+    fn wildcard_matches_whole_name() {
+        assert!(wildcard("mcp__*__read", "mcp__a__read"));
+        assert!(wildcard("mcp__*", "mcp__"));
+        assert!(wildcard("mcp__a*b*c", "mcp__abc"));
+        assert!(!wildcard("mcp__*__read", "mcp__a__read_more"));
+        assert!(!wildcard("mcp__a", "mcp__ab"));
+        assert!(!wildcard("mcp__*ab*ba", "mcp__aba"));
+    }
 }
