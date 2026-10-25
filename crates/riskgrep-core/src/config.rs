@@ -63,6 +63,26 @@ pub struct GitConfig {
     pub full_files: bool,
 }
 
+/// Limits for pruning the cache directory (`riskgrep cache prune`, and the
+/// automatic daily prune of `riskgrep scan` and the git pre-commit hook).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheConfig {
+    /// Compiled bundles and cache rows older than this many days are removed.
+    pub max_age_days: u64,
+    /// The evidence database is kept under this many megabytes (10^6 bytes).
+    pub max_size_mb: u64,
+}
+
+impl CacheConfig {
+    pub fn max_age(&self) -> Duration {
+        Duration::from_secs(self.max_age_days.saturating_mul(24 * 60 * 60))
+    }
+
+    pub fn max_db_bytes(&self) -> u64 {
+        self.max_size_mb.saturating_mul(1_000_000)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub categories: Option<Vec<Category>>,
@@ -74,6 +94,8 @@ pub struct Config {
     pub claude_code: ClaudeCodeConfig,
     pub git: GitConfig,
     pub trusted_repos: Vec<PathBuf>,
+    /// Read from the user file only: the cache is shared by every repository.
+    pub cache: CacheConfig,
     /// Set by the `--no-cache` override; the cache is on otherwise.
     pub no_cache: bool,
     /// The integration this configuration was loaded for (set by [`load`]);
@@ -140,6 +162,10 @@ impl Default for Config {
                 full_files: false,
             },
             trusted_repos: Vec::new(),
+            cache: CacheConfig {
+                max_age_days: 30,
+                max_size_mb: 256,
+            },
             no_cache: false,
             mode: Mode::Cli,
         }
@@ -180,6 +206,13 @@ struct GitLayer {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CacheLayer {
+    max_age_days: Option<u64>,
+    max_size_mb: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IgnoreLayer {
     paths: Option<Vec<String>>,
     rules: Option<Vec<RuleIgnore>>,
@@ -197,6 +230,7 @@ struct Layer {
     ignore: Option<IgnoreLayer>,
     claude_code: Option<ClaudeLayer>,
     git: Option<GitLayer>,
+    cache: Option<CacheLayer>,
 }
 
 fn read_layer(path: &Path) -> Result<Option<Layer>, ConfigError> {
@@ -210,9 +244,9 @@ fn read_layer(path: &Path) -> Result<Option<Layer>, ConfigError> {
             )))
         }
     };
-    toml::from_str(&text)
-        .map(Some)
-        .map_err(|e| ConfigError(format!("invalid config {}: {e}", path.display())))
+    let invalid = |e: String| ConfigError(format!("invalid config {}: {e}", path.display()));
+    let layer: Layer = toml::from_str(&text).map_err(|e| invalid(e.to_string()))?;
+    Ok(Some(layer))
 }
 
 impl Layer {
@@ -307,6 +341,14 @@ impl Config {
             }
             if let Some(v) = x.mcp_tools {
                 merge_map(&mut self.claude_code.mcp_tools, v);
+            }
+        }
+        if let Some(x) = l.cache.filter(|_| trust) {
+            if let Some(v) = x.max_age_days {
+                self.cache.max_age_days = v;
+            }
+            if let Some(v) = x.max_size_mb {
+                self.cache.max_size_mb = v;
             }
         }
         if let Some(x) = l.git {
@@ -405,6 +447,20 @@ pub fn load(
     let mut spec = IgnoreSpec::default();
     if let Some(path) = user_config_path() {
         if let Some(mut layer) = read_layer(&path)? {
+            // Only the user file sizes the cache, so only it is checked.
+            if let Some(c) = &layer.cache {
+                for (name, v) in [
+                    ("max_age_days", c.max_age_days),
+                    ("max_size_mb", c.max_size_mb),
+                ] {
+                    if v == Some(0) {
+                        return Err(ConfigError(format!(
+                            "invalid config {}: [cache] {name} must be at least 1",
+                            path.display()
+                        )));
+                    }
+                }
+            }
             if let Some(dir) = path.parent() {
                 layer.resolve_paths(dir);
             }

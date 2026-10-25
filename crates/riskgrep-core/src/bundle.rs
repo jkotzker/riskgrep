@@ -3,12 +3,13 @@
 use crate::meta::{PostSpec, RuleMeta};
 use crate::paths::ensure_private_dir;
 use crate::ruleset::{Error, Result, Ruleset};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 const YARA_X_VERSION: &str = "1.22.0";
 
@@ -357,4 +358,133 @@ fn write_atomic(dir: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     res.map_err(io)
+}
+
+/// A temporary file left by a write that did not finish is removed after
+/// this long, whatever the configured age.
+const STRAY_TEMP_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// What [`prune_bundles`] removed (or, in a dry run, would remove).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BundlePrune {
+    /// Keys whose bundle and metadata files were removed, in key order.
+    pub removed_keys: Vec<String>,
+    /// Files removed, including stray temporary files.
+    pub removed_files: u64,
+    pub removed_bytes: u64,
+    /// Keys that still have a compiled bundle (`.yxb`) afterwards.
+    pub kept_keys: BTreeSet<String>,
+    pub kept_bytes: u64,
+}
+
+/// The bundle key a file in `bundles/` belongs to, and whether it is a
+/// stray temporary file. `None` for any name this module did not write.
+fn bundle_file_key(name: &str) -> Option<(&str, bool)> {
+    let (key, rest) = name.split_once('.')?;
+    if key.len() != 64
+        || !key
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    let stem = rest.split(".tmp-").next().unwrap_or(rest);
+    (stem == "yxb" || stem == "meta.json").then_some((key, rest.contains(".tmp-")))
+}
+
+/// Remove compiled bundles (and their metadata files) whose key is not in
+/// `protected` and whose newest file was written more than `max_age` ago.
+/// Temporary files from interrupted writes go after a day. Files this module
+/// did not write are left alone. A bundle that goes is compiled again on the
+/// next scan that needs it.
+pub fn prune_bundles(
+    cache_dir: &Path,
+    protected: &BTreeSet<String>,
+    max_age: Duration,
+    now: SystemTime,
+    dry_run: bool,
+) -> std::io::Result<BundlePrune> {
+    let dir = cache_dir.join("bundles");
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BundlePrune::default()),
+        Err(e) => return Err(e),
+    };
+    struct Item {
+        path: std::path::PathBuf,
+        bytes: u64,
+        age: Duration,
+        has_bundle: bool,
+    }
+    let mut keys: BTreeMap<String, Vec<Item>> = BTreeMap::new();
+    let mut strays: Vec<Item> = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some((key, temp)) = bundle_file_key(&name) else {
+            continue;
+        };
+        let md = fs::symlink_metadata(entry.path())?;
+        if !md.file_type().is_file() {
+            continue;
+        }
+        let age = md
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .unwrap_or_default();
+        let item = Item {
+            path: entry.path(),
+            bytes: md.len(),
+            age,
+            has_bundle: name.ends_with(".yxb"),
+        };
+        if temp {
+            strays.push(item);
+        } else {
+            keys.entry(key.to_string()).or_default().push(item);
+        }
+    }
+    let mut out = BundlePrune::default();
+    let mut remove = |item: &Item| -> std::io::Result<()> {
+        if !dry_run {
+            match fs::remove_file(&item.path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        out.removed_files += 1;
+        out.removed_bytes += item.bytes;
+        Ok(())
+    };
+    for item in strays.iter().filter(|i| i.age > STRAY_TEMP_AGE) {
+        remove(item)?;
+    }
+    let mut kept: Vec<(String, u64, bool)> = Vec::new();
+    let mut removed_keys = Vec::new();
+    for (key, items) in &keys {
+        // The youngest file stands for the key: a metadata file rewritten
+        // recently keeps the bundle.
+        let age = items.iter().map(|i| i.age).min().unwrap_or_default();
+        if protected.contains(key) || age <= max_age {
+            let bytes = items.iter().map(|i| i.bytes).sum();
+            kept.push((key.clone(), bytes, items.iter().any(|i| i.has_bundle)));
+            continue;
+        }
+        for item in items {
+            remove(item)?;
+        }
+        removed_keys.push(key.clone());
+    }
+    out.removed_keys = removed_keys;
+    for (key, bytes, has_bundle) in kept {
+        out.kept_bytes += bytes;
+        if has_bundle {
+            out.kept_keys.insert(key);
+        }
+    }
+    Ok(out)
 }

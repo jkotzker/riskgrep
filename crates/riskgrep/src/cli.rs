@@ -38,6 +38,11 @@ pub enum Command {
         #[command(subcommand)]
         command: RulesCommand,
     },
+    /// Maintain the cache of compiled rules and per-file evidence
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -134,6 +139,28 @@ pub enum RulesCommand {
     },
     /// Run the cases in each embedded ruleset's tests.toml
     Test,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CacheCommand {
+    /// Remove compiled rules and cache rows that are no longer used: bundles
+    /// of other rule sets older than the maximum age, evidence written under
+    /// them, rows older than the maximum age, rows for deleted files, and the
+    /// oldest rows when the database is over its maximum size
+    Prune(PruneArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct PruneArgs {
+    /// Report what would be removed and the sizes, and change nothing
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Maximum age in days (default: `[cache] max_age_days`, 30)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub max_age_days: Option<u64>,
+    /// Maximum database size in megabytes (default: `[cache] max_size_mb`, 256)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    pub max_size_mb: Option<u64>,
 }
 
 fn parse_threshold(s: &str) -> Result<(String, f64), String> {

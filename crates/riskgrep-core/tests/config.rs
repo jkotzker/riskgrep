@@ -449,3 +449,56 @@ fn mcp_tool_malformed_entries_rejected() {
         );
     }
 }
+
+// ---- [cache] ----
+
+#[test]
+fn cache_defaults() {
+    let e = env(None, None);
+    let _ = &e.home;
+    let c = load(Mode::Cli, None, Overrides::default()).unwrap();
+    assert_eq!((c.cache.max_age_days, c.cache.max_size_mb), (30, 256));
+    assert_eq!(c.cache.max_age(), Duration::from_secs(30 * 86_400));
+    assert_eq!(c.cache.max_db_bytes(), 256_000_000);
+}
+
+#[test]
+fn cache_section_is_read_from_the_user_file() {
+    let e = env(Some("[cache]\nmax_age_days = 7\nmax_size_mb = 64\n"), None);
+    let c = load(Mode::Cli, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!((c.cache.max_age_days, c.cache.max_size_mb), (7, 64));
+    // `env` holds a lock until the previous one is dropped.
+    drop(e);
+    let e = env(Some("[cache]\nmax_size_mb = 10\n"), None);
+    let c = load(Mode::Cli, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!((c.cache.max_age_days, c.cache.max_size_mb), (30, 10));
+}
+
+#[test]
+fn cache_section_in_a_repository_file_is_ignored() {
+    // The cache is shared by every repository, so one repository cannot size it.
+    let e = env(None, Some("[cache]\nmax_age_days = 1\nmax_size_mb = 1\n"));
+    let c = load(Mode::Cli, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!((c.cache.max_age_days, c.cache.max_size_mb), (30, 256));
+}
+
+#[test]
+fn a_zero_cache_limit_in_a_repository_file_is_ignored_with_the_section() {
+    let e = env(None, Some("[cache]\nmax_age_days = 0\n"));
+    let c = load(Mode::Cli, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!(c.cache.max_age_days, 30);
+}
+
+#[test]
+fn cache_limits_must_be_positive_and_keys_known() {
+    for bad in [
+        "[cache]\nmax_age_days = 0\n",
+        "[cache]\nmax_size_mb = 0\n",
+        "[cache]\nmax_age = 3\n",
+    ] {
+        let e = env(Some(bad), None);
+        let err = load(Mode::Cli, None, Overrides::default()).unwrap_err();
+        assert!(err.0.contains("config.toml"), "{err}");
+        drop(e);
+    }
+}

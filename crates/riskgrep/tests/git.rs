@@ -740,3 +740,48 @@ fn too_large_blob_follows_on_error() {
             "riskgrep: huge.bin: not scanned (staged blob larger than 134217728 bytes)",
         ));
 }
+
+#[test]
+fn pre_commit_prunes_the_cache_at_most_once_a_day() {
+    let home = tempfile::tempdir().unwrap();
+    let cache = riskgrep_core::paths::cache_dir_for(
+        Some(home.path().into()),
+        Some(home.path().join(".cache").into()),
+        cfg!(target_os = "macos"),
+    )
+    .unwrap();
+    let stale = cache
+        .join("bundles")
+        .join(format!("{}.yxb", "7".repeat(64)));
+    let run = |r: &Repo| {
+        let mut c = r.pre_commit();
+        c.env("HOME", home.path())
+            .env("XDG_CACHE_HOME", home.path().join(".cache"));
+        c.assert().code(0).stdout("").stderr("");
+    };
+    let r = Repo::new();
+    r.write("a.txt", "hello\nworld\n");
+    r.stage("a.txt");
+    run(&r);
+    let marker = cache.join(riskgrep_core::prune::MARKER);
+    assert!(marker.exists());
+    let age = |p: &Path, days: u64| {
+        if !p.exists() {
+            fs::write(p, vec![0u8; 100]).unwrap();
+        }
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400),
+            )
+            .unwrap();
+    };
+    age(&stale, 60);
+    run(&r);
+    assert!(stale.exists(), "the marker is fresh");
+    age(&marker, 2);
+    run(&r);
+    assert!(!stale.exists());
+}
