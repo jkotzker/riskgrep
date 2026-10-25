@@ -347,9 +347,7 @@ fn scan(
         }
         Job::Walk(roots) => {
             let w = resolve::walk_entries(&roots, None, None, true, limit);
-            if w.limit_hit {
-                limit_hit = Some(roots[0].display().to_string());
-            }
+            limit_hit = w.limit_at.map(|r| r.display().to_string());
             w.entries
         }
         Job::Names {

@@ -48,7 +48,12 @@ pub fn split_grep_glob(glob: &str) -> Vec<&str> {
 /// paths arrive already expanded. `~user` is left as it is, as is `~` when
 /// `home` is unset or empty.
 pub fn grep_path(p: &str, home: Option<&str>) -> String {
-    let p = p.trim();
+    expand_tilde(p.trim(), home)
+}
+
+/// `p` with a leading `~` or `~/` replaced by `home`, as [`grep_path`]
+/// does, but untrimmed.
+fn expand_tilde(p: &str, home: Option<&str>) -> String {
     let rest = match p.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
         _ => return p.to_string(),
@@ -69,7 +74,11 @@ pub fn read_target(input: &HookInput, cwd: &Path) -> Option<PathBuf> {
             .or_else(|| input.str_field("file_path")),
         _ => input.str_field("file_path"),
     }?;
-    let path = absolute(field, cwd);
+    readable_file(absolute(field, cwd))
+}
+
+/// `path` unless it names a directory or nothing, which a read fails on.
+fn readable_file(path: PathBuf) -> Option<PathBuf> {
     match std::fs::metadata(&path) {
         Ok(meta) if meta.is_dir() => None,
         Ok(_) => Some(path),
@@ -155,9 +164,9 @@ pub fn grep_files(
 
 /// The paths in the `tool_input` fields `fields` of an MCP call, made
 /// absolute against `cwd` with a leading `~` or `~/` expanded from `home`
-/// (the filesystem server expands it). `None` when they cannot be
-/// determined: no listed field is present, or a present one is neither a
-/// string nor a list of strings.
+/// (the filesystem server expands it) and, unlike a `Grep` path, not
+/// trimmed. `None` when they cannot be determined: no listed field is
+/// present, or a present one is neither a string nor a list of strings.
 pub fn mcp_paths(
     input: &HookInput,
     fields: &[String],
@@ -179,36 +188,42 @@ pub fn mcp_paths(
         out.extend(
             items
                 .into_iter()
-                .map(|p| absolute(&grep_path(p, home), cwd)),
+                .map(|p| absolute(&expand_tilde(p, home), cwd)),
         );
     }
     found.then_some(out)
 }
 
-/// The existing files among `paths`, as [`read_target`] treats one path.
+/// The files among `paths` that a read would open, as [`read_target`]
+/// treats one path.
 pub fn existing_files(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    paths
-        .into_iter()
-        .filter(|p| match std::fs::metadata(p) {
-            Ok(meta) => !meta.is_dir(),
-            Err(e) => !matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ),
-        })
-        .collect()
+    paths.into_iter().filter_map(readable_file).collect()
 }
 
 /// A `Glob` call's search root and pattern: `path` (default `cwd`, `~`
 /// expanded), or for an absolute pattern the directory before its first
-/// segment with a glob character, and the pattern's remainder.
+/// segment with a glob character, and the pattern's remainder. Leading `.`
+/// and `..` segments of a relative pattern move into the root (`..` as the
+/// root's lexical parent), since a walk below the root cannot match them.
 pub fn glob_root(input: &HookInput, cwd: &Path, home: Option<&str>) -> Option<(PathBuf, String)> {
     let pattern = input.str_field("pattern")?.trim();
-    let base = input
+    let mut base = input
         .str_field("path")
         .map_or_else(|| cwd.to_path_buf(), |p| absolute(&grep_path(p, home), cwd));
     if !pattern.starts_with('/') {
-        return Some((base, pattern.to_string()));
+        let mut rest = pattern;
+        loop {
+            if let Some(r) = rest.strip_prefix("./") {
+                rest = r;
+            } else if let Some(r) = rest.strip_prefix("../") {
+                if let Some(parent) = base.parent() {
+                    base = parent.to_path_buf();
+                }
+                rest = r;
+            } else {
+                return Some((base, rest.to_string()));
+            }
+        }
     }
     let segs: Vec<&str> = pattern.split('/').collect();
     let first = segs
@@ -226,15 +241,19 @@ pub fn glob_root(input: &HookInput, cwd: &Path, home: Option<&str>) -> Option<(P
 #[derive(Debug, Default)]
 pub struct Walk {
     pub entries: Vec<PathBuf>,
-    pub limit_hit: bool,
+    /// The root whose walk reached the entry limit; `entries` is then
+    /// incomplete.
+    pub limit_at: Option<PathBuf>,
 }
 
 /// The entries under each of `roots`, for MCP content searches (`files`
 /// only) and for names a listing reveals: hidden entries included, ignore
 /// files not honoured, the [`GREP_VCS_EXCLUDES`] directories skipped, links
-/// not followed. A root that is a file is itself the entry. `glob` filters
-/// file names (directories are then left out, as `Glob` returns files);
-/// `max_depth` 1 is a root's own entries. Stops after `limit` entries.
+/// below a root not followed. A root that is a link to a directory is
+/// walked; a root that is a file, or a link to nothing, is itself the
+/// entry. `glob` filters file names (directories are then left out, as
+/// `Glob` returns files); `max_depth` 1 is a root's own entries. Stops
+/// after `limit` entries.
 pub fn walk_entries(
     roots: &[PathBuf],
     glob: Option<&str>,
@@ -245,12 +264,14 @@ pub fn walk_entries(
     let mut out = Walk::default();
     let files = files || glob.is_some();
     for root in roots {
-        let Ok(meta) = std::fs::symlink_metadata(root) else {
-            continue;
+        let is_dir = match std::fs::metadata(root) {
+            Ok(meta) => meta.is_dir(),
+            Err(_) if std::fs::symlink_metadata(root).is_ok() => false,
+            Err(_) => continue,
         };
-        if !meta.is_dir() {
+        if !is_dir {
             if out.entries.len() >= limit {
-                out.limit_hit = true;
+                out.limit_at = Some(root.clone());
                 return out;
             }
             out.entries.push(root.clone());
@@ -280,7 +301,7 @@ pub fn walk_entries(
                 continue;
             }
             if out.entries.len() >= limit {
-                out.limit_hit = true;
+                out.limit_at = Some(root.clone());
                 return out;
             }
             out.entries.push(entry.into_path());
@@ -332,6 +353,12 @@ mod tests {
         );
         assert_eq!(f(json!({"b": "x"}), &["a", "b"]), Some(vec![p("/w/x")]));
         assert_eq!(f(json!({"paths": []}), &["paths"]), Some(vec![]));
+        // Unlike a `Grep` path, an MCP path is not trimmed.
+        assert_eq!(
+            f(json!({"path": " a "}), &["path"]),
+            Some(vec![p("/w/ a ")])
+        );
+        assert_eq!(f(json!({"path": "~"}), &["path"]), Some(vec![p("/h")]));
         for bad in [
             json!({}),
             json!({"path": 1}),
@@ -354,6 +381,14 @@ mod tests {
         assert_eq!(g(json!({"pattern": "/a/**/x"})), r("/a", "**/x"));
         assert_eq!(g(json!({"pattern": "/*"})), r("/", "*"));
         assert_eq!(g(json!({"pattern": "/a/b"})), r("/a", "b"));
+        // Leading `.` and `..` segments move into the root.
+        assert_eq!(g(json!({"pattern": "./k/*.p12"})), r("/w", "k/*.p12"));
+        assert_eq!(g(json!({"pattern": "../k/*"})), r("/", "k/*"));
+        assert_eq!(
+            g(json!({"pattern": ".././../x/*", "path": "/a/b/c"})),
+            r("/a", "x/*")
+        );
+        assert_eq!(g(json!({"pattern": "../*", "path": "/"})), r("/", "*"));
         assert_eq!(g(json!({"path": "x"})), None);
     }
 

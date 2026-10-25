@@ -1147,3 +1147,52 @@ fn mcp_names_tool_respects_depth() {
         .decision();
     assert_eq!(d, "ask");
 }
+
+#[test]
+fn names_follow_a_symlinked_root() {
+    let e = Env::new();
+    e.write(&format!("real/keys/{KEY_NAME}"), b"x");
+    std::os::unix::fs::symlink(e.dir().join("real"), e.dir().join("link")).unwrap();
+    let (d, _) = e
+        .run("mcp__filesystem__directory_tree", json!({ "path": "link" }))
+        .decision();
+    assert_eq!(d, "ask");
+    let (d, _) = e
+        .run("Glob", json!({ "pattern": "**/*.p12", "path": "link" }))
+        .decision();
+    assert_eq!(d, "ask");
+}
+
+#[test]
+fn glob_pattern_may_climb_out_of_path() {
+    let e = Env::new();
+    e.write(&format!("keys/{KEY_NAME}"), b"x");
+    e.write("sub/clean.txt", b"x");
+    for pattern in ["../keys/*.p12", "./../keys/*"] {
+        let (d, _) = e
+            .run("Glob", json!({ "pattern": pattern, "path": "sub" }))
+            .decision();
+        assert_eq!(d, "ask", "{pattern}");
+    }
+    let (d, _) = e.run("Glob", json!({ "pattern": "./keys/*" })).decision();
+    assert_eq!(d, "ask");
+}
+
+#[test]
+fn mcp_walk_limit_names_the_root_that_reached_it() {
+    let e = Env::new();
+    e.write("small/a.txt", b"x\n");
+    for i in 0..3 {
+        e.write(&format!("big/f{i}.txt"), b"x\n");
+    }
+    e.user_config(
+        "[limits]\nwalk_files = 2\n\n\
+         [claude_code.mcp_tools.\"mcp__t__search\"]\npaths = [\"paths\"]\nkind = \"walk\"\n",
+    );
+    let (d, reason) = e
+        .run("mcp__t__search", json!({ "paths": ["small", "big"] }))
+        .decision();
+    assert_eq!(d, "ask");
+    assert!(reason.contains("big (walk limit)"), "{reason}");
+    assert!(!reason.contains("small"), "{reason}");
+}
