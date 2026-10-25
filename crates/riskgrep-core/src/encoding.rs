@@ -162,7 +162,7 @@ pub fn detect(head: &[u8]) -> Option<Encoding> {
 
 /// `src` transcoded to UTF-8; invalid sequences become U+FFFD.
 pub fn decode(utf: Utf, src: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(src.len());
+    let mut out = Vec::with_capacity(src.len() / utf.unit());
     let mut buf = [0u8; 4];
     for (_, c) in code_points(utf, src) {
         out.extend_from_slice(c.unwrap_or('\u{fffd}').encode_utf8(&mut buf).as_bytes());
@@ -192,8 +192,7 @@ impl Decoded {
         head: Vec<u8>,
         tail: Option<(u64, Vec<u8>)>,
     ) -> (Decoded, Vec<u8>) {
-        let skip = usize::from(encoding.bom).min(head.len());
-        let mut text = decode(encoding.utf, &head[skip..]);
+        let mut text = decode(encoding.utf, body(encoding, &head));
         let head_len = text.len() as u64;
         if let Some((_, t)) = &tail {
             text.push(b'\n');
@@ -232,8 +231,9 @@ impl Decoded {
                 _ => hq.extend([l.start, l.end]),
             }
         }
-        let skip = usize::from(self.encoding.bom).min(self.head.len());
-        let hm = Map::new(self.encoding.utf, &self.head[skip..], skip as u64, hq);
+        let body = body(self.encoding, &self.head);
+        let skip = (self.head.len() - body.len()) as u64;
+        let hm = Map::new(self.encoding.utf, body, skip, hq);
         let tm = match &self.tail {
             Some((offset, bytes)) => Map::new(self.encoding.utf, bytes, *offset, tq),
             None => Map::default(),
@@ -257,6 +257,11 @@ impl Decoded {
             }
         }
     }
+}
+
+/// The head after its byte-order mark: the source of the transcoded head.
+fn body(encoding: Encoding, head: &[u8]) -> &[u8] {
+    &head[usize::from(encoding.bom).min(head.len())..]
 }
 
 /// Source offsets of sorted transcoded offsets: for each, the start of the
