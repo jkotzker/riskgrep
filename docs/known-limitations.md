@@ -152,7 +152,7 @@ Setting `on_unresolved = "ask"` or `"deny"` under `[claude_code]` prompts or blo
 
 ### Pruning removes by age and size, not by use
 
-- **Not covered:** keeping a row or a bundle because it was used recently. Rows are aged by the time they were written, because a cache hit never writes (the Claude Code hook's cached-read path stays read-only), and a bundle is aged by its files' modification time. After the maximum age (`[cache] max_age_days`, default 30) a row that is still in use is removed and rewritten by the next scan of that file, and a bundle that is not the default selection of the command line or of the Claude Code hook (for example one made by `--ruleset`) is compiled again once.
+- **Not covered:** keeping a row or a bundle because it was used recently. Rows are aged by the time they were written, because a cache hit never writes (the Claude Code hook's cached-read path stays read-only), and a bundle is aged by its files' modification time. After the maximum age (`[cache] max_age_days`, default 30) a row that is still in use is removed and rewritten by the next scan of that file, and a bundle that is not the selection the command line resolves in the current directory, nor the Claude Code hook's selection outside a trusted repository, in the current repository, or in a repository listed in `trusted_repos` (for example one made by `--ruleset`) is compiled again once.
 - **Why:** recording a last-used time on every hit adds a database write to a path with a 5 ms p95 target.
 - **How it shows up:** a periodic rescan of files that did not change, and one recompile of a bundle used only with non-default options. The scores do not change.
 

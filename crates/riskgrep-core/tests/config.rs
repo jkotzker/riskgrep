@@ -398,6 +398,13 @@ fn cache_section_in_a_repository_file_is_ignored() {
 }
 
 #[test]
+fn a_zero_cache_limit_in_a_repository_file_is_ignored_with_the_section() {
+    let e = env(None, Some("[cache]\nmax_age_days = 0\n"));
+    let c = load(Mode::Cli, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!(c.cache.max_age_days, 30);
+}
+
+#[test]
 fn cache_limits_must_be_positive_and_keys_known() {
     for bad in [
         "[cache]\nmax_age_days = 0\n",

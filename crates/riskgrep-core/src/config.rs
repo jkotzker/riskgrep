@@ -241,16 +241,6 @@ fn read_layer(path: &Path) -> Result<Option<Layer>, ConfigError> {
     };
     let invalid = |e: String| ConfigError(format!("invalid config {}: {e}", path.display()));
     let layer: Layer = toml::from_str(&text).map_err(|e| invalid(e.to_string()))?;
-    if let Some(c) = &layer.cache {
-        for (name, v) in [
-            ("max_age_days", c.max_age_days),
-            ("max_size_mb", c.max_size_mb),
-        ] {
-            if v == Some(0) {
-                return Err(invalid(format!("[cache] {name} must be at least 1")));
-            }
-        }
-    }
     Ok(Some(layer))
 }
 
@@ -449,6 +439,20 @@ pub fn load(
     let mut spec = IgnoreSpec::default();
     if let Some(path) = user_config_path() {
         if let Some(mut layer) = read_layer(&path)? {
+            // Only the user file sizes the cache, so only it is checked.
+            if let Some(c) = &layer.cache {
+                for (name, v) in [
+                    ("max_age_days", c.max_age_days),
+                    ("max_size_mb", c.max_size_mb),
+                ] {
+                    if v == Some(0) {
+                        return Err(ConfigError(format!(
+                            "invalid config {}: [cache] {name} must be at least 1",
+                            path.display()
+                        )));
+                    }
+                }
+            }
             if let Some(dir) = path.parent() {
                 layer.resolve_paths(dir);
             }

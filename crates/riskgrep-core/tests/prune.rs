@@ -192,3 +192,28 @@ fn prune_without_a_database_touches_nothing_else() {
     assert!(r.database.is_none());
     assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn a_database_from_another_version_is_left_alone_even_by_a_dry_run() {
+    let d = tempfile::tempdir().unwrap();
+    {
+        let c = Cache::open(d.path()).unwrap();
+        c.put_evidence([7; 32], "k:x", &evidence());
+    }
+    {
+        let conn = rusqlite::Connection::open(d.path().join("evidence.sqlite")).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+    }
+    for dry_run in [true, false] {
+        let r = prune(d.path(), &options("k", dry_run), SystemTime::now()).unwrap();
+        assert!(r.database.is_none());
+    }
+    let conn = rusqlite::Connection::open(d.path().join("evidence.sqlite")).unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM evidence", [], |r| r.get(0))
+        .unwrap();
+    let v: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!((rows, v), (1, 2), "neither rebuilt nor pruned");
+}

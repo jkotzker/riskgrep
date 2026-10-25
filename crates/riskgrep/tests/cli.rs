@@ -833,4 +833,45 @@ mod pruning {
         h.scan();
         assert!(!stale.exists(), "2 days is over a 1 day limit");
     }
+
+    #[test]
+    fn the_hook_bundle_of_another_trusted_repository_is_kept() {
+        let h = Home::new();
+        // Repository B selects one ruleset and is trusted, so the hook compiles
+        // that selection when it runs there.
+        let b = tempfile::tempdir().unwrap();
+        fs::create_dir(b.path().join(".git")).unwrap();
+        fs::write(
+            b.path().join(".riskgrep.toml"),
+            "rulesets = [\"secrets_core\"]\n",
+        )
+        .unwrap();
+        fs::write(b.path().join("f.txt"), "nothing\n").unwrap();
+        let conf = h.home.path().join(".config/riskgrep");
+        fs::create_dir_all(&conf).unwrap();
+        let b_path = fs::canonicalize(b.path()).unwrap();
+        fs::write(
+            conf.join("config.toml"),
+            format!("trusted_repos = [{:?}]\n", b_path.to_str().unwrap()),
+        )
+        .unwrap();
+        riskgrep_in(h.home.path(), &b_path)
+            .args(["scan", "f.txt"])
+            .assert()
+            .success();
+        h.scan();
+        let all: Vec<PathBuf> = fs::read_dir(h.cache().join("bundles"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "yxb"))
+            .collect();
+        assert_eq!(all.len(), 2, "one bundle per ruleset selection");
+        for p in &all {
+            set_age(p.clone(), 400);
+        }
+        // Pruned from a directory that is not repository B.
+        let out = stdout(&mut h.run(&["cache", "prune"]));
+        assert!(out.contains("compiled bundles: 0 (0 B); 2 kept"), "{out}");
+        assert!(all.iter().all(|p| p.exists()));
+    }
 }

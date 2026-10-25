@@ -88,7 +88,9 @@ pub fn prune(cache_dir: &Path, o: &PruneOptions, now: SystemTime) -> Result<Prun
     let b = prune_bundles(cache_dir, &o.protected_keys, o.max_age, now, o.dry_run)
         .map_err(|e| format!("bundles: {e}"))?;
     let live: BTreeSet<String> = b.kept_keys.union(&o.protected_keys).cloned().collect();
-    let database = if cache_dir.join("evidence.sqlite").exists() {
+    // A database from another version is rebuilt by the next scan; pruning
+    // it would only rebuild it earlier, and a dry run must not.
+    let database = if Cache::schema_matches(cache_dir) {
         let cache = Cache::open_existing(cache_dir)
             .ok_or_else(|| "the evidence database could not be opened".to_string())?;
         Some(cache.prune(

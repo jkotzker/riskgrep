@@ -539,3 +539,24 @@ fn open_existing_creates_nothing() {
     assert!(Cache::open_existing(d.path()).is_none());
     assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn prune_reports_a_busy_database_with_a_recognisable_error() {
+    let d = tempfile::tempdir().unwrap();
+    let c = open(d.path());
+    let other = rusqlite::Connection::open(d.path().join("evidence.sqlite")).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let live = keys(&[]);
+    let err = c
+        .prune(
+            &DbPruneOptions {
+                live_keys: &live,
+                max_age: Duration::from_secs(30 * DAY),
+                max_bytes: u64::MAX,
+                dry_run: false,
+            },
+            later(100 * DAY),
+        )
+        .unwrap_err();
+    assert_eq!(err, riskgrep_core::cache::PRUNE_BUSY);
+}

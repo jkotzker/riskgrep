@@ -27,13 +27,24 @@ fn key_of(sets: &[Ruleset]) -> String {
 
 /// The configuration and the bundle keys that stay however old they are:
 /// those of the rulesets this command line resolves here, of the Claude Code
-/// hook outside a trusted repository, and of the hook in this repository.
+/// hook outside a trusted repository, and of the hook in this repository and
+/// in every repository the user configuration trusts (the hook never renews a
+/// bundle's age, so it cannot be recognised as in use any other way).
 fn protected() -> Result<(Config, BTreeSet<String>), CliError> {
     let (cfg, sets) = enabled()?;
     let mut keys = BTreeSet::from([key_of(&sets), key_of(&hook_rulesets()?)]);
-    if let Some(root) = repo_root() {
-        let hook = config::load(Mode::ClaudeCode, Some(&root), Overrides::default())?;
-        keys.insert(key_of(&resolve_rulesets(&hook, Some(&root))?));
+    let roots = repo_root()
+        .into_iter()
+        .chain(cfg.trusted_repos.iter().cloned());
+    for root in roots {
+        // A trusted repository that is gone or whose configuration no longer
+        // loads has no bundle to protect.
+        let Ok(hook) = config::load(Mode::ClaudeCode, Some(&root), Overrides::default()) else {
+            continue;
+        };
+        if let Ok(sets) = resolve_rulesets(&hook, Some(&root)) {
+            keys.insert(key_of(&sets));
+        }
     }
     Ok((cfg, keys))
 }
@@ -74,9 +85,11 @@ fn prune_command(a: PruneArgs) -> Result<i32, CliError> {
 
 /// Prune at most once a day. The check is one `stat` of the marker file, so a
 /// scan that has nothing to do pays nothing else. The marker is written
-/// before pruning starts, which also keeps a second process from pruning at
-/// the same time. Never run by the Claude Code hook. A failure is one line on
-/// standard error and does not change the exit status.
+/// before pruning starts, so a process that starts later usually finds it
+/// fresh; one that started at the same moment finds the database in use and
+/// stops without a message. Never run by the Claude Code hook. Any other
+/// failure is one line on standard error and does not change the exit
+/// status.
 pub fn auto_prune() {
     let Some(dir) = cache_dir() else { return };
     let now = SystemTime::now();
@@ -97,6 +110,9 @@ pub fn auto_prune() {
         dry_run: false,
     };
     if let Err(e) = prune(&dir, &opts, now) {
+        if e == riskgrep_core::cache::PRUNE_BUSY {
+            return;
+        }
         eprintln!("riskgrep: cache prune: {e}");
     }
 }

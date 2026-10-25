@@ -385,6 +385,17 @@ impl Cache {
             .flatten()
     }
 
+    /// True when the database in `dir` exists with the schema this version
+    /// uses. Opens without the schema reset [`Cache::open`] performs, so a
+    /// dry run can ask without rebuilding a database from another version.
+    pub fn schema_matches(dir: &Path) -> bool {
+        let file = dir.join(DB_NAME);
+        std::fs::symlink_metadata(&file).is_ok_and(|m| m.file_type().is_file())
+            && Connection::open(&file)
+                .and_then(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
+                .is_ok_and(|v| v == SCHEMA_VERSION)
+    }
+
     /// Size on disk of the database and its write-ahead log.
     pub fn file_bytes(&self) -> u64 {
         let wal = {
@@ -404,13 +415,22 @@ impl Cache {
     /// the counts match a real run and nothing changes. A row that goes only
     /// costs a rescan; no score depends on a row being present.
     pub fn prune(&self, o: &DbPruneOptions<'_>, now: SystemTime) -> Result<DbPrune, String> {
-        let sql = |e: rusqlite::Error| format!("prune: {e}");
+        let sql = |e: rusqlite::Error| {
+            if is_busy(&e) {
+                PRUNE_BUSY.to_string()
+            } else {
+                format!("prune: {e}")
+            }
+        };
         let mut r = DbPrune {
             bytes_before: self.file_bytes(),
             ..DbPrune::default()
         };
+        let cutoff =
+            i64::try_from(ns_since_epoch(now) - o.max_age.as_nanos() as i128).unwrap_or(i64::MIN);
+        let doomed = self.stat_doomed(cutoff)?;
         self.conn.execute_batch("BEGIN IMMEDIATE").map_err(sql)?;
-        let stepped = self.prune_steps(o, now, &mut r);
+        let stepped = self.prune_steps(o, now, &doomed, &mut r);
         let end = if o.dry_run || stepped.is_err() {
             "ROLLBACK"
         } else {
@@ -502,17 +522,66 @@ impl Cache {
         Ok((pragma("page_count")? - pragma("freelist_count")?) * pragma("page_size")?)
     }
 
+    /// The `stat` rows to remove as `(rowid, written_at_ns, aged)`: older than
+    /// `cutoff`, or (not aged) for a path that no longer exists. Any error but
+    /// "not found" (permissions, a slow mount) keeps the row. Runs outside the
+    /// write transaction: a slow file system must not hold the lock that
+    /// other scans write under.
+    fn stat_doomed(&self, cutoff: i64) -> Result<Vec<(i64, i64, bool)>, String> {
+        let sql = |e: rusqlite::Error| format!("prune: {e}");
+        let mut st = self
+            .conn
+            .prepare("SELECT rowid, realpath, written_at_ns FROM stat")
+            .map_err(sql)?;
+        let rows = st
+            .query_map([], |row| {
+                // A path is a blob; a malformed row of another type reads as
+                // an empty path, which does not exist.
+                let path = match row.get_ref(1)? {
+                    rusqlite::types::ValueRef::Blob(b) | rusqlite::types::ValueRef::Text(b) => {
+                        b.to_vec()
+                    }
+                    _ => Vec::new(),
+                };
+                Ok((row.get::<_, i64>(0)?, path, row.get::<_, i64>(2)?))
+            })
+            .map_err(sql)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, path, written) = row.map_err(sql)?;
+            if written < cutoff {
+                out.push((id, written, true));
+                continue;
+            }
+            let path = Path::new(std::ffi::OsStr::from_bytes(&path));
+            if std::fs::symlink_metadata(path)
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            {
+                out.push((id, written, false));
+            }
+        }
+        Ok(out)
+    }
+
     fn prune_steps(
         &self,
         o: &DbPruneOptions<'_>,
         now: SystemTime,
+        doomed: &[(i64, i64, bool)],
         r: &mut DbPrune,
     ) -> Result<(), String> {
         let sql = |e: rusqlite::Error| format!("prune: {e}");
         let cutoff =
             i64::try_from(ns_since_epoch(now) - o.max_age.as_nanos() as i128).unwrap_or(i64::MIN);
-        let used = self.used_bytes().map_err(sql)?;
-        let rows_before = self.row_bytes().map_err(sql)?;
+        // Only the dry-run estimate of the size cap needs these.
+        let (used, rows_before) = if o.dry_run {
+            (
+                self.used_bytes().map_err(sql)?,
+                self.row_bytes().map_err(sql)?,
+            )
+        } else {
+            (0, 0)
+        };
 
         // Rows written under a bundle key that has no bundle.
         let keys: Vec<String> = {
@@ -542,45 +611,21 @@ impl Cache {
             )
             .map_err(sql)? as u64;
 
-        // Paths that were not written recently, or that no longer exist.
-        let rows: Vec<(i64, Vec<u8>, i64)> = {
-            let mut st = self
-                .conn
-                .prepare("SELECT rowid, realpath, written_at_ns FROM stat")
-                .map_err(sql)?;
-            let it = st
-                .query_map([], |row| {
-                    // A path is a blob; a malformed row of another type
-                    // reads as an empty path, which does not exist.
-                    let path = match row.get_ref(1)? {
-                        rusqlite::types::ValueRef::Blob(b) | rusqlite::types::ValueRef::Text(b) => {
-                            b.to_vec()
-                        }
-                        _ => Vec::new(),
-                    };
-                    Ok((row.get(0)?, path, row.get(2)?))
-                })
-                .map_err(sql)?;
-            it.collect::<rusqlite::Result<_>>().map_err(sql)?
-        };
+        // Paths that were not written recently, or that no longer exist
+        // (decided before the transaction, see [`Cache::stat_doomed`]).
         let mut del = self
             .conn
-            .prepare("DELETE FROM stat WHERE rowid = ?1")
+            .prepare("DELETE FROM stat WHERE rowid = ?1 AND written_at_ns = ?2")
             .map_err(sql)?;
-        for (id, path, written) in rows {
-            if written < cutoff {
-                r.stat_aged += 1;
-            } else {
-                let path = Path::new(std::ffi::OsStr::from_bytes(&path));
-                // Any error but "not found" (permissions, a slow mount) keeps the row.
-                let gone = std::fs::symlink_metadata(path)
-                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
-                if !gone {
-                    continue;
+        for &(id, written, aged) in doomed {
+            // A row replaced since it was read has a new rowid and stays.
+            if del.execute(params![id, written]).map_err(sql)? > 0 {
+                if aged {
+                    r.stat_aged += 1;
+                } else {
+                    r.stat_missing += 1;
                 }
-                r.stat_missing += 1;
             }
-            del.execute(params![id]).map_err(sql)?;
         }
         drop(del);
 
@@ -632,6 +677,10 @@ impl Cache {
         Ok((current as f64 * keep) as i64)
     }
 }
+
+/// The error [`Cache::prune`] returns when another process holds the
+/// database; the caller decides whether that is worth reporting.
+pub const PRUNE_BUSY: &str = "prune: the database is in use by another process";
 
 /// Passes [`Cache::prune`] may make to bring the file under its size cap.
 const SIZE_PASSES: u32 = 3;
