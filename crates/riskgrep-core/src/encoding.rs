@@ -279,6 +279,9 @@ impl Map {
         let mut q = queries.iter().peekable();
         let (mut d, mut s) = (0u64, base);
         for (len, c) in code_points(utf, src) {
+            if q.peek().is_none() {
+                break;
+            }
             let dlen = c.map_or(3, char::len_utf8) as u64;
             while let Some(&&x) = q.peek().filter(|&&&x| x < d + dlen) {
                 floor.push(s);

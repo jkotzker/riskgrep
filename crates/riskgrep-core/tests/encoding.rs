@@ -344,24 +344,23 @@ fn sampled_encoded_file_maps_head_and_tail() {
 }
 
 #[test]
-fn blob_line_filter_uses_lines_of_the_encoded_file() {
+fn blob_line_filter_never_applies_to_encoded_text() {
+    // Git numbers lines at 0x0A bytes, which a code unit other than LF can
+    // hold, so a staged UTF-16 or UTF-32 blob is judged whole.
     let mut g = scanner();
-    let text = format!("one\ntwo\nid = \"{}\"\nfour\n", aws(7));
-    let bytes = encode(&text, Utf::Utf16Le, true);
-    let hit = g.scan_blob(
-        "a.txt",
-        b"blob-a",
-        &bytes,
-        Some(std::slice::from_ref(&(3..=3))),
-    );
-    assert!(hit.scores[&secret()] >= 95.0);
-    let miss = g.scan_blob(
-        "a.txt",
-        b"blob-a",
-        &bytes,
-        Some(std::slice::from_ref(&(1..=2))),
-    );
-    assert_eq!(miss.scores[&secret()], 0.0);
+    let text = format!("one\n\u{4e0a}\ntwo\nid = \"{}\"\nfour\n", aws(7));
+    for (i, (utf, bom)) in VARIANTS.into_iter().enumerate() {
+        let bytes = encode(&text, utf, bom);
+        let id = format!("blob-{i}");
+        let t = g.scan_blob(
+            "a.txt",
+            id.as_bytes(),
+            &bytes,
+            Some(std::slice::from_ref(&(1..=2))),
+        );
+        assert!(!t.text, "{utf:?} bom={bom}");
+        assert!(t.scores[&secret()] >= 95.0, "{utf:?} bom={bom}");
+    }
 }
 
 fn located(start: u64, end: u64) -> riskgrep_core::model::Evidence {
@@ -468,4 +467,37 @@ fn tail_sample_starts_on_a_code_unit_boundary() {
             "{utf:?}"
         );
     }
+}
+
+#[test]
+fn sample_smaller_than_a_code_unit() {
+    let d = tempfile::tempdir().unwrap();
+    let mut cfg = Config::default();
+    cfg.limits.text_max = 64;
+    cfg.limits.sample = 1;
+    let mut g = scanner_with(cfg, &shared_cache());
+    let mut bytes = encode(&"x".repeat(100), Utf::Utf16Le, true);
+    bytes.push(b'z');
+    let size = bytes.len();
+    let r = g.scan_paths(&[write(d.path(), "tiny.txt", &bytes)]);
+    assert_eq!(
+        only(&r).status,
+        TargetStatus::Partial {
+            not_read: format!("bytes 0..{size} not read")
+        }
+    );
+}
+
+#[test]
+fn byte_order_mark_without_nul_bytes_is_encoded_text() {
+    // CJK text in UTF-16 holds no NUL byte; only its mark identifies it.
+    let bytes = encode("\u{65e5}\u{672c}\u{8a9e}\u{6587}", Utf::Utf16Le, true);
+    assert!(!bytes.contains(&0));
+    assert_eq!(
+        classify("a.txt", &bytes),
+        FileClass::EncodedText(Encoding {
+            utf: Utf::Utf16Le,
+            bom: 2
+        })
+    );
 }

@@ -464,6 +464,10 @@ impl RiskGrep {
         if let Some(s) = not_scanned(&class) {
             return Raw::status(name.to_string(), s);
         }
+        // Git numbers a blob's lines at 0x0A bytes, which a UTF-16 or
+        // UTF-32 code unit other than LF can hold, so only UTF-8 text has
+        // lines a diff's line ranges can be matched against.
+        let blob_text = class == FileClass::Text;
         let ekey = format!("{}:{name}", self.key);
         let mut h = blake3::Hasher::new();
         h.update(b"riskgrep-git-blob\0");
@@ -479,7 +483,7 @@ impl RiskGrep {
                 name.into(),
                 TargetStatus::Scanned,
                 ev,
-                class.is_text(),
+                blob_text,
             );
         }
         match classify::slice_for_scan(bytes, &class, &self.cfg.limits) {
@@ -495,7 +499,7 @@ impl RiskGrep {
                 ekey,
                 hash: content.partial.is_none().then_some(blob_key),
                 content,
-                text: class.is_text(),
+                text: blob_text,
                 stat: None,
             }),
         }

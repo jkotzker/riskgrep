@@ -458,7 +458,7 @@ fn read_from<S: Source + ?Sized>(
                 (src.range(0, size)?, None, None)
             } else {
                 let s = limits.sample.min(size / 2) / unit * unit;
-                let tail_start = (size - s).div_ceil(unit) * unit;
+                let tail_start = ((size - s).div_ceil(unit) * unit).min(size);
                 let tail = src.range(tail_start, size - tail_start)?;
                 let note = format!("bytes {s}..{tail_start} not read");
                 (src.range(0, s)?, Some((tail_start, tail)), Some(note))
