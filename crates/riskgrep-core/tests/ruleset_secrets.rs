@@ -3,10 +3,12 @@
 //! counts, and offsets.
 
 use regex::bytes::{Regex, RegexBuilder};
+use regex_syntax::hir::{Class, Hir, HirKind};
 use riskgrep_core::bundle::{compile_uncached, Bundle};
 use riskgrep_core::engine::Engine;
-use riskgrep_core::meta::RuleMeta;
+use riskgrep_core::meta::{PostSpec, RuleMeta};
 use riskgrep_core::model::{Category, Evidence};
+use riskgrep_core::post::compile_regex;
 use riskgrep_core::ruleset::{builtin_rulesets, Ruleset};
 use riskgrep_core::score::{score, Contribution};
 use riskgrep_core::synth;
@@ -184,11 +186,272 @@ fn many_back_to_back_keys_each_get_one_location() {
     assert_eq!(lines, want);
 }
 
+/// Random text matching `h`. Classes draw printable ASCII when they admit
+/// any (so a sample stays on one line), looks emit nothing, and
+/// repetitions take at most 40 more than their minimum. A sample that
+/// breaks a look fails the checks alone and is redrawn.
+fn draw_matching(h: &Hir, rng: &mut synth::Rng, out: &mut Vec<u8>) {
+    let below = |rng: &mut synth::Rng, n: usize| (rng.next_u64() % n as u64) as usize;
+    let pick = |rng: &mut synth::Rng, all: Vec<u8>, out: &mut Vec<u8>| {
+        let quiet: Vec<u8> = all
+            .iter()
+            .copied()
+            .filter(|b| (0x20..0x7f).contains(b))
+            .collect();
+        let pool = if quiet.is_empty() { all } else { quiet };
+        out.push(pool[below(rng, pool.len())]);
+    };
+    match h.kind() {
+        HirKind::Empty | HirKind::Look(_) => {}
+        HirKind::Literal(l) => out.extend_from_slice(&l.0),
+        HirKind::Class(Class::Bytes(c)) => {
+            let all = c
+                .ranges()
+                .iter()
+                .flat_map(|r| r.start()..=r.end())
+                .collect();
+            pick(rng, all, out);
+        }
+        HirKind::Class(Class::Unicode(c)) => {
+            let all = c
+                .ranges()
+                .iter()
+                .flat_map(|r| r.start()..=r.end().min('\x7f'))
+                .map(|ch| ch as u8)
+                .collect();
+            pick(rng, all, out);
+        }
+        HirKind::Repetition(r) => {
+            let hi = r.max.unwrap_or(u32::MAX).min(r.min.saturating_add(40));
+            let n = r.min as usize + below(rng, (hi - r.min) as usize + 1);
+            for _ in 0..n {
+                draw_matching(&r.sub, rng, out);
+            }
+        }
+        HirKind::Capture(c) => draw_matching(&c.sub, rng, out),
+        HirKind::Concat(v) => v.iter().for_each(|s| draw_matching(s, rng, out)),
+        HirKind::Alternation(v) => draw_matching(&v[below(rng, v.len())], rng, out),
+    }
+}
+
+/// One generated finding of a rule: a line that the rule reports alone,
+/// with exactly one location, and that location relative to the line.
+struct Drawn {
+    line: Vec<u8>,
+    secret: std::ops::Range<usize>,
+}
+
+const DRAW_PATH: &str = "config/settings.txt";
+
+/// The first lines of every generated file: a comment naming the rule's
+/// keywords (a rule needs one of them anywhere in the file, and a regex
+/// such as `hooks.slack.com` does not force its keyword's dots).
+fn draw_head(rule: &str) -> Vec<u8> {
+    let src = include_str!("../rulesets/secrets-core/gitleaks.yar");
+    let start = src.find(&format!("\nrule {rule} {{")).unwrap();
+    let block = &src[start..start + src[start..].find("\n}").unwrap()];
+    let kws: Vec<&str> = block
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("$kw"))
+        .filter_map(|l| l.split('"').nth(1))
+        .collect();
+    format!("fn main() {{\n    // {}\n", kws.join(" ")).into_bytes()
+}
+
+/// A line matching `span_regex` that the rule reports alone (keywords,
+/// entropy, stopwords, and allowlists all pass), from seeds `base..`.
+fn draw_finding(rule: &str, span: &str, base: u64) -> Option<Drawn> {
+    let hir = regex_syntax::ParserBuilder::new()
+        .unicode(false)
+        .utf8(false)
+        .build()
+        .parse(span)
+        .unwrap();
+    let re = compile_regex(span).unwrap();
+    for seed in base..base + 400 {
+        let mut rng = synth::Rng::new(seed);
+        let mut line = Vec::new();
+        draw_matching(&hir, &mut rng, &mut line);
+        if line.iter().any(|b| !(0x20..0x7f).contains(b)) || !re.is_match(&line) {
+            continue;
+        }
+        let mut content = draw_head(rule);
+        let at = content.len();
+        content.extend_from_slice(&line);
+        content.extend_from_slice(b"\n}\n");
+        let ev = scan(DRAW_PATH, &content);
+        let Some(e) = ev.iter().find(|e| e.rule == rule) else {
+            continue;
+        };
+        let [l] = e.locations.as_slice() else {
+            continue;
+        };
+        let (s, t) = (l.start as usize, l.end as usize);
+        if s >= at && t <= at + line.len() && s < t {
+            return Some(Drawn {
+                line,
+                secret: s - at..t - at,
+            });
+        }
+    }
+    None
+}
+
+/// 1-based line of byte `offset`, as `riskgrep_core::lines` counts them.
+fn line_number(content: &[u8], offset: usize) -> u32 {
+    1 + content[..offset].iter().filter(|&&b| b == b'\n').count() as u32
+}
+
+/// For one layout of drawn findings: `content` and where each secret is.
+/// Secrets keep their offsets within their lines, so lines cut after the
+/// secret need no adjustment.
+struct Layout {
+    name: &'static str,
+    content: Vec<u8>,
+    secrets: Vec<std::ops::Range<usize>>,
+}
+
+/// The layouts every line-complete rule must locate completely: several
+/// findings on one line, on adjacent lines, and with CRLF line endings,
+/// each also with the lines ending right after their secrets, and the last
+/// one at the end of the file without a final line feed.
+fn layouts(rule: &str, d: &[Drawn], span: &Regex) -> Vec<Layout> {
+    let head = draw_head(rule);
+    let tail: &[u8] = b"\n    println!(\"{}\", width);\n}\n";
+    let build =
+        |name, sep: &[u8], end: &[u8], lines: Vec<&[u8]>, secrets: Vec<&std::ops::Range<usize>>| {
+            let mut content = head.clone();
+            let mut at = Vec::new();
+            for (i, (l, s)) in lines.iter().zip(&secrets).enumerate() {
+                if i > 0 {
+                    content.extend_from_slice(sep);
+                }
+                at.push(content.len() + s.start..content.len() + s.end);
+                content.extend_from_slice(l);
+            }
+            content.extend_from_slice(end);
+            Layout {
+                name,
+                content,
+                secrets: at,
+            }
+        };
+    let lines: Vec<&[u8]> = d.iter().map(|x| x.line.as_slice()).collect();
+    let secrets: Vec<&std::ops::Range<usize>> = d.iter().map(|x| &x.secret).collect();
+    // Each line cut after its secret where the rule still matches it with
+    // a line break after it: the trailing delimiter then has to be the
+    // line feed (or the carriage return) itself.
+    let cut = |x: &Drawn, after: &[u8]| -> bool {
+        let mut t = x.line[..x.secret.end].to_vec();
+        t.extend_from_slice(after);
+        span.is_match(&t)
+    };
+    let cut_lines = |after: &[u8]| -> Vec<&[u8]> {
+        d.iter()
+            .map(|x| {
+                if cut(x, after) {
+                    &x.line[..x.secret.end]
+                } else {
+                    x.line.as_slice()
+                }
+            })
+            .collect()
+    };
+    let last = d.last().unwrap();
+    let mut eof_lines = cut_lines(b"\n");
+    *eof_lines.last_mut().unwrap() = if cut(last, b"") {
+        &last.line[..last.secret.end]
+    } else {
+        &last.line
+    };
+    vec![
+        build("one line", b" ", tail, lines.clone(), secrets.clone()),
+        build(
+            "adjacent lines",
+            b"\n",
+            tail,
+            lines.clone(),
+            secrets.clone(),
+        ),
+        build("crlf", b"\r\n", b"\r\n", lines.clone(), secrets.clone()),
+        build(
+            "adjacent lines, cut",
+            b"\n",
+            tail,
+            cut_lines(b"\n"),
+            secrets.clone(),
+        ),
+        build(
+            "crlf, cut",
+            b"\r\n",
+            b"\r\n",
+            cut_lines(b"\r\n"),
+            secrets.clone(),
+        ),
+        build("end of file", b"\n", b"", eof_lines, secrets.clone()),
+    ]
+}
+
+#[test]
+fn every_line_complete_rule_locates_every_secret() {
+    // A rule marked line_complete lets the Claude Code hook allow a partial
+    // read that avoids its locations, so every secret of every layout must
+    // fall on a located line, and every location must be one line.
+    let m = &fixture().meta;
+    let mut marked: Vec<(&str, &str)> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for (key, meta) in m.iter().filter(|(_, m)| m.line_complete) {
+        let rule = key.strip_prefix(&format!("{NS}:")).unwrap();
+        match meta.post.iter().find_map(|p| match p {
+            PostSpec::Span { regex, .. } => Some(regex.as_str()),
+            _ => None,
+        }) {
+            Some(span) => marked.push((rule, span)),
+            None => failures.push(format!("{rule}: no span_regex")),
+        }
+    }
+    marked.sort();
+    for (rule, span) in &marked {
+        let drawn: Vec<Drawn> = (1..=3)
+            .filter_map(|k| draw_finding(rule, span, k * 100_000))
+            .collect();
+        if drawn.len() < 3 {
+            failures.push(format!("{rule}: no generated finding"));
+            continue;
+        }
+        for l in layouts(rule, &drawn, &compile_regex(span).unwrap()) {
+            let ev = scan(DRAW_PATH, &l.content);
+            let locs: Vec<(u32, u32)> = ev
+                .iter()
+                .filter(|e| e.rule == *rule)
+                .flat_map(|e| e.locations.iter().map(|x| (x.line_start, x.line_end)))
+                .collect();
+            if locs.iter().any(|&(a, b)| a == 0 || a != b) {
+                failures.push(format!("{rule}, {}: a location is not one line", l.name));
+            }
+            for (i, s) in l.secrets.iter().enumerate() {
+                let n = line_number(&l.content, s.start);
+                if !locs.iter().any(|&(a, b)| a <= n && n <= b) {
+                    failures.push(format!("{rule}, {}: secret {i} not located", l.name));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    assert!(marked.len() >= 111, "{} rules tested", marked.len());
+}
+
 #[test]
 fn line_complete_rules() {
     let m = &fixture().meta;
     let flag = |r: &str| m[&format!("{NS}:{r}")].line_complete;
-    for r in ["aws_access_token", "github_pat", "slack_bot_token"] {
+    for r in [
+        "aws_access_token",
+        "github_pat",
+        "slack_bot_token",
+        "openai_api_key",
+        "stripe_access_token",
+    ] {
         assert!(flag(r), "{r}");
     }
     // Matches that can span lines, path rules, and binary key stores.
@@ -196,6 +459,7 @@ fn line_complete_rules() {
         "private_key",
         "kubernetes_secret_yaml",
         "generic_api_key",
+        "adafruit_api_key",
         "pkcs12_file",
         "der_key_file",
         "pkcs12_keystore",

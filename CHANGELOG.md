@@ -7,6 +7,7 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 ### Changed
 
 - Upgraded the YARA-X engine from 1.21.0 to 1.22.0, with `yara-x-macros` and `yara-x-parser` pinned to the same version. Detection results and scores are unchanged on the evaluation corpus. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.
+- The Claude Code hook offers partial reads for many more files. The gitleaks converter now marks a rule `line_complete` when nothing up to the end of its secret can match a line feed and at most one trailing byte can (gitleaks' trailing delimiter), instead of only when no part of the regex can match one: 111 of the 222 converted rules are marked, up from 59, including `openai_api_key`, `anthropic_api_key`, and `stripe_access_token`. Detection results and scores are unchanged. Every marked rule is checked with generated secrets on one line, on adjacent lines, with CRLF line endings, and at the end of a file (`cargo test -p riskgrep-core --test ruleset_secrets every_line_complete_rule_locates_every_secret`). The hand-written key-store and biometric rules were audited and stay unmarked.
 
 ### Added
 

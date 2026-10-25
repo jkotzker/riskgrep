@@ -571,30 +571,88 @@ fn parse_hir(owner: &str, src: &str) -> Result<Hir, String> {
 
 /// Whether `re` can match text containing a line feed: any literal or class
 /// that admits `\n` (`\s`, `[^x]`, `(?s:.)`, `[\s\S]`, `\x0a`) anywhere in
-/// it. A regex that cannot is "line-complete" once every match of it is
-/// located (see the `span` post-processor): each match lies on the lines its
-/// location names. Parsed as the scan engine compiles it (bytes, no
-/// Unicode).
+/// it. Parsed as the scan engine compiles it (bytes, no Unicode).
 pub fn can_match_newline(re: &str) -> Result<bool, String> {
-    fn walk(h: &Hir) -> bool {
-        use regex_syntax::hir::Class;
-        match h.kind() {
-            HirKind::Empty | HirKind::Look(_) => false,
-            HirKind::Literal(l) => l.0.contains(&b'\n'),
-            HirKind::Class(Class::Bytes(c)) => c
-                .ranges()
-                .iter()
-                .any(|r| r.start() <= b'\n' && b'\n' <= r.end()),
-            HirKind::Class(Class::Unicode(c)) => c
-                .ranges()
-                .iter()
-                .any(|r| r.start() <= '\n' && '\n' <= r.end()),
-            HirKind::Repetition(r) => r.max != Some(0) && walk(&r.sub),
-            HirKind::Capture(c) => walk(&c.sub),
-            HirKind::Concat(v) | HirKind::Alternation(v) => v.iter().any(walk),
-        }
+    Ok(admits_newline(&parse_hir("regex", re)?))
+}
+
+fn admits_newline(h: &Hir) -> bool {
+    use regex_syntax::hir::Class;
+    match h.kind() {
+        HirKind::Empty | HirKind::Look(_) => false,
+        HirKind::Literal(l) => l.0.contains(&b'\n'),
+        HirKind::Class(Class::Bytes(c)) => c
+            .ranges()
+            .iter()
+            .any(|r| r.start() <= b'\n' && b'\n' <= r.end()),
+        HirKind::Class(Class::Unicode(c)) => c
+            .ranges()
+            .iter()
+            .any(|r| r.start() <= '\n' && '\n' <= r.end()),
+        HirKind::Repetition(r) => r.max != Some(0) && admits_newline(&r.sub),
+        HirKind::Capture(c) => admits_newline(&c.sub),
+        HirKind::Concat(v) | HirKind::Alternation(v) => v.iter().any(admits_newline),
     }
-    Ok(walk(&parse_hir("regex", re)?))
+}
+
+/// Whether every match of `re` is confined to the line of its secret, so
+/// that the rule can be marked `line_complete` once every secret in a match
+/// window gets its own location (the `span` post-processor).
+///
+/// `secret_group` is the capture group holding the secret (0: the whole
+/// match); `None` is gitleaks' first non-empty group, which can be any of
+/// them. When the secret is one group inside a top-level element of the
+/// regex (a sequence), the part up to and including that element must not
+/// admit a line feed, and the part after it either must not admit one or must be one
+/// element whose every alternative that admits one is at most one byte long
+/// (gitleaks' trailing delimiter `(?:[\x60'"\s;]|\\[nr]|$)`). Otherwise no
+/// part of the regex may admit a line feed.
+///
+/// One trailing byte keeps the locations complete: a line feed can then only
+/// be the last byte of a match, which belongs to the line it ends, so the
+/// match and its secret stay on one line. The search for the next match
+/// resumes at the start of the following line, and since nothing before a
+/// secret can match a line feed, no later match needed the byte that was
+/// consumed; zero-width assertions such as `\b` still see it.
+pub fn line_complete(re: &str, secret_group: Option<usize>) -> Result<bool, String> {
+    let hir = parse_hir("regex", re)?;
+    if !admits_newline(&hir) {
+        return Ok(true);
+    }
+    let (Some(g), HirKind::Concat(parts)) = (secret_group.filter(|&g| g > 0), hir.kind()) else {
+        return Ok(false);
+    };
+    let Some(at) = parts
+        .iter()
+        .position(|p| find_capture(p, g as u32).is_some())
+    else {
+        return Ok(false);
+    };
+    let (head, tail) = parts.split_at(at + 1);
+    if head.iter().any(admits_newline) {
+        return Ok(false);
+    }
+    let wide: Vec<&Hir> = tail
+        .iter()
+        .filter(|p| p.properties().maximum_len() != Some(0))
+        .collect();
+    let short =
+        |h: &Hir| !admits_newline(h) || h.properties().maximum_len().is_some_and(|n| n <= 1);
+    Ok(match wide.as_slice() {
+        [] => true,
+        [one] => match unwrap_captures(one).kind() {
+            HirKind::Alternation(v) => v.iter().all(short),
+            _ => short(one),
+        },
+        _ => !tail.iter().any(admits_newline),
+    })
+}
+
+fn unwrap_captures(h: &Hir) -> &Hir {
+    match h.kind() {
+        HirKind::Capture(c) => unwrap_captures(&c.sub),
+        _ => h,
+    }
 }
 
 fn find_capture(h: &Hir, index: u32) -> Option<&Hir> {
@@ -648,6 +706,14 @@ impl SecretGroup {
         match self {
             SecretGroup::Index(g) => g.to_string(),
             SecretGroup::FirstNonEmpty(_) => "\"first_nonempty\"".into(),
+        }
+    }
+
+    /// The one group that holds the secret, if there is one.
+    fn index(self) -> Option<usize> {
+        match self {
+            SecretGroup::Index(g) => Some(g),
+            SecretGroup::FirstNonEmpty(_) => None,
         }
     }
 
@@ -890,6 +956,7 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
     let mut idents = BTreeSet::new();
     let mut classes: Vec<(Class, String)> = Vec::new();
     let mut defanged: Vec<String> = Vec::new();
+    let mut marked = 0;
     for r in &cfg.rules {
         let ident = identifier(&r.id)?;
         if ident == GLOBAL_PATH_RULE || !idents.insert(ident.clone()) {
@@ -1012,7 +1079,7 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
                 meta.push(format!("post = {}", yara_str(&post.join(","))));
                 meta.push(format!("span_regex = {}", yara_str(re)));
                 meta.push(format!("secret_group = {}", group.meta_value()));
-                if !can_match_newline(re).map_err(|e| format!("{}: {e}", r.id))? {
+                if line_complete(re, group.index()).map_err(|e| format!("{}: {e}", r.id))? {
                     meta.push("line_complete = true".into());
                 }
                 if let Some(e) = entropy {
@@ -1092,10 +1159,13 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
         if emitted != r.regex {
             defanged.push(r.id.clone());
         }
+        if block.contains("\n    line_complete = true\n") {
+            marked += 1;
+        }
         yar.push_str(&block);
     }
 
-    let upstream = upstream_md(tag, &sha, &cfg, &classes, &defanged, &skipped);
+    let upstream = upstream_md(tag, &sha, &cfg, marked, &classes, &defanged, &skipped);
     Ok(Generated {
         yar,
         stopwords,
@@ -1107,6 +1177,7 @@ fn upstream_md(
     tag: &str,
     sha: &str,
     cfg: &Config,
+    marked: usize,
     classes: &[(Class, String)],
     defanged: &[String],
     skipped: &[(String, String)],
@@ -1141,14 +1212,15 @@ fn upstream_md(
          - The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The original regex is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret: `secretGroup` when the rule sets it, otherwise as gitleaks does, the first capture group that matched non-empty, else the whole match (`secret_group = \"first_nonempty\"`; `secret_group = 1` when group 1 always takes part and is never empty, which selects the same text).\n\
          - In `$re` only, a repetition of 4 or more over a class of at most 11 characters with no letters (`[0-9]{{11}}`, `\\d{{15,16}}`) is written `(?:RUN|$^)`. YARA-X otherwise searches for every 4-digit string in place of the rule's literal prefix, which made digit-dense text scan as slowly as 0.8 MB/s. Without multi-line mode `$^` matches only an empty input and no converted regex matches the empty string, so `$re` matches exactly what it did. A regex that sets multi-line mode (an inline flag group containing `m`) is not rewritten, because `$^` also matches between lines there; the rule is listed under Not translated.\n\
          - The `span` post-processor reports every non-overlapping match of `span_regex` inside each `$re` match, so a match that runs over several secrets yields one location per secret.\n\
-         - `line_complete = true` is set when no part of `span_regex` can match a line feed: any literal or class that admits one rejects the rule, including `\\s`, `\\W`, `\\D`, negated classes, `[\\s\\S]`, dot-all `.`, `[[:space:]]`, and `\\n` or `\\x0a`. Each match of such a rule then lies on the lines of its location, and the Claude Code hook offers partial reads only for files whose findings all come from such rules.\n\
+         - `line_complete = true` is set when every match of `span_regex` stays on the line of its secret. When the secret is one capture group (`secret_group` 1 or more) inside a top-level element of the regex, nothing up to the end of that element may match a line feed, and the rest of the regex either cannot match one or is one element whose every alternative that can is at most one byte long, such as gitleaks' trailing delimiter `(?:[\\x60'\"\\s;]|\\\\[nr]|$)`. Otherwise (`secret_group = 0` or `\"first_nonempty\"`) no part of `span_regex` may match a line feed. Any literal or class that admits one counts, including `\\s`, `\\W`, `\\D`, negated classes, `[\\s\\S]`, dot-all `.`, `[[:space:]]`, and `\\n` or `\\x0a`. A line feed can then only be the last byte of a match, which belongs to the line it ends; the search for the next match resumes at the start of the following line, and since nothing before a secret can match a line feed, no later match needs that byte. With one location per secret (above), the locations cover every secret, each on one line, and the Claude Code hook offers partial reads only for files whose findings all come from such rules. {marked} of the {} rules are marked; `cargo test -p riskgrep-core --test ruleset_secrets every_line_complete_rule_locates_every_secret` checks each of them with generated secrets on one line, on adjacent lines, with CRLF line endings, and at the end of a file without a final line feed.\n\
          - Keywords are `nocase` literals `$kw0..n`; the rule needs one of them and `$re`.\n\
          - `entropy` becomes the `entropy` post-processor on the secret. gitleaks drops a secret whose entropy is at most the threshold; the post-processor drops one below it.\n\
          - Allowlist stopwords become `stopwords/secrets_core_<rule>.txt` (rule and global stopwords) or `stopwords/secrets_core_global.txt` (global only).\n\
          - Allowlist regexes that target the secret become one `allow_regex` alternation (rule and global regexes).\n\
          - Allowlist paths become `not path matches` conditions; the global ones are the private rule `{GLOBAL_PATH_RULE}`.\n\
          - A rule `path` becomes a `path matches` condition; a rule with only a path yields one evidence item.\n\
-         - A regex that would match its own rule text has its last literal letter or digit wrapped in a one-character class (`abc` becomes `ab[c]`), in both `$re` and `span_regex`. It matches the same secrets, and the shipped ruleset does not report itself."
+         - A regex that would match its own rule text has its last literal letter or digit wrapped in a one-character class (`abc` becomes `ab[c]`), in both `$re` and `span_regex`. It matches the same secrets, and the shipped ruleset does not report itself.",
+        cfg.rules.len()
     )
     .unwrap();
     if defanged.is_empty() {
