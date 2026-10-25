@@ -10,7 +10,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const YARA_X_VERSION: &str = "1.21.0";
+const YARA_X_VERSION: &str = "1.22.0";
 
 pub struct Bundle {
     pub rules: yara_x::Rules,
