@@ -1086,22 +1086,47 @@ fn malformed_mcp_entry_is_a_configuration_error() {
     );
 }
 
+/// A user entry of kind `walk`: no built-in tool is one.
+const WALK_CONFIG: &str =
+    "[claude_code.mcp_tools.\"mcp__t__search\"]\npaths = [\"path\"]\nkind = \"walk\"\n";
+
 #[test]
 fn mcp_walk_scans_files_under_the_directory() {
     let e = Env::new();
+    e.user_config(WALK_CONFIG);
     e.write("a/emb.safetensors", &embedding());
     e.write("a/clean.txt", b"nothing here\n");
     e.write("b/clean.txt", b"nothing here\n");
-    let tool = "mcp__desktop-commander__start_search";
-    let (d, reason) = e
-        .run(tool, json!({ "path": e.dir().join("a"), "pattern": "x" }))
-        .decision();
+    let tool = "mcp__t__search";
+    let (d, reason) = e.run(tool, json!({ "path": e.dir().join("a") })).decision();
     assert_eq!(d, "deny");
     assert!(
         reason.contains("emb.safetensors scored biometric"),
         "{reason}"
     );
-    e.run(tool, json!({ "path": "b", "pattern": "x" })).silent();
+    e.run(tool, json!({ "path": "b" })).silent();
+}
+
+#[test]
+fn desktop_commander_search_is_judged_by_names() {
+    let e = Env::new();
+    e.write("a/emb.safetensors", &embedding());
+    e.write("a/config.env", aws_file().as_bytes());
+    e.write(&format!("k/{KEY_NAME}"), b"x");
+    for tool in [
+        "mcp__desktop-commander__start_search",
+        "mcp__plugin_desktop-commander_desktop-commander__start_search",
+    ] {
+        for search_type in ["files", "content"] {
+            let input =
+                |path: &str| json!({ "path": path, "pattern": "x", "searchType": search_type });
+            // Content is not scanned, whatever the search type.
+            e.run(tool, input("a")).silent();
+            let (d, reason) = e.run(tool, input("k")).decision();
+            assert_eq!(d, "ask", "{tool} {search_type}");
+            assert!(reason.contains("pkcs12_file"), "{reason}");
+        }
+    }
 }
 
 /// A name the path rules flag at secret 90 (`pkcs12_file`): `ask` by
@@ -1230,9 +1255,8 @@ fn mcp_walk_does_not_follow_links_below_the_root() {
         e.dir().join("proj/emb-link"),
     )
     .unwrap();
-    let tool = "mcp__desktop-commander__start_search";
-    e.run(tool, json!({ "path": "proj", "pattern": "x" }))
-        .silent();
+    e.user_config(WALK_CONFIG);
+    e.run("mcp__t__search", json!({ "path": "proj" })).silent();
 }
 
 #[test]

@@ -382,7 +382,7 @@ fn mcp_tool_defaults_cover_common_servers() {
         cc.mcp_tool("mcp__desktop-commander__start_search")
             .unwrap()
             .kind,
-        McpKind::Walk
+        McpKind::Names
     );
     let list = cc.mcp_tool("mcp__filesystem__list_directory").unwrap();
     assert_eq!((list.kind, list.max_depth), (McpKind::Names, Some(1)));

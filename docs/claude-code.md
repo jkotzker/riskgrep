@@ -42,9 +42,9 @@ Time budget: one budget (`claude_code.time_budget_ms`, default 2000, capped at o
 | Server | `read` | `walk` | `names` | `none` |
 | --- | --- | --- | --- | --- |
 | filesystem | `read_file`, `read_text_file`, `read_media_file` (`path`), `read_multiple_files` (`paths`) | | `list_directory`, `list_directory_with_sizes` (`path`, depth 1), `directory_tree`, `search_files` (`path`) | `get_file_info`, `list_allowed_directories`, `write_file`, `edit_file`, `create_directory`, `move_file` |
-| Desktop Commander | `read_file` (`path`), `read_multiple_files` (`paths`) | `start_search` (`path`) | `list_directory` (`path`) | `get_file_info` |
+| Desktop Commander | `read_file` (`path`), `read_multiple_files` (`paths`) | | `start_search`, `list_directory` (`path`) | `get_file_info` |
 
-Desktop Commander's `start_search` is treated as a content search whatever its `searchType`, so a file-name search under a directory holding a flagged file is judged by that file's content, as `Grep` is. Desktop Commander's other tools (its shell and process tools among them) have no entry and are unresolved.
+Desktop Commander's `start_search` is judged by the file names under its `path`, whatever its `searchType`: the content of the files a content search reads is not scanned, because scanning every file under the search path would not fit the hook's time budget on large trees. No built-in entry has kind `walk`; it is available for user entries. Desktop Commander's other tools (its shell and process tools among them) have no entry and are unresolved.
 
 To add a server, or a server registered under another name, add an entry to the user config (`~/.config/riskgrep/config.toml`) per tool, keyed by the full tool name as Claude Code shows it:
 

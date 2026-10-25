@@ -604,7 +604,7 @@ const DESKTOP_COMMANDER_SERVERS: [&str; 2] = [
 ///   `path`, `read_multiple_files` takes `paths`, `start_search` and
 ///   `list_directory` take `path`).
 fn default_mcp_tools() -> BTreeMap<String, McpTool> {
-    use McpKind::{Names, None as Reads, Read, Walk};
+    use McpKind::{Names, None as Reads, Read};
     let t = |kind, field: &str, max_depth| McpTool {
         paths: if field.is_empty() {
             Vec::new()
@@ -633,7 +633,9 @@ fn default_mcp_tools() -> BTreeMap<String, McpTool> {
     let desktop_commander = [
         ("read_file", t(Read, "path", None)),
         ("read_multiple_files", t(Read, "paths", None)),
-        ("start_search", t(Walk, "path", None)),
+        // A content search too is judged by the names it may reveal:
+        // scanning every file under its path does not fit the time budget.
+        ("start_search", t(Names, "path", None)),
         ("list_directory", t(Names, "path", None)),
         ("get_file_info", t(Reads, "", None)),
     ];
