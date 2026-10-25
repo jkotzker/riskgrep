@@ -1159,8 +1159,11 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
         if emitted != r.regex {
             defanged.push(r.id.clone());
         }
-        if block.contains("\n    line_complete = true\n") {
-            marked += 1;
+        // The same check `render` made on the regex it finally emitted.
+        if let Some(re) = &emitted {
+            if line_complete(re, group.index()).map_err(|e| format!("{}: {e}", r.id))? {
+                marked += 1;
+            }
         }
         yar.push_str(&block);
     }

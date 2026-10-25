@@ -6,6 +6,7 @@ use regex::bytes::{Regex, RegexBuilder};
 use regex_syntax::hir::{Class, Hir, HirKind};
 use riskgrep_core::bundle::{compile_uncached, Bundle};
 use riskgrep_core::engine::Engine;
+use riskgrep_core::lines::LineIndex;
 use riskgrep_core::meta::{PostSpec, RuleMeta};
 use riskgrep_core::model::{Category, Evidence};
 use riskgrep_core::post::compile_regex;
@@ -243,24 +244,34 @@ struct Drawn {
 
 const DRAW_PATH: &str = "config/settings.txt";
 
+/// The `$kw` keywords of `rule` in the `secrets_core` sources, or `None`
+/// when no source defines the rule.
+fn rule_keywords(rule: &str) -> Option<Vec<String>> {
+    let header = format!("rule {rule} {{");
+    secrets_ruleset().sources.iter().find_map(|(_, src)| {
+        let mut lines = src.lines().skip_while(|l| l.trim() != header);
+        lines.next()?;
+        Some(
+            lines
+                .take_while(|l| *l != "}")
+                .filter_map(|l| l.trim().strip_prefix("$kw"))
+                .filter_map(|l| l.split('"').nth(1))
+                .map(str::to_string)
+                .collect(),
+        )
+    })
+}
+
 /// The first lines of every generated file: a comment naming the rule's
 /// keywords (a rule needs one of them anywhere in the file, and a regex
 /// such as `hooks.slack.com` does not force its keyword's dots).
-fn draw_head(rule: &str) -> Vec<u8> {
-    let src = include_str!("../rulesets/secrets-core/gitleaks.yar");
-    let start = src.find(&format!("\nrule {rule} {{")).unwrap();
-    let block = &src[start..start + src[start..].find("\n}").unwrap()];
-    let kws: Vec<&str> = block
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("$kw"))
-        .filter_map(|l| l.split('"').nth(1))
-        .collect();
-    format!("fn main() {{\n    // {}\n", kws.join(" ")).into_bytes()
+fn draw_head(keywords: &[String]) -> Vec<u8> {
+    format!("fn main() {{\n    // {}\n", keywords.join(" ")).into_bytes()
 }
 
 /// A line matching `span_regex` that the rule reports alone (keywords,
 /// entropy, stopwords, and allowlists all pass), from seeds `base..`.
-fn draw_finding(rule: &str, span: &str, base: u64) -> Option<Drawn> {
+fn draw_finding(rule: &str, span: &str, head: &[u8], base: u64) -> Option<Drawn> {
     let hir = regex_syntax::ParserBuilder::new()
         .unicode(false)
         .utf8(false)
@@ -275,7 +286,7 @@ fn draw_finding(rule: &str, span: &str, base: u64) -> Option<Drawn> {
         if line.iter().any(|b| !(0x20..0x7f).contains(b)) || !re.is_match(&line) {
             continue;
         }
-        let mut content = draw_head(rule);
+        let mut content = head.to_vec();
         let at = content.len();
         content.extend_from_slice(&line);
         content.extend_from_slice(b"\n}\n");
@@ -297,11 +308,6 @@ fn draw_finding(rule: &str, span: &str, base: u64) -> Option<Drawn> {
     None
 }
 
-/// 1-based line of byte `offset`, as `riskgrep_core::lines` counts them.
-fn line_number(content: &[u8], offset: usize) -> u32 {
-    1 + content[..offset].iter().filter(|&&b| b == b'\n').count() as u32
-}
-
 /// For one layout of drawn findings: `content` and where each secret is.
 /// Secrets keep their offsets within their lines, so lines cut after the
 /// secret need no adjustment.
@@ -315,12 +321,11 @@ struct Layout {
 /// findings on one line, on adjacent lines, and with CRLF line endings,
 /// each also with the lines ending right after their secrets, and the last
 /// one at the end of the file without a final line feed.
-fn layouts(rule: &str, d: &[Drawn], span: &Regex) -> Vec<Layout> {
-    let head = draw_head(rule);
+fn layouts(head: &[u8], d: &[Drawn], span: &Regex) -> Vec<Layout> {
     let tail: &[u8] = b"\n    println!(\"{}\", width);\n}\n";
     let build =
         |name, sep: &[u8], end: &[u8], lines: Vec<&[u8]>, secrets: Vec<&std::ops::Range<usize>>| {
-            let mut content = head.clone();
+            let mut content = head.to_vec();
             let mut at = Vec::new();
             for (i, (l, s)) in lines.iter().zip(&secrets).enumerate() {
                 if i > 0 {
@@ -412,14 +417,19 @@ fn every_line_complete_rule_locates_every_secret() {
     }
     marked.sort();
     for (rule, span) in &marked {
+        let Some(keywords) = rule_keywords(rule) else {
+            failures.push(format!("{rule}: no source defines the rule"));
+            continue;
+        };
+        let head = draw_head(&keywords);
         let drawn: Vec<Drawn> = (1..=3)
-            .filter_map(|k| draw_finding(rule, span, k * 100_000))
+            .filter_map(|k| draw_finding(rule, span, &head, k * 100_000))
             .collect();
         if drawn.len() < 3 {
             failures.push(format!("{rule}: no generated finding"));
             continue;
         }
-        for l in layouts(rule, &drawn, &compile_regex(span).unwrap()) {
+        for l in layouts(&head, &drawn, &compile_regex(span).unwrap()) {
             let ev = scan(DRAW_PATH, &l.content);
             let locs: Vec<(u32, u32)> = ev
                 .iter()
@@ -429,8 +439,9 @@ fn every_line_complete_rule_locates_every_secret() {
             if locs.iter().any(|&(a, b)| a == 0 || a != b) {
                 failures.push(format!("{rule}, {}: a location is not one line", l.name));
             }
+            let index = LineIndex::new(&l.content);
             for (i, s) in l.secrets.iter().enumerate() {
-                let n = line_number(&l.content, s.start);
+                let (n, _) = index.lines(s.start as u64, s.end as u64);
                 if !locs.iter().any(|&(a, b)| a <= n && n <= b) {
                     failures.push(format!("{rule}, {}: secret {i} not located", l.name));
                 }
