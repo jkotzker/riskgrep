@@ -8,6 +8,7 @@ pub mod meta;
 pub mod model;
 pub mod paths;
 pub mod post;
+pub mod prune;
 pub mod repo;
 pub mod ruleset;
 mod ruleset_digest;

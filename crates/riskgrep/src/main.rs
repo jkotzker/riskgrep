@@ -11,6 +11,7 @@ macro_rules! outln {
     };
 }
 
+mod cache;
 mod cli;
 mod git;
 mod rules;
@@ -80,9 +81,17 @@ fn main() {
 
 fn run(args: cli::Cli) -> Result<i32, CliError> {
     match args.command {
-        cli::Command::Scan(a) => scan::scan(a),
+        cli::Command::Scan(a) => {
+            let uses_cache = !a.no_cache;
+            let code = scan::scan(a)?;
+            if uses_cache {
+                cache::auto_prune();
+            }
+            Ok(code)
+        }
         cli::Command::Baseline(a) => scan::baseline(a),
         cli::Command::Git { command } => git::run(command),
         cli::Command::Rules { command } => rules::run(command),
+        cli::Command::Cache { command } => cache::run(command),
     }
 }

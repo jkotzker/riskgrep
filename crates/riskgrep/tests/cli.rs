@@ -634,3 +634,203 @@ fn rules_test_passes() {
                 )),
         );
 }
+
+// ---- cache pruning ----
+
+mod pruning {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    const DAY: u64 = 86_400;
+
+    /// A fresh HOME with a cache that holds the current bundle and one
+    /// evidence row, made by scanning `key.txt` once.
+    struct Home {
+        home: tempfile::TempDir,
+        work: tempfile::TempDir,
+    }
+
+    impl Home {
+        fn new() -> Home {
+            let (work, _, _) = key_dir();
+            Home {
+                home: tempfile::tempdir().unwrap(),
+                work,
+            }
+        }
+
+        fn run(&self, args: &[&str]) -> Command {
+            let mut c = riskgrep_in(self.home.path(), self.work.path());
+            c.args(args);
+            c
+        }
+
+        fn cache(&self) -> PathBuf {
+            riskgrep_core::paths::cache_dir_for(
+                Some(self.home.path().into()),
+                Some(self.home.path().join(".cache").into()),
+                cfg!(target_os = "macos"),
+            )
+            .unwrap()
+        }
+
+        fn marker(&self) -> PathBuf {
+            self.cache().join(riskgrep_core::prune::MARKER)
+        }
+
+        fn scan(&self) {
+            self.run(&["scan", "key.txt"]).assert().success();
+        }
+
+        /// A bundle of a rule set nothing uses, last written `age_days` ago.
+        fn stale_bundle(&self, age_days: u64) -> PathBuf {
+            set_age(
+                self.cache()
+                    .join("bundles")
+                    .join(format!("{}.yxb", "7".repeat(64))),
+                age_days,
+            )
+        }
+
+        fn current_bundle(&self) -> PathBuf {
+            let dir = self.cache().join("bundles");
+            fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| {
+                    p.extension().is_some_and(|e| e == "yxb")
+                        && !p.to_string_lossy().contains(&"7".repeat(64))
+                })
+                .expect("a current bundle")
+        }
+    }
+
+    fn set_age(p: PathBuf, age_days: u64) -> PathBuf {
+        if !p.exists() {
+            fs::write(&p, vec![0u8; 2048]).unwrap();
+        }
+        fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(age_days * DAY))
+            .unwrap();
+        p
+    }
+
+    fn stdout(c: &mut Command) -> String {
+        String::from_utf8(c.assert().success().get_output().stdout.clone()).unwrap()
+    }
+
+    #[test]
+    fn dry_run_reports_and_removes_nothing_then_prune_removes() {
+        let h = Home::new();
+        h.scan();
+        let stale = h.stale_bundle(60);
+        let out = stdout(&mut h.run(&["cache", "prune", "--dry-run"]));
+        assert!(out.contains("Dry run: nothing was removed"), "{out}");
+        assert!(
+            out.contains("compiled bundles: 1 (2.0 kB); 1 kept"),
+            "{out}"
+        );
+        assert!(stale.exists());
+        let out = stdout(&mut h.run(&["cache", "prune"]));
+        assert!(out.contains("Removed:"), "{out}");
+        assert!(
+            out.contains("compiled bundles: 1 (2.0 kB); 1 kept"),
+            "{out}"
+        );
+        assert!(!stale.exists());
+    }
+
+    #[test]
+    fn the_bundle_in_use_is_kept_however_old() {
+        let h = Home::new();
+        h.scan();
+        let current = set_age(h.current_bundle(), 400);
+        let out = stdout(&mut h.run(&["cache", "prune"]));
+        assert!(out.contains("compiled bundles: 0 (0 B); 1 kept"), "{out}");
+        assert!(current.exists());
+    }
+
+    #[test]
+    fn a_missing_cache_has_nothing_to_prune() {
+        let h = Home::new();
+        let out = stdout(&mut h.run(&["cache", "prune"]));
+        assert!(out.contains("nothing to prune"), "{out}");
+        assert!(!h.cache().exists());
+    }
+
+    #[test]
+    fn limits_must_be_positive() {
+        let h = Home::new();
+        h.run(&["cache", "prune", "--max-age-days", "0"])
+            .assert()
+            .code(3);
+        h.run(&["cache", "prune", "--max-size-mb", "0"])
+            .assert()
+            .code(3);
+    }
+
+    #[test]
+    fn scan_prunes_at_most_once_a_day() {
+        let h = Home::new();
+        h.scan();
+        assert!(h.marker().exists(), "the first scan records a prune");
+        let stale = h.stale_bundle(60);
+        h.scan();
+        assert!(stale.exists(), "a second scan the same day does not prune");
+        let before = fs::metadata(h.marker()).unwrap().modified().unwrap();
+        // The marker is two days old: the next scan prunes and renews it.
+        set_age(h.marker(), 2);
+        h.scan();
+        assert!(!stale.exists());
+        let after = fs::metadata(h.marker()).unwrap().modified().unwrap();
+        assert!(after > before);
+        assert!(h.current_bundle().exists());
+    }
+
+    #[test]
+    fn scan_output_and_status_are_unchanged_by_pruning() {
+        let h = Home::new();
+        let first = h
+            .run(&["scan", "key.txt", "--fail-at", "secret=50"])
+            .assert()
+            .code(1)
+            .get_output()
+            .clone();
+        h.stale_bundle(60);
+        set_age(h.marker(), 2);
+        let second = h
+            .run(&["scan", "key.txt", "--fail-at", "secret=50"])
+            .assert()
+            .code(1)
+            .get_output()
+            .clone();
+        assert_eq!(first.stdout, second.stdout);
+        assert_eq!(second.stderr, b"");
+    }
+
+    #[test]
+    fn scan_without_the_cache_never_prunes() {
+        let h = Home::new();
+        h.scan();
+        let stale = h.stale_bundle(60);
+        set_age(h.marker(), 2);
+        h.run(&["scan", "key.txt", "--no-cache"]).assert().success();
+        assert!(stale.exists());
+    }
+
+    #[test]
+    fn the_user_configuration_sets_the_limits() {
+        let h = Home::new();
+        h.scan();
+        let conf = h.home.path().join(".config/riskgrep");
+        fs::create_dir_all(&conf).unwrap();
+        fs::write(conf.join("config.toml"), "[cache]\nmax_age_days = 1\n").unwrap();
+        let stale = h.stale_bundle(2);
+        set_age(h.marker(), 2);
+        h.scan();
+        assert!(!stale.exists(), "2 days is over a 1 day limit");
+    }
+}

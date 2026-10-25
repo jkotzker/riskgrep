@@ -6,10 +6,12 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ### Changed
 
+- The evidence database records the time each row was written, which pruning needs, so its schema version is 3. The first run after upgrading discards the existing rows and the cache refills as files are scanned.
 - Upgraded the YARA-X engine from 1.21.0 to 1.22.0, with `yara-x-macros` and `yara-x-parser` pinned to the same version. Detection results and scores are unchanged on the evaluation corpus. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.
 
 ### Added
 
+- Cache pruning. The evidence cache and the compiled rule bundles no longer grow without limit. `riskgrep cache prune` removes compiled bundles of rule sets that are not in use once they are older than `[cache] max_age_days`, the evidence rows written under bundles that are gone, rows older than the same age, rows for files that no longer exist, and the oldest rows when the database is over `[cache] max_size_mb`. `--dry-run` reports what would go and the sizes without changing anything. `riskgrep scan` and the git pre-commit hook run the same prune at most once a day, after their own work; the Claude Code hook never prunes. A pruned row or bundle only means a rescan or a recompile, never a different score. The `[cache]` section is read from the user configuration only.
 - GitHub releases link to each crate's version on crates.io and attach the published `.crate` files with a `SHA256SUMS` file. The Release workflow adds them after publishing, once each file's checksum matches the crates.io index.
 
 ## [1.0.1] – 2026-10-23

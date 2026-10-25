@@ -28,7 +28,11 @@ const SYMLINK_MODE: &[u8] = b"120000";
 
 pub fn run(cmd: GitCommand) -> Result<i32, CliError> {
     match cmd {
-        GitCommand::PreCommit(a) => pre_commit(a),
+        GitCommand::PreCommit(a) => {
+            let code = pre_commit(a)?;
+            crate::cache::auto_prune();
+            Ok(code)
+        }
         GitCommand::InstallHook(a) => install_hook(a),
     }
 }

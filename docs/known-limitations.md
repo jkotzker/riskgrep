@@ -146,6 +146,24 @@ Setting `on_unresolved = "ask"` or `"deny"` under `[claude_code]` prompts or blo
 
 ### The cache is trusted when it passes ownership and mode checks
 
-- **Not covered:** a same-user process writing cache rows or replacing the rules bundle (see the threat model above), and orphaned temporary bundle files left by a killed writer.
+- **Not covered:** a same-user process writing cache rows or replacing the rules bundle (see the threat model above).
 - **Why:** cache integrity beyond ownership and mode checks is outside the threat model.
-- **How it shows up:** forged evidence rows are believed; temporary files stay in the cache directory until removed by hand.
+- **How it shows up:** forged evidence rows are believed.
+
+### Pruning removes by age and size, not by use
+
+- **Not covered:** keeping a row or a bundle because it was used recently. Rows are aged by the time they were written, because a cache hit never writes (the Claude Code hook's cached-read path stays read-only), and a bundle is aged by its files' modification time. After the maximum age (`[cache] max_age_days`, default 30) a row that is still in use is removed and rewritten by the next scan of that file, and a bundle that is not the default selection of the command line or of the Claude Code hook (for example one made by `--ruleset`) is compiled again once.
+- **Why:** recording a last-used time on every hit adds a database write to a path with a 5 ms p95 target.
+- **How it shows up:** a periodic rescan of files that did not change, and one recompile of a bundle used only with non-default options. The scores do not change.
+
+### Pruning runs only from the command line and the git hook
+
+- **Not covered:** a machine that uses RiskGrep only through the Claude Code hook never prunes: the hook does not, so the cache keeps growing until `riskgrep scan`, `riskgrep git pre-commit`, or `riskgrep cache prune` runs.
+- **Why:** the hook's time budget is short and its cached-read path stays read-only.
+- **How it shows up:** the cache directory grows with the number of files the hook has seen and with each rules change.
+
+### Pruning shrinks the database with VACUUM, which blocks other writers
+
+- **Not covered:** a scan that writes to the database while a prune is running. A prune that removes rows rewrites the database file (`VACUUM`) and holds the write lock while it does.
+- **Why:** deleted rows leave free pages in the file, and only `VACUUM` returns them to the file system.
+- **How it shows up:** a concurrent scan waits up to two seconds for the lock and then runs uncached for that run, with one `cache bypassed` line on standard error.
