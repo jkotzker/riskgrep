@@ -392,6 +392,28 @@ fn read_range_between_two_provider_tokens() {
 }
 
 #[test]
+fn read_range_around_tokens_that_end_their_lines() {
+    // These rules' trailing delimiter can be the line feed that ends the
+    // line; each token is still located on its own line.
+    let e = Env::new();
+    let openai = format!("id = {}", synth::fake_secret("openai_key", 3));
+    let stripe = format!("other = {}", synth::fake_secret("stripe_key", 4));
+    let f = e.write(
+        "keys.env",
+        numbered(30, &[(10, openai), (11, stripe)]).as_bytes(),
+    );
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "deny");
+    assert!(reason.contains("openai_api_key"), "{reason}");
+    assert!(reason.contains("stripe_access_token"), "{reason}");
+    assert!(reason.ends_with(SAFE_PATHS), "{reason}");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(8)).0, "none");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(9)).0, "deny");
+    assert_eq!(read_decision(&e, &f, Some(13), None).0, "none");
+    assert_eq!(read_decision(&e, &f, Some(12), None).0, "deny");
+}
+
+#[test]
 fn read_range_between_two_secrets() {
     let e = Env::new();
     let f = e.write(

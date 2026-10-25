@@ -37,4 +37,5 @@ getrandom = "0.4"
 blake3 = "1.8.7"
 
 [dev-dependencies]
+regex-syntax = "0.8"
 tempfile = "3.27.0"

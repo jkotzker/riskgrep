@@ -127,6 +127,7 @@ rule adobe_client_secret {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(p8e-(?i)[a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -225,6 +226,7 @@ rule alibaba_access_key_id {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(LTAI(?i)[a-z0-9]{20})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -265,6 +267,7 @@ rule anthropic_admin_api_key {
     post = "span,stopwords,allow_regex"
     span_regex = "\\b(sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
@@ -284,6 +287,7 @@ rule anthropic_api_key {
     post = "span,stopwords,allow_regex"
     span_regex = "\\b(sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
@@ -406,6 +410,7 @@ rule authress_service_client_access_key {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b((?:sc|ext|scauth|authress)_(?i)[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?-i:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -454,6 +459,7 @@ rule aws_amazon_bedrock_api_key_long_lived {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -712,6 +718,7 @@ rule cloudflare_origin_ca_key {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -889,6 +896,7 @@ rule databricks_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(dapi[a-f0-9]{32}(?:-\\d)?)(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -947,6 +955,7 @@ rule digitalocean_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(doo_v1_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -967,6 +976,7 @@ rule digitalocean_pat {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(dop_v1_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -987,6 +997,7 @@ rule digitalocean_refresh_token {
     post = "span,stopwords,allow_regex"
     span_regex = "(?i)\\b(dor_v1_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
   strings:
@@ -1266,6 +1277,7 @@ rule facebook_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "(?i)\\b(\\d{15,16}(\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -1286,6 +1298,7 @@ rule facebook_page_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(EAA[MC](?i)[a-z0-9]{100,})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 4
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -1485,6 +1498,7 @@ rule flyio_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b((?:fo1_[\\w-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 4
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -1566,6 +1580,7 @@ rule gcp_api_key {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(AIza[\\w-]{35})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 4
     stopwords = "secrets_core_global"
     allow_regex = "(?:AIzaSyabcdefghijklmnopqrstuvwxyz1234567)|(?:AIzaSyAnLA7NfeLquW1tJFpx_eQCxoX-oo6YyIs)|(?:AIzaSyCkEhVjf3pduRDt6d1yKOMitrUEke8agEM)|(?:AIzaSyDMAScliyLx7F0NPDEJi1QmyCgHIAODrlU)|(?:AIzaSyD3asb-2pEZVqMkmL6M9N6nHZRR_znhrh0)|(?:AIzayDNSXIbFmlXbIE6mCzDLQAqITYefhixbX4A)|(?:AIzaSyAdOS2zB6NCsk1pCdZ4-P6GBdi_UUPwX7c)|(?:AIzaSyASWm6HmTMdYWpgMnjRBjxcQ9CKctWmLd4)|(?:AIzaSyANUvH9H9BsUccjsu2pCmEkOPjjaXeDQgY)|(?:AIzaSyA5_iVawFQ8ABuTZNUdcwERLJv_a_p4wtM)|(?:AIzaSyA4UrcGxgwQFTfaI3no3t7Lt1sjmdnP5sQ)|(?:AIzaSyDSb51JiIcB6OJpwwMicseKRhhrOq1cS7g)|(?:AIzaSyBF2RrAIm4a0mO64EShQfqfd2AFnzAvvuU)|(?:AIzaSyBcE-OOIbhjyR83gm4r2MFCu4MJmprNXsw)|(?:AIzaSyB8qGxt4ec15vitgn44duC5ucxaOi4FmqE)|(?:AIzaSyA8vmApnrHNFE0bApF4hoZ11srVL_n0nvY)|(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2077,6 +2092,7 @@ rule grafana_api_key {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "(?i)\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2097,6 +2113,7 @@ rule grafana_cloud_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "(?i)\\b(glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2117,6 +2134,7 @@ rule grafana_service_account_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "(?i)\\b(glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2220,6 +2238,7 @@ rule heroku_api_key_v2 {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b((HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 4
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2259,6 +2278,7 @@ rule huggingface_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(hf_(?i:[a-z]{34}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2279,6 +2299,7 @@ rule huggingface_organization_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(api_org_(?i:[a-z]{34}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2299,6 +2320,7 @@ rule infracost_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(ico-[a-zA-Z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2338,6 +2360,7 @@ rule intra42_client_secret {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(s-s4t2(?:ud|af)-(?i)[abcdef0123456789]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2404,6 +2427,7 @@ rule jwt {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2818,6 +2842,7 @@ rule maxmind_license_key {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b([A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 4
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -2999,6 +3024,7 @@ rule notion_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 4
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3019,6 +3045,7 @@ rule npm_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "(?i)\\b(npm_[a-z0-9]{36})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3081,6 +3108,7 @@ rule octopus_deploy_api_key {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(API-[A-Z0-9]{26})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3121,6 +3149,7 @@ rule openai_api_key {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3141,6 +3170,7 @@ rule openshift_user_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(sha256~[\\w-]{43})(?:[^\\w-]|\\z)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3.5
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3161,6 +3191,7 @@ rule perplexity_api_key {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(pplx-[a-zA-Z0-9]{48})(?:[\\x60'\"\\s;]|\\\\[nr]|$|\\b)"
     secret_group = 1
+    line_complete = true
     min_entropy = 4
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3252,6 +3283,7 @@ rule planetscale_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(pscale_tkn_(?i)[\\w=\\.-]{32,64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3272,6 +3304,7 @@ rule planetscale_oauth_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(pscale_oauth_[\\w=\\.-]{32,64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3292,6 +3325,7 @@ rule planetscale_password {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "(?i)\\b(pscale_pw_(?i)[\\w=\\.-]{32,64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3312,6 +3346,7 @@ rule postman_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(PMAK-(?i)[a-f0-9]{24}\\-[a-f0-9]{34})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3332,6 +3367,7 @@ rule prefect_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(pnu_[a-zA-Z0-9]{36})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3393,6 +3429,7 @@ rule pulumi_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(pul-[a-f0-9]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3453,6 +3490,7 @@ rule readme_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(rdme_[a-z0-9]{70})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3473,6 +3511,7 @@ rule rubygems_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(rubygems_[a-f0-9]{48})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3493,6 +3532,7 @@ rule scalingo_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(tk-us-[\\w-]{48})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3551,6 +3591,7 @@ rule sendgrid_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(SG\\.(?i)[a-z0-9=_\\-\\.]{66})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3571,6 +3612,7 @@ rule sendinblue_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(xkeysib-[a-f0-9]{64}\\-(?i)[a-z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3631,6 +3673,7 @@ rule sentry_user_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(sntryu_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3.5
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3651,6 +3694,7 @@ rule settlemint_application_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3671,6 +3715,7 @@ rule settlemint_personal_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3691,6 +3736,7 @@ rule settlemint_service_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -3711,6 +3757,7 @@ rule shippo_api_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -4086,6 +4133,7 @@ rule sourcegraph_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "(?i)\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -4107,6 +4155,7 @@ rule square_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b((?:EAAA|sq0atp-)[\\w-]{22,60})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -4147,6 +4196,7 @@ rule stripe_access_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b((?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 2
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -4404,6 +4454,7 @@ rule vault_batch_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b(hvb\\.[\\w-]{138,300})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 4
     stopwords = "secrets_core_global"
     allow_regex = "(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
@@ -4424,6 +4475,7 @@ rule vault_service_token {
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "\\b((?:hvs\\.[\\w-]{90,120}|s\\.(?i:[a-z0-9]{24})))(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1
+    line_complete = true
     min_entropy = 3.5
     stopwords = "secrets_core_global"
     allow_regex = "(?:s\\.[A-Za-z]{24})|(?:(?i)^true|false|null$)|(?:^(?i:a+|b+|c+|d+|e+|f+|g+|h+|i+|j+|k+|l+|m+|n+|o+|p+|q+|r+|s+|t+|u+|v+|w+|x+|y+|z+|\\*+|\\.+)$)|(?:^\\$(?:\\d+|\\{\\d+})$)|(?:^\\$(?:[A-Z_]+|[a-z_]+)$)|(?:^\\$\\{(?:[A-Z_]+|[a-z_]+)}$)|(?:^\\{\\{[ \\t]*[\\w ().|]+[ \\t]*}}$)|(?:^\\$\\{\\{[ \\t]*(?:(?:env|github|secrets|vars)(?:\\.[A-Za-z]\\w+)+[\\w \"'&./=|]*)[ \\t]*}}$)|(?:^%(?:[A-Z_]+|[a-z_]+)%$)|(?:^%[+\\-# 0]?[bcdeEfFgGoOpqstTUvxX]$)|(?:^\\{\\d{0,2}}$)|(?:^@(?:[A-Z_]+|[a-z_]+)@$)|(?:^/Users/(?i)[a-z0-9]+/[\\w .-/]+$)|(?:^/(?:bin|etc|home|opt|tmp|usr|var)/[\\w ./-]+$)"
