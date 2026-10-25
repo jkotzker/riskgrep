@@ -435,6 +435,41 @@ impl RiskGrep {
         self.report(targets)
     }
 
+    /// Score file names without their content: each name is scanned as an
+    /// empty text file of that name, so only rules that need no content
+    /// (path rules) can match. One scan engine serves every name; never
+    /// cached.
+    pub fn scan_names(&mut self, names: &[String]) -> Report {
+        self.load_engine();
+        let engine = match &self.engine {
+            EngineState::Loaded(e) => Some(&**e),
+            _ => None,
+        };
+        let mut scanner = engine.map(|e| new_scanner(e, &self.cfg));
+        let mut raws = Vec::with_capacity(names.len());
+        for name in names {
+            let raw = match classify::slice_for_scan(b"", &FileClass::Text, &self.cfg.limits) {
+                Err(e) => Raw::status(name.clone(), unreadable(&e)),
+                Ok(content) => self.finish(
+                    engine.zip(scanner.as_mut()),
+                    Pending {
+                        target: name.clone(),
+                        rel: name.clone(),
+                        path_ext: name.clone(),
+                        ekey: String::new(),
+                        content,
+                        text: true,
+                        hash: None,
+                        stat: None,
+                    },
+                ),
+            };
+            raws.push(raw);
+        }
+        let targets = self.finalize(raws);
+        self.report(targets)
+    }
+
     /// Scan one git blob. `name` is its repository-relative path; results are
     /// cached by `blob_id`. With `only_lines`, evidence located outside those
     /// lines is dropped before scoring, unless the blob was only partly read

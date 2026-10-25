@@ -9,10 +9,10 @@
 //! here must ask, which only a JSON decision does reliably.
 
 use riskgrep_claude::bash::bash_targets_within;
-use riskgrep_claude::decide::{decide, error_decision, Decision};
+use riskgrep_claude::decide::{decide, decide_names, error_decision, Decision};
 use riskgrep_claude::input::{self, HookInput};
 use riskgrep_claude::resolve;
-use riskgrep_core::config::{self, Action, Config, Mode, Overrides};
+use riskgrep_core::config::{self, Action, Config, McpKind, Mode, Overrides};
 use riskgrep_core::{Report, RiskGrep};
 use serde_json::json;
 use std::io::{Read, Write};
@@ -31,6 +31,10 @@ const MAX_BUDGET: Duration = Duration::from_secs(3600);
 const BASH_SHARE: u32 = 4;
 const MIN_BASH_BUDGET: Duration = Duration::from_millis(50);
 const WORKER_STACK: usize = 16 << 20;
+/// The `print-config` matcher. A matcher with characters other than
+/// letters, digits, `_`, `-`, spaces, `,`, and `|` is an unanchored
+/// regular expression in Claude Code, so it is anchored here.
+const MATCHER: &str = "^(Read|NotebookRead|Grep|Glob|Bash|mcp__.*)$";
 
 fn main() {
     let start = Instant::now();
@@ -76,7 +80,7 @@ fn print_config() {
     );
     let cfg = json!({
         "hooks": {"PreToolUse": [{
-            "matcher": "Read|NotebookRead|Grep|Bash",
+            "matcher": MATCHER,
             "hooks": [{"type": "command", "command": "riskgrep-claude", "timeout": 5}],
         }]},
         "permissions": {"deny": [
@@ -104,11 +108,11 @@ fn run(start: Instant) -> Decision {
             .map_or(Action::Ask, |c| c.claude_code.on_error);
         return error_decision(on_error, "RiskGrep: unreadable hook input");
     };
-    if !matches!(
+    let gated = matches!(
         hook.tool_name.as_str(),
-        "Read" | "NotebookRead" | "Grep" | "Bash"
-    ) || hook.event.as_deref().is_some_and(|e| e != "PreToolUse")
-    {
+        "Read" | "NotebookRead" | "Grep" | "Glob" | "Bash"
+    ) || hook.tool_name.starts_with("mcp__");
+    if !gated || hook.event.as_deref().is_some_and(|e| e != "PreToolUse") {
         return Decision::NoOpinion;
     }
     let cwd = hook
@@ -163,6 +167,14 @@ enum Job {
         glob: Option<String>,
         kind: Option<String>,
     },
+    /// The files under these paths (an MCP content search).
+    Walk(Vec<PathBuf>),
+    /// The names under these paths, judged without their content.
+    Names {
+        roots: Vec<PathBuf>,
+        glob: Option<String>,
+        max_depth: Option<usize>,
+    },
 }
 
 fn work(
@@ -197,11 +209,33 @@ fn work(
             glob: hook.str_field("glob").map(str::to_string),
             kind: hook.str_field("type").map(str::to_string),
         },
+        "Glob" => {
+            let home = std::env::var("HOME").ok();
+            let Some((root, pattern)) = resolve::glob_root(hook, cwd, home.as_deref()) else {
+                return Decision::NoOpinion;
+            };
+            Job::Names {
+                roots: vec![root],
+                glob: Some(pattern),
+                max_depth: None,
+            }
+        }
+        name if name.starts_with("mcp__") => match mcp_job(hook, &cc, cwd) {
+            Ok(Some(job)) => job,
+            Ok(None) => return Decision::NoOpinion,
+            Err(()) => {
+                return error_decision(
+                    cc.on_unresolved,
+                    &format!("RiskGrep: could not determine the files {name} reads"),
+                )
+            }
+        },
         _ => match resolve::read_target(hook, cwd) {
             Some(p) => Job::Files(vec![p]),
             None => return Decision::NoOpinion,
         },
     };
+    let names = matches!(job, Job::Names { .. });
     let (tx, rx) = mpsc::channel();
     let spawned = {
         let hook = hook.clone();
@@ -217,6 +251,7 @@ fn work(
         return error_decision(cc.on_error, "RiskGrep: could not start scan");
     }
     match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(Ok(report)) if names => decide_names(&report, &cc),
         Ok(Ok(report)) => decide(&report, unresolved, &cc, input::requested_lines(hook)),
         Ok(Err(reason)) => error_decision(cc.on_error, &format!("RiskGrep: {reason}")),
         Err(RecvTimeoutError::Timeout) => {
@@ -226,6 +261,67 @@ fn work(
             error_decision(cc.on_error, "RiskGrep: scan failed unexpectedly")
         }
     }
+}
+
+/// The job for an MCP call: `Ok(None)` when it reads nothing, `Err` when
+/// the tool has no `claude_code.mcp_tools` entry or its path fields cannot
+/// be read.
+fn mcp_job(hook: &HookInput, cc: &config::ClaudeCodeConfig, cwd: &Path) -> Result<Option<Job>, ()> {
+    let tool = cc.mcp_tool(&hook.tool_name).ok_or(())?;
+    if tool.kind == McpKind::None {
+        return Ok(None);
+    }
+    let home = std::env::var("HOME").ok();
+    let paths = resolve::mcp_paths(hook, &tool.paths, cwd, home.as_deref()).ok_or(())?;
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(match tool.kind {
+        McpKind::Read => {
+            let files = resolve::existing_files(paths);
+            if files.is_empty() {
+                return Ok(None);
+            }
+            Job::Files(files)
+        }
+        McpKind::Walk => Job::Walk(paths),
+        McpKind::Names | McpKind::None => Job::Names {
+            roots: paths,
+            glob: None,
+            max_depth: tool.max_depth,
+        },
+    }))
+}
+
+/// Scores each name with the path rules alone (`RiskGrep::scan_names`). Names are
+/// relative to `cwd`, as the scanner names files it reads.
+fn scan_names(
+    cfg: Config,
+    root: Option<&Path>,
+    cwd: &Path,
+    names: &[PathBuf],
+) -> Result<Report, String> {
+    if names.is_empty() {
+        return Ok(Report::from_targets("", "", Vec::new()));
+    }
+    let cfg = Config {
+        no_cache: true,
+        ..cfg
+    };
+    let mut rg =
+        RiskGrep::new(cfg, root).map_err(|e| format!("could not start scanner ({})", e.0))?;
+    let names: Vec<String> = names
+        .iter()
+        .map(|p| {
+            p.strip_prefix(cwd)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let report = rg.scan_names(&names);
+    std::mem::forget(rg);
+    Ok(report)
 }
 
 fn scan(
@@ -248,6 +344,21 @@ fn scan(
                 );
             }
             g.files
+        }
+        Job::Walk(roots) => {
+            let w = resolve::walk_entries(&roots, None, None, true, limit);
+            if w.limit_hit {
+                limit_hit = Some(roots[0].display().to_string());
+            }
+            w.entries
+        }
+        Job::Names {
+            roots,
+            glob,
+            max_depth,
+        } => {
+            let w = resolve::walk_entries(&roots, glob.as_deref(), max_depth, false, limit);
+            return scan_names(cfg, root, cwd, &w.entries);
         }
     };
     let mut report = if files.is_empty() {

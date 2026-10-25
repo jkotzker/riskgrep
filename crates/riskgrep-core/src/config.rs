@@ -50,6 +50,9 @@ pub struct ClaudeCodeConfig {
     pub on_skipped: Action,
     pub on_unresolved: Action,
     pub time_budget_ms: u64,
+    /// MCP tools whose input names files, keyed by tool name (see
+    /// [`McpTool`]).
+    pub mcp_tools: BTreeMap<String, McpTool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,6 +131,7 @@ impl Default for Config {
                 on_skipped: Action::Allow,
                 on_unresolved: Action::Allow,
                 time_budget_ms: 2000,
+                mcp_tools: default_mcp_tools(),
             },
             git: GitConfig {
                 block_at: BTreeMap::from([(cat("secret"), 80.0), (cat("biometric"), 75.0)]),
@@ -162,6 +166,7 @@ struct ClaudeLayer {
     on_skipped: Option<Action>,
     on_unresolved: Option<Action>,
     time_budget_ms: Option<u64>,
+    mcp_tools: Option<BTreeMap<String, McpTool>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -300,6 +305,9 @@ impl Config {
             if let Some(v) = x.time_budget_ms {
                 self.claude_code.time_budget_ms = v;
             }
+            if let Some(v) = x.mcp_tools {
+                merge_map(&mut self.claude_code.mcp_tools, v);
+            }
         }
         if let Some(x) = l.git {
             if let Some(v) = x.block_at {
@@ -413,6 +421,7 @@ pub fn load(
         }
     }
     cfg.ignore = IgnoreRules::new(spec).map_err(|e| ConfigError(e.0))?;
+    validate_mcp_tools(&cfg.claude_code.mcp_tools)?;
     if let Some(c) = cli_overrides.categories {
         cfg.categories = Some(c);
     }
@@ -433,4 +442,170 @@ pub fn baseline_path(mode: Mode, repo_root: Option<&Path>, cfg: &Config) -> Opti
         return None;
     }
     Some(root.join(BASELINE_FILE))
+}
+
+// ---- Claude Code: MCP tools that read files ----
+
+/// What an MCP tool does with the paths its input names.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpKind {
+    /// Reads each named file; a directory or missing path reads nothing.
+    #[default]
+    Read,
+    /// Reads every file under each named directory (a content search).
+    Walk,
+    /// Reveals the names of each named path and, for a directory, of the
+    /// entries under it; judged by the path rules alone, as `Glob` is.
+    Names,
+    /// Reads no file; never gets a decision.
+    None,
+}
+
+/// A `[claude_code.mcp_tools."<tool name>"]` entry: the `tool_input`
+/// fields that hold a path or a list of paths, and what the tool does
+/// with them.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpTool {
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub kind: McpKind,
+    /// For `names`: how deep under a directory names are revealed (1: its
+    /// entries only). Unbounded when absent.
+    pub max_depth: Option<usize>,
+}
+
+impl ClaudeCodeConfig {
+    /// The entry for MCP tool `name`: an exact key, else the first key
+    /// (in key order) with `*` wildcards that matches it.
+    pub fn mcp_tool(&self, name: &str) -> Option<&McpTool> {
+        if !name.starts_with("mcp__") {
+            return None;
+        }
+        self.mcp_tools.get(name).or_else(|| {
+            self.mcp_tools
+                .iter()
+                .find(|(k, _)| k.contains('*') && wildcard(k, name))
+                .map(|(_, v)| v)
+        })
+    }
+}
+
+/// Whether `name` matches `pat`, where `*` stands for any run of
+/// characters and every other character for itself.
+fn wildcard(pat: &str, name: &str) -> bool {
+    let mut parts = pat.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = name.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        return rest.is_empty();
+    };
+    for p in middle {
+        match rest.find(p) {
+            Some(i) => rest = &rest[i + p.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
+fn validate_mcp_tools(tools: &BTreeMap<String, McpTool>) -> Result<(), ConfigError> {
+    for (name, t) in tools {
+        if !name.starts_with("mcp__") {
+            return Err(ConfigError(format!(
+                "claude_code.mcp_tools: `{name}` is not an MCP tool name (mcp__<server>__<tool>)"
+            )));
+        }
+        if t.kind != McpKind::None && (t.paths.is_empty() || t.paths.iter().any(String::is_empty)) {
+            return Err(ConfigError(format!(
+                "claude_code.mcp_tools: `{name}` needs `paths`, the input fields that hold paths"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Server names the built-in entries are registered under: the usual
+/// `mcpServers` keys, and Desktop Commander as the Claude Code plugin names
+/// it.
+const FILESYSTEM_SERVERS: [&str; 1] = ["filesystem"];
+const DESKTOP_COMMANDER_SERVERS: [&str; 2] = [
+    "desktop-commander",
+    "plugin_desktop-commander_desktop-commander",
+];
+
+/// Built-in entries. Field names are from each server's published input
+/// schemas:
+/// - the official filesystem server, `src/filesystem/server.ts` in
+///   github.com/modelcontextprotocol/servers at commit 6d536b2e (2026-10);
+/// - Desktop Commander, the input schemas its plugin server reported to
+///   Claude Code on 2026-10-25 (`read_file` and `get_file_info` take
+///   `path`, `read_multiple_files` takes `paths`, `start_search` and
+///   `list_directory` take `path`).
+fn default_mcp_tools() -> BTreeMap<String, McpTool> {
+    use McpKind::{Names, None as Reads, Read, Walk};
+    let t = |kind, field: &str, max_depth| McpTool {
+        paths: if field.is_empty() {
+            Vec::new()
+        } else {
+            vec![field.to_string()]
+        },
+        kind,
+        max_depth,
+    };
+    let filesystem = [
+        ("read_file", t(Read, "path", None)),
+        ("read_text_file", t(Read, "path", None)),
+        ("read_media_file", t(Read, "path", None)),
+        ("read_multiple_files", t(Read, "paths", None)),
+        ("list_directory", t(Names, "path", Some(1))),
+        ("list_directory_with_sizes", t(Names, "path", Some(1))),
+        ("directory_tree", t(Names, "path", None)),
+        ("search_files", t(Names, "path", None)),
+        ("get_file_info", t(Reads, "", None)),
+        ("list_allowed_directories", t(Reads, "", None)),
+        ("write_file", t(Reads, "", None)),
+        ("edit_file", t(Reads, "", None)),
+        ("create_directory", t(Reads, "", None)),
+        ("move_file", t(Reads, "", None)),
+    ];
+    let desktop_commander = [
+        ("read_file", t(Read, "path", None)),
+        ("read_multiple_files", t(Read, "paths", None)),
+        ("start_search", t(Walk, "path", None)),
+        ("list_directory", t(Names, "path", None)),
+        ("get_file_info", t(Reads, "", None)),
+    ];
+    let mut out = BTreeMap::new();
+    for (servers, tools) in [
+        (&FILESYSTEM_SERVERS[..], &filesystem[..]),
+        (&DESKTOP_COMMANDER_SERVERS[..], &desktop_commander[..]),
+    ] {
+        for server in servers {
+            for (tool, entry) in tools {
+                out.insert(format!("mcp__{server}__{tool}"), entry.clone());
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod mcp_tests {
+    use super::wildcard;
+
+    #[test]
+    fn wildcard_matches_whole_name() {
+        assert!(wildcard("mcp__*__read", "mcp__a__read"));
+        assert!(wildcard("mcp__*", "mcp__"));
+        assert!(wildcard("mcp__a*b*c", "mcp__abc"));
+        assert!(!wildcard("mcp__*__read", "mcp__a__read_more"));
+        assert!(!wildcard("mcp__a", "mcp__ab"));
+        assert!(!wildcard("mcp__*ab*ba", "mcp__aba"));
+    }
 }

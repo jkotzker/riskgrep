@@ -1,6 +1,6 @@
 # Claude Code hook
 
-`riskgrep-claude` is a Claude Code `PreToolUse` hook. For `Read`, `NotebookRead`, `Grep`, and `Bash` calls it finds the files the call would read, scans them, and asks or denies when a category score reaches its threshold. Any other tool, and any call that crosses no threshold, produces no output and exit status 0. The hook never emits `allow`.
+`riskgrep-claude` is a Claude Code `PreToolUse` hook. For `Read`, `NotebookRead`, `Grep`, `Bash`, and MCP tool calls it finds the files the call would read, scans them, and asks or denies when a category score reaches its threshold. For `Glob`, and for MCP tools that list directories, it judges the file names the call would reveal by the path rules alone. Any other tool, and any call that crosses no threshold, produces no output and exit status 0. The hook never emits `allow`.
 
 ## Threat model
 
@@ -8,7 +8,7 @@ v1 protects against accidental exposure by a cooperative agent, which is what ha
 
 ## Installation
 
-`riskgrep-claude print-config` prints a `settings.json` fragment (a hook entry and a permission rule) on stdout and a one-line instruction on stderr. Merge it into `~/.claude/settings.json` by hand. The hook entry uses matcher `Read|NotebookRead|Grep|Bash` and timeout 5 (seconds).
+`riskgrep-claude print-config` prints a `settings.json` fragment (a hook entry and a permission rule) on stdout and a one-line instruction on stderr. Merge it into `~/.claude/settings.json` by hand. The hook entry uses matcher `^(Read|NotebookRead|Grep|Glob|Bash|mcp__.*)$` and timeout 5 (seconds). Claude Code evaluates a matcher holding characters other than letters, digits, `_`, `-`, spaces, `,`, and `|` as an unanchored JavaScript regular expression, so the matcher is anchored to keep it to these tool names; `mcp__.*` sends every MCP tool call to the hook. An installation made with the earlier matcher `Read|NotebookRead|Grep|Bash` gates neither `Glob` nor MCP tools until the matcher is updated.
 
 ## Behaviour
 
@@ -17,6 +17,9 @@ v1 protects against accidental exposure by a cooperative agent, which is what ha
 | `Read`, `NotebookRead` | `tool_input.file_path` (`notebook_path` first for `NotebookRead`). A path that does not exist, or that names a directory, is ignored: the tool fails on it and reads nothing. |
 | `Grep` | `tool_input.path` (default: the hook input's `cwd`), trimmed, with a leading `~` or `~/` expanded from `HOME` (Claude Code passes `Grep` paths unexpanded). A file is scanned directly. A directory is walked the way Claude Code 2.1.301 runs ripgrep for `Grep`: hidden files included, the directories `.git`, `.svn`, `.hg`, `.bzr`, `.jj`, and `.sl` excluded, `.gitignore` honoured, symlinks not followed, filtered by `type` and by `glob`. A `glob` is split as Claude Code splits it: on whitespace, then each piece on commas unless the piece contains both `{` and `}` (`*.md,*.env` and `*.md *.env` are two globs, `*.{md,env}` is one). The walk stops at `limits.walk_files`; the remainder is treated as an error (`on_error`, reason `walk limit`). |
 | `Bash` | The files `bash_targets_within` names for `tool_input.command` run in `cwd` (see `src/bash.rs`). `$HOME`, `${HOME}`, and a leading `~` or `~/` are expanded from the hook's `HOME`, and `$PWD` and `${PWD}` from `cwd`, unless the same command line assigns, exports, or unsets that variable, changes directory, or runs code in the current shell (`eval`, `source`). `on_unresolved` applies when the command may read files that cannot be named; its default is `allow`, so such commands get no decision unless the configuration says otherwise. |
+
+| `Glob` | No content is read. The names under `tool_input.path` (default `cwd`; `~` expanded as for `Grep`) that match `tool_input.pattern` are walked (hidden entries included, ignore files not honoured, the version-control directories above skipped, symlinks not followed, at most `limits.walk_files` names), and each name, relative to `cwd`, is scanned as an empty file of that name, so only rules that need no content match: `pkcs12_file` (`.p12`, `.pfx`; secret 90, which asks by default) and `path_biometric_name` (`voiceprint`, `embedding`, `speaker`, `enroll`, `faceprint`; biometric 30, below the default thresholds). An absolute `pattern` is searched from the directory before its first segment with a glob character. A name that cannot be scanned gets no decision, nor does a walk that reaches the limit, and the reason offers no reading guidance: `RiskGrep: file name <path> scored <category> <score> (<rule ids>). Threshold: <ask|deny> at <n>.` |
+| MCP tools (`mcp__<server>__<tool>`) | The paths in the input fields that `claude_code.mcp_tools` names for the tool (see [MCP tools](#mcp-tools)), each a string or a list of strings, resolved like `Read` paths: relative to `cwd`, with a leading `~` or `~/` expanded. Kind `read` scans each path that is a file, `walk` scans the files under each path (walked as for `Glob`, at most `limits.walk_files`; the remainder is treated as an error, as for `Grep`), `names` judges the names of each path and the entries under it as `Glob` does (to `max_depth` levels when set), and `none` reads nothing. A tool with no entry, or whose fields are all absent or hold anything but a string or a list of strings, is unresolved: `on_unresolved` applies (default `allow`, so no decision) with reason `RiskGrep: could not determine the files <tool> reads`. |
 
 Decision rules (`src/decide.rs`): every finding is graded `ask` or `deny`: a category score at or above its `ask` or `deny` threshold (defaults: `biometric` ask at 50 and deny at 75, `secret` ask at 80 and deny at 95), an unscanned target (`on_error`, default `ask`), a skipped target (`on_skipped`, default `allow`), or an unresolved Bash command (`on_unresolved`, default `allow`). The highest grade over all findings wins, so a lower-scoring `ask` finding does not hide an unscanned target whose `on_error` is `deny`. Only findings of the winning grade appear in the reason. `block` is treated as `deny`; `allow` produces no output.
 
@@ -31,6 +34,30 @@ Failures apply `on_error` (default `ask`) and the exit status is always 0. How C
 Repository: the root is the nearest ancestor of the hook input's `cwd` (itself included) that holds a `.git` entry, a directory or a file (worktrees and submodules). The walk (shared with the command line, `riskgrep_core::repo`) stops at `/`, before the parent of `$HOME`, and at `GIT_CEILING_DIRECTORIES`; a `cwd` inside a `.git` directory has no repository, and a root (or its `.git`) not owned by the effective user is not a root. Git is not spawned. A repository's `.riskgrep.toml` is read only if the user config lists the repository in `trusted_repos`.
 
 Time budget: one budget (`claude_code.time_budget_ms`, default 2000, capped at one hour) covers the whole call. Bash analysis gets at most 25% of it (at least 50 ms). The scan runs on a worker thread; the main thread waits for the remainder.
+
+## MCP tools
+
+`claude_code.mcp_tools` maps an MCP tool name to the input fields that hold its paths and to what the tool does with them. Built-in entries cover the official filesystem server (field names from `src/filesystem/server.ts` in `modelcontextprotocol/servers`) under the server name `filesystem`, and Desktop Commander (field names from the input schemas its server reports) under `desktop-commander` and under its plugin name `plugin_desktop-commander_desktop-commander`:
+
+| Server | `read` | `walk` | `names` | `none` |
+| --- | --- | --- | --- | --- |
+| filesystem | `read_file`, `read_text_file`, `read_media_file` (`path`), `read_multiple_files` (`paths`) | | `list_directory`, `list_directory_with_sizes` (`path`, depth 1), `directory_tree`, `search_files` (`path`) | `get_file_info`, `list_allowed_directories`, `write_file`, `edit_file`, `create_directory`, `move_file` |
+| Desktop Commander | `read_file` (`path`), `read_multiple_files` (`paths`) | `start_search` (`path`) | `list_directory` (`path`) | `get_file_info` |
+
+Desktop Commander's `start_search` is treated as a content search whatever its `searchType`, so a file-name search under a directory holding a flagged file is judged by that file's content, as `Grep` is. Desktop Commander's other tools (its shell and process tools among them) have no entry and are unresolved.
+
+To add a server, or a server registered under another name, add an entry to the user config (`~/.config/riskgrep/config.toml`) per tool, keyed by the full tool name as Claude Code shows it:
+
+```toml
+[claude_code.mcp_tools."mcp__notes__open_note"]
+paths = ["file", "files"]   # input fields holding a path or a list of paths
+kind = "read"               # read (default), walk, names, or none
+
+[claude_code.mcp_tools."mcp__notes__*"]
+kind = "none"               # every other tool of this server reads no file
+```
+
+A user entry replaces a built-in entry of the same name. A key may contain `*`, which matches any run of characters; an exact key wins over a pattern, and among patterns the first in key order that matches wins. `max_depth` limits a `names` entry to that many levels below each path (1: a directory's own entries). A key that does not start with `mcp__`, a `read`, `walk`, or `names` entry without `paths`, and an unknown kind or field are configuration errors. Set `on_unresolved = "ask"` to be asked about every MCP tool without an entry. Covered by `cargo test -p riskgrep-core --test config mcp_` and `cargo test -p riskgrep-claude --test hook` (`mcp_*`, `glob_*`, `unmapped_mcp_tool_follows_on_unresolved`, `user_added_mcp_entry_is_used`).
 
 ## Partial reads
 
@@ -63,8 +90,10 @@ The first scan after install (or after any rules change) compiles the rules bund
 
 ## Verified against Claude Code 2.1.301
 
-Documentation read through context7 (`/websites/code_claude`, pages `code.claude.com/docs/en/hooks`, `permissions`, `tools-reference`):
+Documentation read through context7 (`/websites/code_claude`, pages `code.claude.com/docs/en/hooks`, `hooks-guide`, `permissions`, `tools-reference`, and the Agent SDK tool reference):
 
+- Matchers: `*`, empty, or omitted match everything; a value of only letters, digits, `_`, `-`, spaces, `,`, and `|` is an exact name or a list of exact names; any other value is an unanchored JavaScript regular expression (`^Notebook`, `mcp__memory__.*`). MCP tools are named `mcp__<server>__<tool>`, and tools of a plugin-bundled server use a scoped server segment (`mcp__plugin_<plugin>_<server>__<tool>`).
+- `Glob` input: `pattern` (required) and `path` (optional, default the working directory). Its result lists at most 100 file paths (`truncated` marks a cut list).
 - PreToolUse input carries `tool_name`, `tool_input`, and `hook_event_name`; the decision goes in `hookSpecificOutput` with `hookEventName: "PreToolUse"`, `permissionDecision`, and `permissionDecisionReason`.
 - `permissionDecision` values: `allow`, `deny`, `ask`, `defer`. For `ask` the reason is shown in the permission prompt; in a `-p` run no one can answer, the call is denied, and Claude reads the reason in the tool result. For `deny` the reason is shown to Claude. Precedence across hooks: `deny` > `defer` > `ask` > `allow`.
 - `NotebookRead` does not appear in the current tool documentation. Notebooks are read with `Read` (`file_path`, `.ipynb`). The only notebook tool documented with a path field is `NotebookEdit` (`notebook_path`). The hook accepts `notebook_path` and falls back to `file_path` for `NotebookRead`, which keeps the matcher valid if the tool exists, and `Read` covers notebooks.

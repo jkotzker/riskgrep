@@ -171,9 +171,28 @@ pub fn decide(
     cfg: &ClaudeCodeConfig,
     lines: Option<Lines>,
 ) -> Decision {
+    decide_targets(report, unresolved, cfg, lines, false)
+}
+
+/// The decision for a report of file names scanned without content
+/// (`Glob`, and MCP tools of kind `names`): only category scores count, a
+/// name that could not be scanned gets no decision, and the reason offers
+/// no reading guidance.
+pub fn decide_names(report: &Report, cfg: &ClaudeCodeConfig) -> Decision {
+    decide_targets(report, false, cfg, None, true)
+}
+
+fn decide_targets(
+    report: &Report,
+    unresolved: bool,
+    cfg: &ClaudeCodeConfig,
+    lines: Option<Lines>,
+    names: bool,
+) -> Decision {
     let mut items: Vec<Item> = Vec::new();
     for (ti, t) in report.targets.iter().enumerate() {
         let not_scanned = match &t.status {
+            _ if names => None,
             TargetStatus::Unscanned { reason } => severity(cfg.on_error).map(|s| (s, reason)),
             TargetStatus::Skipped { reason } => severity(cfg.on_skipped).map(|s| (s, reason)),
             _ => None,
@@ -227,18 +246,19 @@ pub fn decide(
                 .map_or_else(String::new, |r| format!(" on {}", describe(r)));
             let level = if sev == Sev::Deny { "deny" } else { "ask" };
             let score = round1(raw);
+            let what = if names { "file name " } else { "" };
             items.push(Item {
                 sev,
                 score,
                 text: format!(
-                    "RiskGrep: {} scored {} {:.1} ({}){located}. Threshold: {level} at {}.",
+                    "RiskGrep: {what}{} scored {} {:.1} ({}){located}. Threshold: {level} at {}.",
                     t.target,
                     cat.0,
                     score,
                     named,
                     num(at)
                 ),
-                finding: Some((ti, partial)),
+                finding: (!names).then_some((ti, partial)),
             });
         }
     }
