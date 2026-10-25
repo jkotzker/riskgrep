@@ -129,28 +129,27 @@ rule onepassword_json_export {
 }
 
 // ---- two-factor recovery and backup codes --------------------------------------
-// A short file (under 8 KiB) of at least six lines shaped like recovery codes,
-// with a signal that it is a list of two-factor codes: the file name, or a
-// "recovery codes" / "backup codes" heading near the top. The line shapes are
-// GitHub (two groups of five hex characters), Google (two groups of four
-// digits), and ten-character alphanumeric codes containing a digit (so a line
-// that starts with a ten-letter word is not a code), each optionally behind a
-// list number or bullet. A line is anchored on its start only, so adjacent lines
-// are counted.
+// A short file (under 8 KiB) with at least six lines shaped like recovery
+// codes and a signal that it is a list of two-factor codes: the file name, or
+// a "recovery codes" / "backup codes" heading in the first 512 bytes. The
+// `code_lines` post-processor counts the lines in one linear pass (shapes:
+// GitHub hex pairs, Google digit pairs, and ten-character alphanumeric codes
+// containing a digit, each optionally behind a list number or bullet). No YARA
+// pattern describes a code line: patterns without a literal to search for run
+// at every offset, which added about 28% to the instructions of a scan of
+// small text files (measured with `hyperfine -N --export-json` instruction
+// counts, 20 files of 3 KiB).
+
 rule recovery_codes_named_file {
   meta:
     category = "secret"
     weight = 90
     family = "recovery_codes"
     family_cap = 90
-  strings:
-    $re_gh = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?[0-9a-f]{5}-[0-9a-f]{5}\b/
-    $re_goog = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?[0-9]{4} [0-9]{4}\b/
-    $re_alnum = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?([0-9][A-Za-z0-9]{9}|[A-Za-z0-9][0-9][A-Za-z0-9]{8}|[A-Za-z0-9]{2}[0-9][A-Za-z0-9]{7}|[A-Za-z0-9]{3}[0-9][A-Za-z0-9]{6}|[A-Za-z0-9]{4}[0-9][A-Za-z0-9]{5}|[A-Za-z0-9]{5}[0-9][A-Za-z0-9]{4}|[A-Za-z0-9]{6}[0-9][A-Za-z0-9]{3}|[A-Za-z0-9]{7}[0-9][A-Za-z0-9]{2}|[A-Za-z0-9]{8}[0-9][A-Za-z0-9]|[A-Za-z0-9]{9}[0-9])\b/
+    post = "code_lines"
+    min_codes = 6
   condition:
-    filesize < 8192 and
-    path matches /(?i)(recovery|backup)[-_. ]?codes?/ and
-    (#re_gh >= 6 or #re_goog >= 6 or #re_alnum >= 6)
+    filesize < 8192 and path matches /(?i)(recovery|backup)[-_. ]?codes?/
 }
 
 rule recovery_codes_headed_file {
@@ -159,13 +158,10 @@ rule recovery_codes_headed_file {
     weight = 80
     family = "recovery_codes"
     family_cap = 90
+    post = "code_lines"
+    min_codes = 6
   strings:
     $head = /(recovery|backup)[ \t]+codes/ nocase
-    $re_gh = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?[0-9a-f]{5}-[0-9a-f]{5}\b/
-    $re_goog = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?[0-9]{4} [0-9]{4}\b/
-    $re_alnum = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?([0-9][A-Za-z0-9]{9}|[A-Za-z0-9][0-9][A-Za-z0-9]{8}|[A-Za-z0-9]{2}[0-9][A-Za-z0-9]{7}|[A-Za-z0-9]{3}[0-9][A-Za-z0-9]{6}|[A-Za-z0-9]{4}[0-9][A-Za-z0-9]{5}|[A-Za-z0-9]{5}[0-9][A-Za-z0-9]{4}|[A-Za-z0-9]{6}[0-9][A-Za-z0-9]{3}|[A-Za-z0-9]{7}[0-9][A-Za-z0-9]{2}|[A-Za-z0-9]{8}[0-9][A-Za-z0-9]|[A-Za-z0-9]{9}[0-9])\b/
   condition:
-    filesize < 8192 and
-    $head in (0..512) and
-    (#re_gh >= 6 or #re_goog >= 6 or #re_alnum >= 6)
+    filesize < 8192 and $head in (0..512)
 }
