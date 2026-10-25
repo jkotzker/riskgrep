@@ -942,3 +942,35 @@ fn print_config_outputs_settings_block() {
         .unwrap()
         .contains("settings.json"));
 }
+
+#[test]
+fn read_range_in_a_utf16_file() {
+    // UTF-16 text is transcoded for the rules; its flagged lines are lines
+    // of the file, so a partial read around them works as for UTF-8.
+    let e = Env::new();
+    let text = numbered(30, &[(10, aws_line(17))]).replace('\n', "\r\n");
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let f = e.write("export.reg", &bytes);
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "deny");
+    assert!(reason.contains(") on line 10."), "{reason}");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(8)).0, "none");
+    assert_eq!(read_decision(&e, &f, Some(1), Some(9)).0, "deny");
+    assert_eq!(read_decision(&e, &f, Some(12), None).0, "none");
+}
+
+#[test]
+fn no_partial_read_for_utf16_be_text() {
+    // Claude Code reads UTF-16 BE as bytes and splits lines at 0x0A bytes,
+    // which a code unit other than LF can hold, so its lines are not used.
+    let e = Env::new();
+    let text = numbered(30, &[(10, aws_line(19))]);
+    let mut bytes = vec![0xFE, 0xFF];
+    bytes.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
+    let f = e.write("export.txt", &bytes);
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "deny");
+    assert!(!reason.contains(" on line"), "{reason}");
+    assert_eq!(read_decision(&e, &f, Some(20), Some(5)).0, "deny");
+}

@@ -55,6 +55,8 @@ Header conditions that read integers (`uint32(0)`, `uint32(4)`) must guard again
 
 Regexes are compiled without Unicode, so use `(?i)` for ASCII case folding; YARA-X regexes have no lookaround.
 
+UTF-16 and UTF-32 text reaches the rules transcoded to UTF-8, without its byte-order mark, so text patterns need no `wide` modifier, and `filesize` and offsets in conditions refer to the transcoded text. Evidence locations are moved back to byte offsets in the file after the scan.
+
 ## Rule tests (`tests.toml`)
 
 A ruleset directory may hold a `tests.toml`; `riskgrep rules test` runs it against the embedded rulesets. Each `[[case]]` generates a sample file, scans it with only that ruleset enabled, and checks the result:

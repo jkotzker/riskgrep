@@ -146,6 +146,7 @@ fn sample(group: Group, kind: &str, name: String, bytes: impl Into<Vec<u8>>) -> 
 pub fn corpus() -> Vec<Sample> {
     let mut out = Vec::new();
     provider_secrets(&mut out);
+    encoded_text(&mut out);
     generic_secrets(&mut out);
     biometric(&mut out);
     banks(&mut out);
@@ -271,6 +272,82 @@ fn provider_secrets(out: &mut Vec<Sample>) {
         let name = if i % 2 == 0 { "server.der" } else { "tls.key" };
         let bytes = der(prefixes[i % prefixes.len()], 3000 + i as u64);
         out.push(sample(Group::Provider, "der_key", name.into(), bytes));
+    }
+}
+
+/// Text to UTF-16 or UTF-32 code-unit bytes.
+type Encoder = fn(&str) -> Vec<u8>;
+
+/// UTF-16 and UTF-32 encodings: (name prefix, encoder, byte-order mark).
+/// Every provider format is written in each.
+const ENCODINGS: [(&str, Encoder, bool); 8] = [
+    ("utf16le-bom", utf16le, true),
+    ("utf16be-bom", utf16be, true),
+    ("utf16le", utf16le, false),
+    ("utf16be", utf16be, false),
+    ("utf32le-bom", utf32le, true),
+    ("utf32be-bom", utf32be, true),
+    ("utf32le", utf32le, false),
+    ("utf32be", utf32be, false),
+];
+
+fn utf16le(s: &str) -> Vec<u8> {
+    s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+fn utf16be(s: &str) -> Vec<u8> {
+    s.encode_utf16().flat_map(u16::to_be_bytes).collect()
+}
+
+fn utf32le(s: &str) -> Vec<u8> {
+    s.chars().flat_map(|c| (c as u32).to_le_bytes()).collect()
+}
+
+fn utf32be(s: &str) -> Vec<u8> {
+    s.chars().flat_map(|c| (c as u32).to_be_bytes()).collect()
+}
+
+/// `text` in `enc`, after a byte-order mark when `bom` is set, with CRLF
+/// line endings when `crlf` is set (as Windows exports have).
+fn encoded(enc: Encoder, bom: bool, crlf: bool, text: &str) -> Vec<u8> {
+    let mut s = String::new();
+    if bom {
+        s.push('\u{feff}');
+    }
+    if crlf {
+        s.push_str(&text.replace('\n', "\r\n"));
+    } else {
+        s.push_str(text);
+    }
+    enc(&s)
+}
+
+/// Provider credentials (kind `encoded_text`) and ordinary text (a hard
+/// negative of the same kind) in UTF-16 and UTF-32, with and without a
+/// byte-order mark: one sample per provider format and encoding.
+fn encoded_text(out: &mut Vec<Sample>) {
+    for (k, kind) in PROVIDER_KINDS.iter().enumerate() {
+        for (i, &(label, enc, bom)) in ENCODINGS.iter().enumerate() {
+            let s = synth::fake_secret(kind, 4000 + (k * ENCODINGS.len() + i) as u64);
+            let (name, text) = if *kind == "pem_private_key" {
+                embed_pem(i, &s)
+            } else {
+                embed_token(k + i, &s)
+            };
+            let bytes = encoded(enc, bom, (k + i) % 2 == 0, &text);
+            let name = format!("{label}-{name}");
+            out.push(sample(Group::Provider, "encoded_text", name, bytes));
+        }
+    }
+    for (i, &(label, enc, bom)) in ENCODINGS.iter().enumerate() {
+        let text = format!(
+            "Windows Registry Editor Version 5.00\n\n[HKEY_CURRENT_USER\\Software\\Example]\n\
+             \"Name\"=\"caf\u{e9} \u{65e5}\u{672c}\"\n\n{}",
+            synth::source_text(1500, 4100 + i as u64)
+        );
+        let bytes = encoded(enc, bom, i % 2 == 0, &text);
+        let name = format!("{label}-export.reg");
+        out.push(sample(Group::Negative, "encoded_text", name, bytes));
     }
 }
 
@@ -1419,6 +1496,11 @@ pub fn shortfalls(c: &[Sample]) -> Vec<String> {
     for k in PROVIDER_KINDS.iter().chain(KEYSTORE_KINDS) {
         need(format!("provider {k}"), n(Group::Provider, k), PER_FORMAT);
     }
+    need(
+        "provider encoded_text".into(),
+        n(Group::Provider, "encoded_text"),
+        PROVIDER_KINDS.len() * ENCODINGS.len(),
+    );
     need(
         "generic_api_key".into(),
         n(Group::Generic, "generic_api_key"),

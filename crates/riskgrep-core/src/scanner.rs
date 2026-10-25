@@ -195,7 +195,7 @@ fn not_scanned(class: &FileClass) -> Option<TargetStatus> {
         FileClass::Archive(kind) => Some(unscanned(&format!("{kind} not scanned in v1"))),
         FileClass::Image(kind) => Some(skipped(&format!("{kind} image not scanned in v1"))),
         FileClass::UnknownBinary => Some(skipped("binary file of unknown format")),
-        FileClass::Text | FileClass::KnownBinary(_) => None,
+        FileClass::Text | FileClass::EncodedText(_) | FileClass::KnownBinary(_) => None,
     }
 }
 
@@ -479,7 +479,7 @@ impl RiskGrep {
                 name.into(),
                 TargetStatus::Scanned,
                 ev,
-                class == FileClass::Text,
+                class.is_text(),
             );
         }
         match classify::slice_for_scan(bytes, &class, &self.cfg.limits) {
@@ -495,7 +495,7 @@ impl RiskGrep {
                 ekey,
                 hash: content.partial.is_none().then_some(blob_key),
                 content,
-                text: class == FileClass::Text,
+                text: class.is_text(),
                 stat: None,
             }),
         }
@@ -618,7 +618,7 @@ impl RiskGrep {
         let ekey = format!("{}:{path_ext}", self.key);
         let rel = relative_to(self.rel_base.as_deref(), &real);
         let cache = self.cache.as_ref();
-        let text = class == FileClass::Text;
+        let text = class.is_text();
         let hit = |ev: Vec<Evidence>| {
             Ok(Step::Done(Raw::scanned(
                 target.to_string(),
@@ -656,7 +656,7 @@ impl RiskGrep {
         let hash = content
             .partial
             .is_none()
-            .then(|| *blake3::hash(&content.bytes).as_bytes());
+            .then(|| *blake3::hash(content.cache_bytes()).as_bytes());
         if let (Some(c), Some(h)) = (cache, hash) {
             if let Some(ev) = c.evidence(h, &ekey) {
                 if stable {
@@ -688,7 +688,9 @@ impl RiskGrep {
             Err(ScanError::Timeout) => return Raw::status(p.target, unscanned("timeout")),
             Err(ScanError::Yara(_)) => return Raw::status(p.target, unscanned("scan error")),
         };
-        if let Some(tail) = p.content.tail {
+        if let Some(d) = &p.content.decoded {
+            d.place(&mut ev);
+        } else if let Some(tail) = p.content.tail {
             place_tail(&mut ev, tail);
         }
         if let (Some(c), Some(h)) = (self.cache.as_ref(), p.hash) {

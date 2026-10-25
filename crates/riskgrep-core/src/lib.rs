@@ -2,6 +2,7 @@ pub mod bundle;
 pub mod cache;
 pub mod classify;
 pub mod config;
+pub mod encoding;
 pub mod engine;
 pub mod lines;
 pub mod meta;
