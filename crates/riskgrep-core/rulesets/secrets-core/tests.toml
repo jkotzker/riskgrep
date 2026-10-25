@@ -416,3 +416,49 @@ rule = "opvault_bundle_file"
 synth = "text:var profile={};"
 path = "profile.js"
 expect = "none"
+
+# ---- review round 1 ---------------------------------------------------------------
+
+[[case]]
+# A lowercase seed is still a seed.
+rule = "otpauth_totp_seed"
+synth = "file:otpauth_lowercase_secret"
+path = "seeds.txt"
+expect = 95
+
+[[case]]
+rule = "lastpass_csv_export"
+synth = "file:lastpass_csv_bom_crlf"
+path = "lastpass_vault_export.csv"
+expect = 95
+
+[[case]]
+rule = "chrome_csv_export"
+synth = "file:chrome_csv_bom_crlf"
+path = "passwords.csv"
+expect = 95
+
+[[case]]
+rule = "apple_csv_export"
+synth = "file:apple_csv_bom_crlf"
+path = "passwords.csv"
+expect = 95
+
+[[case]]
+rule = "bitwarden_csv_export"
+synth = "file:bitwarden_csv_bom_crlf"
+path = "bitwarden_export.csv"
+expect = 95
+
+[[case]]
+# Source lines starting with ten-letter words are not codes.
+rule = "recovery_codes_named_file"
+synth = "file:recovery_source_like"
+path = "backup_codes.py"
+expect = "none"
+
+[[case]]
+rule = "recovery_codes_headed_file"
+synth = "file:recovery_source_like"
+path = "helper.py"
+expect = "none"

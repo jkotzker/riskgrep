@@ -400,6 +400,7 @@ fn credential_files(out: &mut Vec<Sample>) {
         ("hex_pairs_unlabelled", "ids.txt"),
         ("recovery_few_codes", "recovery-codes.txt"),
         ("recovery_large_document", "notes.md"),
+        ("recovery_source_like", "backup_codes.py"),
     ];
     for (k, name) in near_misses {
         for i in 0..3 {

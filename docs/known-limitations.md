@@ -50,7 +50,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 ### Coverage is gitleaks v8.30.1 plus local key-store rules
 
 - **Not covered:** credential formats gitleaks does not define or that were added after v8.30.1, internal token formats of your own services, and secrets that are encoded, split across lines, built at run time, or stored encrypted. A small share of matches differ from gitleaks: of 5,206 generated matches for the 217 converted rules that have a regex and no path condition, 5,203 agree, 3 are missed (2 for `contentful_delivery_api_token`, 1 for `discord_client_secret`, where YARA-X keeps a different one of a regex's overlapping alternatives), and 1 is reported that gitleaks drops (a `curl_auth_header` value whose entropy equals the threshold).
-- **Why:** the 222 rules converted from one pinned gitleaks release (`crates/riskgrep-core/rulesets/secrets-core/UPSTREAM.md`) and two hand-written key-store rules are the only credential rules. The local changes to upstream are listed in `UPSTREAM.md`.
+- **Why:** the 222 rules converted from one pinned gitleaks release (`crates/riskgrep-core/rulesets/secrets-core/UPSTREAM.md`) plus the hand-written key-store, credential-file, and vault rules are the only credential rules. The local changes to upstream are listed in `UPSTREAM.md`.
 - **How it shows up:** no evidence for such a credential unless the generic rule happens to match.
 
 ### Generic-secret limits
@@ -88,7 +88,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 ### Archives, PDFs, SQLite, images, UTF-16 text, and unknown binaries are not scanned
 
-- **Not covered:** the contents of archives and containers recognised by header (zip other than `.npz`, gzip, tar, 7z, PDF, SQLite), images, binary files of unknown format, and text whose first 8 KiB contains a NUL byte, which includes UTF-16 and UTF-32 text. Only `.npy`, `.npz`, safetensors, and key-store files (PKCS#12, DER) are read as binaries, so a secret inside a compiled binary or a database file is not found.
+- **Not covered:** the contents of archives and containers recognised by header (zip other than `.npz`, gzip, tar, 7z, PDF, SQLite), images, binary files of unknown format, and text whose first 8 KiB contains a NUL byte, which includes UTF-16 and UTF-32 text. Only `.npy`, `.npz`, safetensors, key-store files (PKCS#12, DER), and password-vault headers (the first 64 bytes) are read as binaries, so a secret inside a compiled binary or a database file is not found.
 - **Why:** unpacking archives adds decompression risk and time, and a NUL byte in the sniff window marks a file as binary.
 - **How it shows up:** archives are reported `unscanned` (so `on_error` applies: ask in the Claude Code hook, block in the git hook); images, unknown binaries, and UTF-16 text are reported `skipped` (so `on_skipped` applies: allow by default). Measured with the release build: a UTF-16 file holding a generated AWS key is skipped, while its ASCII form scores secret 95.
 

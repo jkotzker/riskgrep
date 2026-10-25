@@ -460,6 +460,12 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "hex_pairs_unlabelled",
     "recovery_few_codes",
     "recovery_large_document",
+    "recovery_source_like",
+    "otpauth_lowercase_secret",
+    "lastpass_csv_bom_crlf",
+    "chrome_csv_bom_crlf",
+    "apple_csv_bom_crlf",
+    "bitwarden_csv_bom_crlf",
 ];
 
 const PASSWORD_CHARS: &[u8] =
@@ -517,6 +523,13 @@ fn hex_pair_lines(r: &mut Rng, n: usize) -> String {
 /// The text of a credential file (or a hard negative for its rule) of the
 /// given kind, derived from `seed`. Panics on an unknown kind.
 pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
+    // Spreadsheet re-saves add a UTF-8 byte order mark and CRLF line endings.
+    if let Some(base) = kind.strip_suffix("_bom_crlf") {
+        let text = String::from_utf8(credential_file(base, seed)).expect("text kind");
+        let mut out = vec![0xEF, 0xBB, 0xBF];
+        out.extend(text.replace('\n', "\r\n").into_bytes());
+        return out;
+    }
     let mut h = blake3::Hasher::new();
     h.update(b"credential-file");
     h.update(kind.as_bytes());
@@ -707,12 +720,13 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
         }
         "otpauth_example_secret" => {
             // The public example seed used throughout one-time-password documentation.
-            let seed = "JBSWY3DPEHPK3PXP";
-            writeln!(
-                out,
-                "otpauth://totp/Example:alice@example.test?secret={seed}&issuer=Example"
-            )
-            .unwrap();
+            for seed in ["JBSWY3DPEHPK3PXP", "GEZDGNBVGY3TQOJQ", "base32secret3232"] {
+                writeln!(
+                    out,
+                    "otpauth://totp/Example:alice@example.test?secret={seed}&issuer=Example"
+                )
+                .unwrap();
+            }
         }
         "base32_outside_uri" => {
             writeln!(out, "# base32 identifiers, not one-time-password seeds").unwrap();
@@ -774,6 +788,24 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
             out.push_str("Backup codes\n\n");
             out.push_str(&source_text(9000, seed));
             out.push_str(&hex_pair_lines(&mut r, 16));
+        }
+        "recovery_source_like" => {
+            // Source lines that start with a ten-letter word: not codes.
+            out.push_str("Backup codes helper\n\n");
+            for w in [
+                "background",
+                "javascript",
+                "definition",
+                "initialize",
+                "expression",
+                "assertThat",
+            ] {
+                writeln!(out, "    {w}(value);").unwrap();
+            }
+        }
+        "otpauth_lowercase_secret" => {
+            let uri = otpauth_uri(&mut r, "totp", 1);
+            writeln!(out, "{}", uri.to_lowercase()).unwrap();
         }
         other => panic!("unknown credential file kind `{other}`"),
     }

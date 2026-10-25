@@ -11,7 +11,8 @@
 // An `otpauth` URI with a base32 `secret` parameter (Key URI Format, as
 // Google Authenticator and RFC 6238 apps read it). The `span` narrows the
 // location to the seed and the allowlist drops the public example seeds used
-// in one-time-password documentation.
+// in one-time-password documentation (JBSWY3DPEHPK3PXP, the base32 of
+// "1234567890" and of the RFC 4226 test key, and the pyotp README seed).
 rule otpauth_totp_seed {
   meta:
     category = "secret"
@@ -20,7 +21,7 @@ rule otpauth_totp_seed {
     span_regex = "(?i)[?&]secret=([A-Z2-7]{16,})"
     secret_group = 1
     min_entropy = 2.5
-    allow_regex = "^(?i:JBSWY3DPEHPK3PXP|GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ)$"
+    allow_regex = "^(?i:JBSWY3DPEHPK3PXP|(GEZDGNBVGY3TQOJQ)+|BASE32SECRET3232)$"
   strings:
     $re = /otpauth:\/\/(totp|hotp)\/[^ \t\r\n"'<>]{0,200}[?&]secret=[A-Za-z2-7]{16,}/ nocase
   condition:
@@ -132,8 +133,9 @@ rule onepassword_json_export {
 // with a signal that it is a list of two-factor codes: the file name, or a
 // "recovery codes" / "backup codes" heading near the top. The line shapes are
 // GitHub (two groups of five hex characters), Google (two groups of four
-// digits), and ten-character alphanumeric codes, each optionally behind a list
-// number or bullet. A line is anchored on its start only, so adjacent lines
+// digits), and ten-character alphanumeric codes containing a digit (so a line
+// that starts with a ten-letter word is not a code), each optionally behind a
+// list number or bullet. A line is anchored on its start only, so adjacent lines
 // are counted.
 rule recovery_codes_named_file {
   meta:
@@ -144,7 +146,7 @@ rule recovery_codes_named_file {
   strings:
     $re_gh = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?[0-9a-f]{5}-[0-9a-f]{5}\b/
     $re_goog = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?[0-9]{4} [0-9]{4}\b/
-    $re_alnum = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?[A-Za-z0-9]{10}\b/
+    $re_alnum = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?([A-Za-z0-9][0-9][A-Za-z0-9]{9}|[A-Za-z0-9]{1}[0-9][A-Za-z0-9]{8}|[A-Za-z0-9]{2}[0-9][A-Za-z0-9]{7}|[A-Za-z0-9]{3}[0-9][A-Za-z0-9]{6}|[A-Za-z0-9]{4}[0-9][A-Za-z0-9]{5}|[A-Za-z0-9]{5}[0-9][A-Za-z0-9]{4}|[A-Za-z0-9]{6}[0-9][A-Za-z0-9]{3}|[A-Za-z0-9]{7}[0-9][A-Za-z0-9]{2}|[A-Za-z0-9]{8}[0-9][A-Za-z0-9]{1}|[A-Za-z0-9]{9}[0-9][A-Za-z0-9])\b/
   condition:
     filesize < 8192 and
     path matches /(?i)(recovery|backup)[-_. ]?codes?/ and
@@ -161,7 +163,7 @@ rule recovery_codes_headed_file {
     $head = /(recovery|backup)[ \t]+codes/ nocase
     $re_gh = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?[0-9a-f]{5}-[0-9a-f]{5}\b/
     $re_goog = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?[0-9]{4} [0-9]{4}\b/
-    $re_alnum = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?[A-Za-z0-9]{10}\b/
+    $re_alnum = /(^|\n)[ \t]*(([0-9]{1,2}[.)]|[-*])[ \t]*)?([A-Za-z0-9][0-9][A-Za-z0-9]{9}|[A-Za-z0-9]{1}[0-9][A-Za-z0-9]{8}|[A-Za-z0-9]{2}[0-9][A-Za-z0-9]{7}|[A-Za-z0-9]{3}[0-9][A-Za-z0-9]{6}|[A-Za-z0-9]{4}[0-9][A-Za-z0-9]{5}|[A-Za-z0-9]{5}[0-9][A-Za-z0-9]{4}|[A-Za-z0-9]{6}[0-9][A-Za-z0-9]{3}|[A-Za-z0-9]{7}[0-9][A-Za-z0-9]{2}|[A-Za-z0-9]{8}[0-9][A-Za-z0-9]{1}|[A-Za-z0-9]{9}[0-9][A-Za-z0-9])\b/
   condition:
     filesize < 8192 and
     $head in (0..512) and
