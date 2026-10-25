@@ -17,6 +17,8 @@ pub enum Known {
     Npz,
     Safetensors,
     KeyStore,
+    /// Password-vault and keychain files, read for their header only.
+    Vault,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +174,22 @@ fn image_kind(head: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// Bytes read from a password-vault or keychain file: the header rules look at
+/// the first bytes only, and the rest is encrypted.
+const VAULT_HEADER_BYTES: u64 = 64;
+
+/// Magic bytes of an encrypted password vault: KeePass (`03 D9 A2 9A`, then
+/// `65 FB 4B B5` for KDB 1.x or `67 FB 4B B5` for KDBX), a macOS keychain
+/// file (`kych`, version 1.0), or a Password Safe v3 database (`PWS3`, with
+/// the `.psafe3` extension: four letters alone are too common).
+fn is_vault(name: &str, head: &[u8]) -> bool {
+    matches!(
+        head,
+        [0x03, 0xD9, 0xA2, 0x9A, 0x65 | 0x67, 0xFB, 0x4B, 0xB5, ..]
+    ) || head.starts_with(b"kych\0\x01\0\0")
+        || (head.starts_with(b"PWS3") && ends_with_ignore_case(name, ".psafe3"))
+}
+
 /// The largest `.der` or `.key` file read as a key store (1 MiB). Larger
 /// files take the text or binary path, so a text file whose first bytes
 /// happen to look like a DER header is scanned like any other text.
@@ -197,6 +215,9 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
     }
     if is_safetensors(head) {
         return FileClass::KnownBinary(Known::Safetensors);
+    }
+    if is_vault(name, head) {
+        return FileClass::KnownBinary(Known::Vault);
     }
     let has_ext = |exts: &[&str]| exts.iter().any(|ext| ends_with_ignore_case(name, ext));
     // DER SEQUENCE: `30 82` (two-byte length) for PKCS #12 files; for
@@ -484,6 +505,7 @@ fn read_from<S: Source + ?Sized>(
         FileClass::KnownBinary(Known::Npz) if size > limits.text_max => {
             Ok(npz_member_headers(src, size))
         }
+        FileClass::KnownBinary(Known::Vault) => read_prefix(src, size, VAULT_HEADER_BYTES, false),
         FileClass::KnownBinary(Known::Npz | Known::KeyStore) => {
             read_prefix(src, size, limits.text_max, true)
         }

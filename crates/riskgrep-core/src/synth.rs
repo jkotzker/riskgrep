@@ -427,3 +427,401 @@ pub fn two_key_files(seed: u64) -> Vec<TwoKeys> {
         jsonl,
     ]
 }
+
+// ---- credential files ------------------------------------------------------
+// Whole-file text for the credential-file rules (TOTP URIs, password-manager
+// exports, two-factor recovery codes). Credentials are random; header rows are
+// joined from their columns so no source line spells a complete export header.
+
+/// Kinds accepted by [`credential_file`]: positives first, then hard negatives.
+pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
+    "otpauth_totp",
+    "otpauth_hotp",
+    "otpauth_list_text",
+    "otpauth_list_json",
+    "otpauth_migration",
+    "bitwarden_json",
+    "onepassword_json",
+    "lastpass_csv",
+    "chrome_csv",
+    "apple_csv",
+    "bitwarden_csv",
+    "recovery_github",
+    "recovery_google",
+    "recovery_alnum",
+    "otpauth_no_secret",
+    "otpauth_short_secret",
+    "otpauth_example_secret",
+    "base32_outside_uri",
+    "bitwarden_encrypted_json",
+    "users_csv",
+    "lastpass_header_only",
+    "recovery_prose",
+    "hex_pairs_unlabelled",
+    "recovery_few_codes",
+    "recovery_large_document",
+    "recovery_source_like",
+    "recovery_digit_at_ends",
+    "otpauth_lowercase_secret",
+    "lastpass_csv_bom_crlf",
+    "chrome_csv_bom_crlf",
+    "apple_csv_bom_crlf",
+    "bitwarden_csv_bom_crlf",
+];
+
+const PASSWORD_CHARS: &[u8] =
+    b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*()-_=+";
+const LOWER_HEX: &[u8] = b"0123456789abcdef";
+
+/// One saved login with a random password that includes symbols.
+struct Login {
+    name: String,
+    url: String,
+    user: String,
+    password: String,
+}
+
+fn logins(r: &mut Rng, n: usize) -> Vec<Login> {
+    (0..n)
+        .map(|i| Login {
+            name: format!("Example Shop {i}"),
+            url: format!("https://shop{i}.example.test/login"),
+            user: format!("user{i}@example.test"),
+            password: r.pick(PASSWORD_CHARS, 18),
+        })
+        .collect()
+}
+
+fn uuid_text(r: &mut Rng) -> String {
+    let h = r.pick(LOWER_HEX, 32);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
+}
+
+fn otpauth_uri(r: &mut Rng, kind: &str, i: usize) -> String {
+    let secret = r.pick(BASE32, 32);
+    format!(
+        "otpauth://{kind}/Example%20Co:user{i}@example.test?secret={secret}&issuer=Example%20Co"
+    )
+}
+
+fn csv_row(cols: &[&str]) -> String {
+    cols.join(",")
+}
+
+fn hex_pair_lines(r: &mut Rng, n: usize) -> String {
+    (0..n)
+        .map(|_| format!("{}-{}\n", r.pick(LOWER_HEX, 5), r.pick(LOWER_HEX, 5)))
+        .collect()
+}
+
+/// The text of a credential file (or a hard negative for its rule) of the
+/// given kind, derived from `seed`. Panics on an unknown kind.
+pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
+    // Spreadsheet re-saves add a UTF-8 byte order mark and CRLF line endings.
+    if let Some(base) = kind.strip_suffix("_bom_crlf") {
+        let text = String::from_utf8(credential_file(base, seed)).expect("text kind");
+        let mut out = vec![0xEF, 0xBB, 0xBF];
+        out.extend(text.replace('\n', "\r\n").into_bytes());
+        return out;
+    }
+    let mut h = blake3::Hasher::new();
+    h.update(b"credential-file");
+    h.update(kind.as_bytes());
+    h.update(&seed.to_le_bytes());
+    let mut r = Rng(h.finalize_xof());
+    let mut out = String::new();
+    match kind {
+        "otpauth_totp" => {
+            writeln!(out, "# two-factor seeds, exported 2026-10-01").unwrap();
+            writeln!(out, "{}", otpauth_uri(&mut r, "totp", 1)).unwrap();
+        }
+        "otpauth_hotp" => {
+            let uri = otpauth_uri(&mut r, "hotp", 1);
+            writeln!(out, "{uri}&counter=0").unwrap();
+        }
+        "otpauth_list_text" => {
+            for i in 0..6 {
+                writeln!(out, "{}", otpauth_uri(&mut r, "totp", i)).unwrap();
+            }
+        }
+        "otpauth_list_json" => {
+            out.push_str("[\n");
+            for i in 0..4 {
+                let sep = if i < 3 { "," } else { "" };
+                let uri = otpauth_uri(&mut r, "totp", i);
+                writeln!(
+                    out,
+                    "  {{\"name\": \"account {i}\", \"uri\": \"{uri}\"}}{sep}"
+                )
+                .unwrap();
+            }
+            out.push_str("]\n");
+        }
+        "otpauth_migration" => {
+            let mut blob = vec![0u8; 96];
+            r.fill(&mut blob);
+            let data = base64(&blob)
+                .replace('+', "%2B")
+                .replace('/', "%2F")
+                .replace('=', "%3D");
+            writeln!(out, "otpauth-migration://offline?data={data}").unwrap();
+        }
+        "bitwarden_json" => {
+            out.push_str("{\n  \"encrypted\": false,\n  \"folders\": [],\n  \"items\": [\n");
+            let list = logins(&mut r, 4);
+            for (i, l) in list.iter().enumerate() {
+                let totp = if i == 0 {
+                    format!("\"{}\"", r.pick(BASE32, 32))
+                } else {
+                    "null".into()
+                };
+                let sep = if i + 1 < list.len() { "," } else { "" };
+                let id = uuid_text(&mut r);
+                write!(
+                    out,
+                    "    {{\n      \"id\": \"{id}\",\n      \"folderId\": null,\n      \"type\": 1,\n      \
+                     \"name\": \"{}\",\n      \"notes\": null,\n      \"favorite\": false,\n      \
+                     \"login\": {{\n        \"uris\": [\n          {{\n            \"match\": null,\n            \
+                     \"uri\": \"{}\"\n          }}\n        ],\n        \"username\": \"{}\",\n        \
+                     \"password\": \"{}\",\n        \"totp\": {totp}\n      }},\n      \
+                     \"collectionIds\": null\n    }}{sep}\n",
+                    l.name, l.url, l.user, l.password
+                )
+                .unwrap();
+            }
+            out.push_str("  ]\n}\n");
+        }
+        "onepassword_json" => {
+            let (account, vault) = (uuid_text(&mut r), uuid_text(&mut r));
+            write!(
+                out,
+                "{{\"accounts\":[{{\"attrs\":{{\"accountName\":\"Example\",\"name\":\"Example User\",\
+                 \"avatar\":\"\",\"email\":\"user@example.test\",\"uuid\":\"{account}\",\
+                 \"domain\":\"https://my.example.test/\"}},\"vaults\":[{{\"attrs\":{{\"uuid\":\"{vault}\",\
+                 \"desc\":\"\",\"avatar\":\"\",\"name\":\"Personal\",\"type\":\"P\"}},\"items\":["
+            )
+            .unwrap();
+            let list = logins(&mut r, 3);
+            for (i, l) in list.iter().enumerate() {
+                let sep = if i + 1 < list.len() { "," } else { "" };
+                let id = uuid_text(&mut r);
+                write!(
+                    out,
+                    "{{\"uuid\":\"{id}\",\"favIndex\":0,\"createdAt\":1600000000,\"updatedAt\":1600000000,\
+                     \"trashed\":false,\"categoryUuid\":\"001\",\"details\":{{\"loginFields\":[\
+                     {{\"value\":\"{}\",\"id\":\"\",\"name\":\"username\",\"fieldType\":\"T\",\"designation\":\"username\"}},\
+                     {{\"value\":\"{}\",\"id\":\"\",\"name\":\"password\",\"fieldType\":\"P\",\"designation\":\"password\"}}],\
+                     \"notesPlain\":\"\",\"sections\":[],\"passwordHistory\":[]}},\"overview\":{{\"subtitle\":\"{}\",\
+                     \"urls\":[{{\"label\":\"\",\"url\":\"{}\"}}],\"title\":\"{}\",\"url\":\"{}\"}}}}{sep}",
+                    l.user, l.password, l.user, l.url, l.name, l.url
+                )
+                .unwrap();
+            }
+            out.push_str("]}]}]}\n");
+        }
+        "lastpass_csv" => {
+            let head = csv_row(&[
+                "url", "username", "password", "totp", "extra", "name", "grouping", "fav",
+            ]);
+            writeln!(out, "{head}").unwrap();
+            for l in logins(&mut r, 5) {
+                writeln!(
+                    out,
+                    "{},{},\"{}\",,,{},,0",
+                    l.url, l.user, l.password, l.name
+                )
+                .unwrap();
+            }
+        }
+        "chrome_csv" => {
+            writeln!(
+                out,
+                "{}",
+                csv_row(&["name", "url", "username", "password", "note"])
+            )
+            .unwrap();
+            for l in logins(&mut r, 5) {
+                writeln!(out, "{},{},{},\"{}\",", l.name, l.url, l.user, l.password).unwrap();
+            }
+        }
+        "apple_csv" => {
+            writeln!(
+                out,
+                "{}",
+                csv_row(&["Title", "URL", "Username", "Password", "Notes", "OTPAuth"])
+            )
+            .unwrap();
+            for l in logins(&mut r, 5) {
+                writeln!(out, "{},{},{},\"{}\",,", l.name, l.url, l.user, l.password).unwrap();
+            }
+        }
+        "bitwarden_csv" => {
+            let head = csv_row(&[
+                "folder",
+                "favorite",
+                "type",
+                "name",
+                "notes",
+                "fields",
+                "reprompt",
+                "login_uri",
+                "login_username",
+                "login_password",
+                "login_totp",
+            ]);
+            writeln!(out, "{head}").unwrap();
+            for l in logins(&mut r, 5) {
+                writeln!(
+                    out,
+                    ",,login,{},,,0,{},{},\"{}\",",
+                    l.name, l.url, l.user, l.password
+                )
+                .unwrap();
+            }
+        }
+        "recovery_github" => out = hex_pair_lines(&mut r, 16),
+        "recovery_google" => {
+            out.push_str("Backup codes\n\nEach code can be used once.\n\n");
+            for i in 1..=10 {
+                writeln!(
+                    out,
+                    "{i}. {} {}",
+                    r.pick(b"0123456789", 4),
+                    r.pick(b"0123456789", 4)
+                )
+                .unwrap();
+            }
+        }
+        "recovery_alnum" => {
+            out.push_str("Your recovery codes\n\n");
+            for _ in 0..10 {
+                writeln!(out, "{}", r.pick(LOWER36, 10)).unwrap();
+            }
+        }
+        "otpauth_no_secret" => {
+            writeln!(
+                out,
+                "otpauth://totp/Example%20Co:user@example.test?issuer=Example%20Co&digits=6"
+            )
+            .unwrap();
+        }
+        "otpauth_short_secret" => {
+            writeln!(
+                out,
+                "otpauth://totp/Example:user@example.test?secret=ABC234&issuer=Example"
+            )
+            .unwrap();
+        }
+        "otpauth_example_secret" => {
+            // The public example seed used throughout one-time-password documentation.
+            for seed in ["JBSWY3DPEHPK3PXP", "GEZDGNBVGY3TQOJQ", "base32secret3232"] {
+                writeln!(
+                    out,
+                    "otpauth://totp/Example:alice@example.test?secret={seed}&issuer=Example"
+                )
+                .unwrap();
+            }
+        }
+        "base32_outside_uri" => {
+            writeln!(out, "# base32 identifiers, not one-time-password seeds").unwrap();
+            writeln!(out, "bucket_id = {}", r.pick(BASE32, 32)).unwrap();
+            writeln!(
+                out,
+                "see https://example.test/docs/otpauth for the URI format"
+            )
+            .unwrap();
+        }
+        "bitwarden_encrypted_json" => {
+            let mut blob = vec![0u8; 96];
+            r.fill(&mut blob);
+            writeln!(
+                out,
+                "{{\n  \"encrypted\": true,\n  \"encKeyValidation_DO_NOT_EDIT\": \"2.{}\",\n  \"data\": \"2.{}\"\n}}",
+                base64(&blob[..32]),
+                base64(&blob[32..])
+            )
+            .unwrap();
+        }
+        "users_csv" => {
+            writeln!(
+                out,
+                "{}",
+                csv_row(&["id", "username", "password_hash", "email"])
+            )
+            .unwrap();
+            for i in 0..5 {
+                writeln!(
+                    out,
+                    "{i},user{i},{},user{i}@example.test",
+                    r.pick(LOWER_HEX, 40)
+                )
+                .unwrap();
+            }
+        }
+        "lastpass_header_only" => {
+            let head = csv_row(&[
+                "url", "username", "password", "totp", "extra", "name", "grouping", "fav",
+            ]);
+            writeln!(out, "{head}").unwrap();
+        }
+        "recovery_prose" => {
+            out.push_str(
+                "## Recovery codes\n\nIf you lose your device, use one of your backup codes to sign in. \
+                 Codes can be regenerated from the security settings, and each one works once.\n",
+            );
+        }
+        "hex_pairs_unlabelled" => {
+            out.push_str("# build ids\n");
+            out.push_str(&hex_pair_lines(&mut r, 16));
+        }
+        "recovery_few_codes" => {
+            out.push_str("Backup codes\n");
+            out.push_str(&hex_pair_lines(&mut r, 3));
+        }
+        "recovery_large_document" => {
+            out.push_str("Backup codes\n\n");
+            out.push_str(&source_text(9000, seed));
+            out.push_str(&hex_pair_lines(&mut r, 16));
+        }
+        "recovery_source_like" => {
+            // Source lines that start with a ten-letter word: not codes.
+            out.push_str("Backup codes helper\n\n");
+            for w in [
+                "background",
+                "javascript",
+                "definition",
+                "initialize",
+                "expression",
+                "assertThat",
+            ] {
+                writeln!(out, "    {w}(value);").unwrap();
+            }
+        }
+        "recovery_digit_at_ends" => {
+            // Ten-character codes whose only digit is the first or the last character.
+            out.push_str("Your recovery codes\n\n");
+            for i in 0..10 {
+                let letters = r.pick(b"abcdefghijklmnopqrstuvwxyz", 9);
+                let digit = r.pick(b"0123456789", 1);
+                if i % 2 == 0 {
+                    writeln!(out, "{digit}{letters}").unwrap();
+                } else {
+                    writeln!(out, "{letters}{digit}").unwrap();
+                }
+            }
+        }
+        "otpauth_lowercase_secret" => {
+            let uri = otpauth_uri(&mut r, "totp", 1);
+            writeln!(out, "{}", uri.to_lowercase()).unwrap();
+        }
+        other => panic!("unknown credential file kind `{other}`"),
+    }
+    out.into_bytes()
+}

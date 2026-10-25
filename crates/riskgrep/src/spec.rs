@@ -126,6 +126,16 @@ pub fn generate(spec: &str) -> Result<Vec<u8>, String> {
                 .collect::<String>()
                 .into_bytes())
         }
+        "file" => {
+            let (name, seed) = split_seed(rest).map_err(|e| bad(&e))?;
+            if !synth::CREDENTIAL_FILE_KINDS.contains(&name) {
+                return Err(bad(&format!(
+                    "unknown file kind `{name}` (known: {})",
+                    synth::CREDENTIAL_FILE_KINDS.join(", ")
+                )));
+            }
+            Ok(synth::credential_file(name, seed))
+        }
         "text" => Ok(rest.replace("\\n", "\n").replace("\\t", "\t").into_bytes()),
         other => Err(format!("synth `{spec}`: unknown generator `{other}`")),
     }
@@ -199,6 +209,8 @@ mod tests {
             "prices:20",
             "log:20",
             "text:a\\nb",
+            "file:lastpass_csv",
+            "file:recovery_github:3",
         ] {
             assert_eq!(generate(spec), generate(spec), "{spec}");
             assert!(!generate(spec).unwrap().is_empty(), "{spec}");
@@ -208,6 +220,16 @@ mod tests {
             generate("secret:github_pat:2")
         );
         assert_eq!(generate("text:a\\nb").unwrap(), b"a\nb");
+    }
+
+    #[test]
+    fn every_credential_file_kind_generates() {
+        for kind in synth::CREDENTIAL_FILE_KINDS {
+            let spec = format!("file:{kind}");
+            assert!(!generate(&spec).unwrap().is_empty(), "{spec}");
+            assert_eq!(generate(&spec), generate(&spec), "{spec}");
+        }
+        assert!(generate("file:nonsense").is_err());
     }
 
     #[test]

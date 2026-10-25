@@ -50,7 +50,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 ### Coverage is gitleaks v8.30.1 plus local key-store rules
 
 - **Not covered:** credential formats gitleaks does not define or that were added after v8.30.1, internal token formats of your own services, and secrets that are encoded, split across lines, built at run time, or stored encrypted. A small share of matches differ from gitleaks: of 5,206 generated matches for the 217 converted rules that have a regex and no path condition, 5,203 agree, 3 are missed (2 for `contentful_delivery_api_token`, 1 for `discord_client_secret`, where YARA-X keeps a different one of a regex's overlapping alternatives), and 1 is reported that gitleaks drops (a `curl_auth_header` value whose entropy equals the threshold).
-- **Why:** the 222 rules converted from one pinned gitleaks release (`crates/riskgrep-core/rulesets/secrets-core/UPSTREAM.md`) and two hand-written key-store rules are the only credential rules. The local changes to upstream are listed in `UPSTREAM.md`.
+- **Why:** the 222 rules converted from one pinned gitleaks release (`crates/riskgrep-core/rulesets/secrets-core/UPSTREAM.md`) plus the hand-written key-store, credential-file, and vault rules are the only credential rules. The local changes to upstream are listed in `UPSTREAM.md`.
 - **How it shows up:** no evidence for such a credential unless the generic rule happens to match.
 
 ### Generic-secret limits
@@ -72,6 +72,12 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **Why:** a `.der` or `.key` file of at most 1 MiB that starts with a DER SEQUENCE header (`30` and a short-form length, `81`, or `82`) is read as a key store, and the `der_key_file` rule reports SEC1, PKCS#1, PKCS#8, and RFC 5958 version 2 private keys in it; other files are classified by content, and DER is binary.
 - **How it shows up:** a non-DER binary key or a DER key under another name is skipped as a binary of unknown format (`on_skipped` applies: allow by default). An encrypted PKCS#8 key in a `.der` or `.key` file is read and scores 0. PEM-encoded keys are found by `private_key` under any name.
 
+### Credential files are recognised by structure, in the forms listed
+
+- **Not covered:** one-time-password seeds other than `otpauth://` URIs and Google Authenticator `otpauth-migration://` links with a `secret` or `data` value (a bare base32 seed in a config file, a percent-encoded URI inside a QR-code image link); password-manager exports other than the Bitwarden (JSON and CSV), 1Password `export.data` (JSON), LastPass, Chrome, and Apple Passwords layouts, and any of those with reordered or renamed columns, or whose first line is not the header row; recovery codes that are not GitHub-style hex pairs, two groups of four digits, or ten-character alphanumeric codes containing a digit, in a file over 8 KiB, with fewer than six codes, or without "recovery codes" or "backup codes" in the file name or in the first 512 bytes; encrypted vaults other than KeePass (`.kdb`, `.kdbx`), macOS keychain files, Password Safe v3 (`.psafe3`), and 1Password OPVault bundle files.
+- **Why:** each rule matches a documented or observed layout; looser matching would flag ordinary CSV files, lists of identifiers, and documentation. The Chrome and Apple Passwords column lists come from observed exports, not from vendor documentation.
+- **How it shows up:** the export, seed, and recovery-code rules score 95 or 90 (deny or near deny in the Claude Code hook), so a documentation page that quotes an example in the same layout can be flagged. Encrypted vaults score 85, which asks in the Claude Code hook and blocks a commit in the git hook. A 1Password `.1pux` export (a zip) and 1Password's SQLite database are still reported unscanned, so only `on_error` applies; the plaintext `export.data` is detected once unzipped.
+
 ## File handling
 
 ### Large text files are scanned only at their ends
@@ -82,7 +88,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 ### Archives, PDFs, SQLite, images, and unknown binaries are not scanned
 
-- **Not covered:** the contents of archives and containers recognised by header (zip other than `.npz`, gzip, tar, 7z, PDF, SQLite), images, binary files of unknown format, and text whose first 8 KiB contains a NUL byte unless it is recognised as UTF-16 or UTF-32 (next entry). Only `.npy`, `.npz`, safetensors, and key-store files (PKCS#12, DER) are read as binaries, so a secret inside a compiled binary or a database file is not found.
+- **Not covered:** the contents of archives and containers recognised by header (zip other than `.npz`, gzip, tar, 7z, PDF, SQLite), images, binary files of unknown format, and text whose first 8 KiB contains a NUL byte unless it is recognised as UTF-16 or UTF-32 (next entry). Only `.npy`, `.npz`, safetensors, key-store files (PKCS#12, DER), and password-vault headers (the first 64 bytes) are read as binaries, so a secret inside a compiled binary or a database file is not found.
 - **Why:** unpacking archives adds decompression risk and time, and a NUL byte in the sniff window marks a file as binary.
 - **How it shows up:** archives are reported `unscanned` (so `on_error` applies: ask in the Claude Code hook, block in the git hook); images and unknown binaries are reported `skipped` (so `on_skipped` applies: allow by default).
 
