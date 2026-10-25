@@ -37,7 +37,7 @@ cargo install --locked --path crates/riskgrep
 cargo install --locked --path crates/riskgrep-claude
 ```
 
-Either way, `riskgrep` and `riskgrep-claude` go to `~/.cargo/bin`. Run `riskgrep rules compile` once afterwards, from any directory: it compiles the rulesets the Claude Code hook uses (the defaults and your user configuration) and stores them in the cache directory, so the first scan or hook call does not pay for it (about one second). It prints `already compiled` when the cache already holds them. Add `--repo` to compile the rulesets a repository's `.riskgrep.toml` selects instead; run it from inside that repository.
+Either way, `riskgrep` and `riskgrep-claude` go to `~/.cargo/bin`. Upgrade the two together: they share the evidence cache, and when they expect different cache schema versions, each run of either resets the cache, so cached reads miss until both are at the same version. Run `riskgrep rules compile` once afterwards, from any directory: it compiles the rulesets the Claude Code hook uses (the defaults and your user configuration) and stores them in the cache directory, so the first scan or hook call does not pay for it (about one second). It prints `already compiled` when the cache already holds them. Add `--repo` to compile the rulesets a repository's `.riskgrep.toml` selects instead; run it from inside that repository.
 
 ## Command line
 

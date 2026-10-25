@@ -6,7 +6,7 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ### Changed
 
-- The evidence database records the time each row was written, which pruning needs, so its schema version is 3. The first run after upgrading discards the existing rows and the cache refills as files are scanned.
+- The evidence database records the time each row was written, which pruning needs, so its schema version is 3. The first run after upgrading discards the existing rows and the cache refills as files are scanned. Upgrade `riskgrep` and `riskgrep-claude` together: the two binaries share the cache, and while one is at 1.0.1 and the other at 1.1.0, each run of either resets it to its own schema, so cached reads miss until both are upgraded.
 - Upgraded the YARA-X engine from 1.21.0 to 1.22.0, with `yara-x-macros` and `yara-x-parser` pinned to the same version. Detection results and scores are unchanged on the evaluation corpus. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.
 
 ### Added
