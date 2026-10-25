@@ -244,11 +244,11 @@ struct Drawn {
 
 const DRAW_PATH: &str = "config/settings.txt";
 
-/// The `$kw` keywords of `rule` in the `secrets_core` sources, or `None`
-/// when no source defines the rule.
-fn rule_keywords(rule: &str) -> Option<Vec<String>> {
+/// The `$kw` keywords of `rule` in `rs`'s sources, or `None` when no source
+/// defines the rule.
+fn rule_keywords(rs: &Ruleset, rule: &str) -> Option<Vec<String>> {
     let header = format!("rule {rule} {{");
-    secrets_ruleset().sources.iter().find_map(|(_, src)| {
+    rs.sources.iter().find_map(|(_, src)| {
         let mut lines = src.lines().skip_while(|l| l.trim() != header);
         lines.next()?;
         Some(
@@ -416,8 +416,9 @@ fn every_line_complete_rule_locates_every_secret() {
         }
     }
     marked.sort();
+    let rs = secrets_ruleset();
     for (rule, span) in &marked {
-        let Some(keywords) = rule_keywords(rule) else {
+        let Some(keywords) = rule_keywords(&rs, rule) else {
             failures.push(format!("{rule}: no source defines the rule"));
             continue;
         };
