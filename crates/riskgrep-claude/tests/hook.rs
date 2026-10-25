@@ -1196,3 +1196,19 @@ fn mcp_walk_limit_names_the_root_that_reached_it() {
     assert!(reason.contains("big (walk limit)"), "{reason}");
     assert!(!reason.contains("small"), "{reason}");
 }
+
+#[test]
+fn mcp_walk_does_not_follow_links_below_the_root() {
+    let e = Env::new();
+    e.write("elsewhere/emb.safetensors", &embedding());
+    e.write("proj/clean.txt", b"nothing here\n");
+    std::os::unix::fs::symlink(e.dir().join("elsewhere"), e.dir().join("proj/link")).unwrap();
+    std::os::unix::fs::symlink(
+        e.dir().join("elsewhere/emb.safetensors"),
+        e.dir().join("proj/emb-link"),
+    )
+    .unwrap();
+    let tool = "mcp__desktop-commander__start_search";
+    e.run(tool, json!({ "path": "proj", "pattern": "x" }))
+        .silent();
+}

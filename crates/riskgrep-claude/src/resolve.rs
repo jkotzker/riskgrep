@@ -246,8 +246,9 @@ pub struct Walk {
     pub limit_at: Option<PathBuf>,
 }
 
-/// The entries under each of `roots`, for MCP content searches (`files`
-/// only) and for names a listing reveals: hidden entries included, ignore
+/// The entries under each of `roots`, for MCP content searches (`files`:
+/// regular files only, so a link below a root is never scanned) and for
+/// names a listing reveals: hidden entries included, ignore
 /// files not honoured, the [`GREP_VCS_EXCLUDES`] directories skipped, links
 /// below a root not followed. A root that is a link to a directory is
 /// walked; a root that is a file, or a link to nothing, is itself the
@@ -262,7 +263,12 @@ pub fn walk_entries(
     limit: usize,
 ) -> Walk {
     let mut out = Walk::default();
-    let files = files || glob.is_some();
+    let keep = |t: Option<std::fs::FileType>| match t {
+        Some(t) if files => t.is_file(),
+        Some(t) if glob.is_some() => !t.is_dir(),
+        Some(_) => true,
+        None => false,
+    };
     for root in roots {
         let is_dir = match std::fs::metadata(root) {
             Ok(meta) => meta.is_dir(),
@@ -296,8 +302,7 @@ pub fn walk_entries(
             if entry.depth() == 0 {
                 continue;
             }
-            let is_file = entry.file_type().is_some_and(|t| !t.is_dir());
-            if files && !is_file {
+            if !keep(entry.file_type()) {
                 continue;
             }
             if out.entries.len() >= limit {
