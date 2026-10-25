@@ -2,6 +2,7 @@
 //! much of it the scan engine sees. Reads container structure (an `.npz`
 //! archive's directory) only to choose what to read; never judges content.
 
+use crate::encoding::{self, Decoded, Encoding, Utf};
 use crate::post::{NPZ_MAX_MEMBERS, NPZ_MEMBER_BYTES};
 use std::cell::Cell;
 use std::fs::File;
@@ -21,10 +22,28 @@ pub enum Known {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileClass {
     Text,
+    /// UTF-16 or UTF-32 text, transcoded to UTF-8 for the scan engine.
+    EncodedText(Encoding),
     KnownBinary(Known),
     Archive(&'static str),
     Image(&'static str),
     UnknownBinary,
+}
+
+impl FileClass {
+    /// Text whose evidence line numbers are the lines other tools number
+    /// (see [`crate::model::TargetReport::text`]): UTF-8 text, and UTF-16 LE
+    /// text with a byte-order mark, which Claude Code's `Read` decodes
+    /// (2.1.309). It reads other UTF-16 and UTF-32 text as bytes and splits
+    /// lines at 0x0A bytes, which a code unit other than LF can hold, so its
+    /// line numbers may differ and no partial read may rely on them.
+    pub fn is_text(&self) -> bool {
+        match self {
+            FileClass::Text => true,
+            FileClass::EncodedText(e) => e.utf == Utf::Utf16Le && e.bom == 2,
+            _ => false,
+        }
+    }
 }
 
 /// Scan limits. Defaults are the global constraints.
@@ -59,6 +78,9 @@ pub struct Content {
     /// Set when the file could not be read well enough to scan; `bytes` is
     /// then empty and the target is reported unscanned with this reason.
     pub unscanned: Option<String>,
+    /// Set for UTF-16 or UTF-32 text: `bytes` is its UTF-8 transcoding, and
+    /// this maps offsets in `bytes` back to the file (`tail` is then unset).
+    pub decoded: Option<Decoded>,
 }
 
 /// Content offsets from `at` onward hold the file's last bytes, which start
@@ -77,6 +99,7 @@ impl Content {
             partial,
             tail: None,
             unscanned: None,
+            decoded: None,
         }
     }
 
@@ -86,7 +109,14 @@ impl Content {
             partial: None,
             tail: None,
             unscanned: Some(reason),
+            decoded: None,
         }
+    }
+
+    /// The bytes the evidence-cache key hashes: for transcoded text the
+    /// file's bytes, whose offsets its evidence holds; else the bytes scanned.
+    pub fn cache_bytes(&self) -> &[u8] {
+        self.decoded.as_ref().map_or(&self.bytes, |d| &d.head)
     }
 }
 
@@ -202,6 +232,9 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
     }
     if let Some(kind) = image_kind(head) {
         return FileClass::Image(kind);
+    }
+    if let Some(e) = encoding::detect(head) {
+        return FileClass::EncodedText(e);
     }
     if head.contains(&0) {
         FileClass::UnknownBinary
@@ -415,6 +448,28 @@ fn read_from<S: Source + ?Sized>(
                     file_offset: size - s,
                 }),
                 unscanned: None,
+                decoded: None,
+            })
+        }
+        FileClass::EncodedText(e) => {
+            // Limits apply to the file's bytes; samples hold whole code units.
+            let unit = e.utf.unit() as u64;
+            let (head, tail, partial) = if size <= limits.text_max {
+                (src.range(0, size)?, None, None)
+            } else {
+                let s = limits.sample.min(size / 2) / unit * unit;
+                let tail_start = ((size - s).div_ceil(unit) * unit).min(size);
+                let tail = src.range(tail_start, size - tail_start)?;
+                let note = format!("bytes {s}..{tail_start} not read");
+                (src.range(0, s)?, Some((tail_start, tail)), Some(note))
+            };
+            let (decoded, bytes) = Decoded::new(*e, head, tail);
+            Ok(Content {
+                bytes,
+                partial,
+                tail: None,
+                unscanned: None,
+                decoded: Some(decoded),
             })
         }
         FileClass::KnownBinary(Known::Npy) => {
