@@ -462,3 +462,16 @@ rule = "recovery_codes_headed_file"
 synth = "file:recovery_source_like"
 path = "helper.py"
 expect = "none"
+
+[[case]]
+# Codes whose only digit is the first or last character still count.
+rule = "recovery_codes_named_file"
+synth = "file:recovery_digit_at_ends"
+path = "2fa-recovery-codes.txt"
+expect = 90
+
+[[case]]
+rule = "recovery_codes_headed_file"
+synth = "file:recovery_digit_at_ends"
+path = "notes.txt"
+expect = 80

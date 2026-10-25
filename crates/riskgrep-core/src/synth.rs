@@ -461,6 +461,7 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "recovery_few_codes",
     "recovery_large_document",
     "recovery_source_like",
+    "recovery_digit_at_ends",
     "otpauth_lowercase_secret",
     "lastpass_csv_bom_crlf",
     "chrome_csv_bom_crlf",
@@ -801,6 +802,19 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
                 "assertThat",
             ] {
                 writeln!(out, "    {w}(value);").unwrap();
+            }
+        }
+        "recovery_digit_at_ends" => {
+            // Ten-character codes whose only digit is the first or the last character.
+            out.push_str("Your recovery codes\n\n");
+            for i in 0..10 {
+                let letters = r.pick(b"abcdefghijklmnopqrstuvwxyz", 9);
+                let digit = r.pick(b"0123456789", 1);
+                if i % 2 == 0 {
+                    writeln!(out, "{digit}{letters}").unwrap();
+                } else {
+                    writeln!(out, "{letters}{digit}").unwrap();
+                }
             }
         }
         "otpauth_lowercase_secret" => {
