@@ -10,6 +10,8 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ### Added
 
+- The Claude Code hook gates MCP tools and `Glob`. `claude_code.mcp_tools` maps each MCP tool to the input fields that hold its paths and to what it does with them (`read`, `walk`, `names`, or `none`); built-in entries cover the official filesystem server and Desktop Commander, and user entries, with `*` wildcards, add other servers. An MCP tool without an entry follows `on_unresolved`. `Glob`, and MCP tools that list directories, are judged by the file names they would reveal, with the path rules alone. `print-config` now emits the matcher `^(Read|NotebookRead|Grep|Glob|Bash|mcp__.*)$`; an existing installation must update its matcher to gate the new tools.
+- `RiskGrep::scan_names` scores file names without reading their content.
 - GitHub releases link to each crate's version on crates.io and attach the published `.crate` files with a `SHA256SUMS` file. The Release workflow adds them after publishing, once each file's checksum matches the crates.io index.
 
 ## [1.0.1] – 2026-10-23

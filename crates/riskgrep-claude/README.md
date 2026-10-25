@@ -1,6 +1,6 @@
 # riskgrep-claude
 
-A Claude Code `PreToolUse` hook from [RiskGrep](https://github.com/jkotzker/riskgrep). For `Read`, `NotebookRead`, `Grep`, and `Bash` calls it finds the files the call would read, scores them for secrets and biometric embeddings, and answers `ask` or `deny` when a score reaches its threshold. It never answers `allow` and never puts matched content in its output.
+A Claude Code `PreToolUse` hook from [RiskGrep](https://github.com/jkotzker/riskgrep). For `Read`, `NotebookRead`, `Grep`, `Bash`, and MCP tool calls it finds the files the call would read (and for `Glob` it judges the file names the call would reveal), scores them for secrets and biometric embeddings, and answers `ask` or `deny` when a score reaches its threshold. It never answers `allow` and never puts matched content in its output.
 
 ```sh
 riskgrep-claude print-config   # a settings.json fragment to merge by hand

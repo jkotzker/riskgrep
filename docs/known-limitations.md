@@ -20,7 +20,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 
 ### Files are checked, command output is not
 
-- **Not covered:** the output of a command or program (a database client, `env`, a script that prints a credential), and data that never passes through a file the hook can name. Tools other than `Read`, `NotebookRead`, `Grep`, and `Bash` (other MCP tools, web fetches) are not checked at all.
+- **Not covered:** the output of a command or program (a database client, `env`, a script that prints a credential), and data that never passes through a file the hook can name. Tools other than `Read`, `NotebookRead`, `Grep`, `Glob`, `Bash`, and MCP tools (web fetches, for example) are not checked at all, and an MCP tool without a `claude_code.mcp_tools` entry gets no decision unless `on_unresolved` says otherwise.
 - **Why:** the hook runs before a tool call and reasons about the files the call would read.
 - **How it shows up:** the hook produces no decision and the call proceeds.
 
@@ -127,6 +127,12 @@ Setting `on_unresolved = "ask"` or `"deny"` under `[claude_code]` prompts or blo
 - **Not covered:** files that Claude Code's `Grep` would search but the hook does not walk, if a later Claude Code version changes how `Grep` runs ripgrep, and a later version whose `Read` numbers lines differently for partial reads. The hook mirrors version 2.1.301: hidden files are searched, the directories `.git`, `.svn`, `.hg`, `.bzr`, `.jj`, and `.sl` are excluded, `.gitignore` is honoured, symlinks are not followed, the `glob` field is split on whitespace and then on commas, and a leading `~` or `~/` in `path` is expanded from `HOME`.
 - **Why:** the hook predicts which files the tool will read; it does not run the search itself.
 - **How it shows up:** after a Claude Code update that changes these defaults, a `Grep` call may read files the hook did not scan, and no decision is given for them. Exclusions that Claude Code derives from permission rules are not mirrored, so the hook may scan more files than `Grep` reads.
+
+### MCP tools and Glob are judged from their inputs
+
+- **Not covered:** files an MCP tool reads through input fields its `claude_code.mcp_tools` entry does not name, or reads in a way its kind does not describe (a server that follows links, or whose search honours different exclusions); MCP tools without an entry, which are unresolved and get no decision under the default `on_unresolved = "allow"`; and, for `Glob` and `names` tools, names past `limits.walk_files` entries. The built-in entries cover the official filesystem server and Desktop Commander under their usual server names only. A relative path in an MCP tool's input is resolved against the hook's `cwd`, while the server resolves it against its own working directory, so a server started elsewhere may read a different file than the one scanned.
+- **Why:** the hook cannot see what an MCP server does; it predicts the files from the tool input. File names alone are low risk, so a walk that stops at the limit is not treated as an error for names.
+- **How it shows up:** the call proceeds with no decision. In the other direction, `Glob` and `names` tools are judged on every entry the walk finds, hidden and ignored files included, where `Glob` itself returns at most 100 files; Desktop Commander's `start_search` is judged by file content even for a file-name search; and only the path rules (`pkcs12_file` asks by default, `path_biometric_name` scores 30, below the default thresholds) apply to names.
 
 ## Git hook
 

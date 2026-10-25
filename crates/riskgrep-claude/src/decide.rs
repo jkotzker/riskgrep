@@ -171,9 +171,28 @@ pub fn decide(
     cfg: &ClaudeCodeConfig,
     lines: Option<Lines>,
 ) -> Decision {
+    decide_targets(report, unresolved, cfg, lines, false)
+}
+
+/// The decision for a report of file names scanned without content
+/// (`Glob`, and MCP tools of kind `names`): a name that could not be
+/// scanned (the rules did not load) follows `on_error`, `on_skipped` does
+/// not apply, and the reason offers no reading guidance.
+pub fn decide_names(report: &Report, cfg: &ClaudeCodeConfig) -> Decision {
+    decide_targets(report, false, cfg, None, true)
+}
+
+fn decide_targets(
+    report: &Report,
+    unresolved: bool,
+    cfg: &ClaudeCodeConfig,
+    lines: Option<Lines>,
+    names: bool,
+) -> Decision {
     let mut items: Vec<Item> = Vec::new();
     for (ti, t) in report.targets.iter().enumerate() {
         let not_scanned = match &t.status {
+            TargetStatus::Skipped { .. } if names => None,
             TargetStatus::Unscanned { reason } => severity(cfg.on_error).map(|s| (s, reason)),
             TargetStatus::Skipped { reason } => severity(cfg.on_skipped).map(|s| (s, reason)),
             _ => None,
@@ -227,18 +246,19 @@ pub fn decide(
                 .map_or_else(String::new, |r| format!(" on {}", describe(r)));
             let level = if sev == Sev::Deny { "deny" } else { "ask" };
             let score = round1(raw);
+            let what = if names { "file name " } else { "" };
             items.push(Item {
                 sev,
                 score,
                 text: format!(
-                    "RiskGrep: {} scored {} {:.1} ({}){located}. Threshold: {level} at {}.",
+                    "RiskGrep: {what}{} scored {} {:.1} ({}){located}. Threshold: {level} at {}.",
                     t.target,
                     cat.0,
                     score,
                     named,
                     num(at)
                 ),
-                finding: Some((ti, partial)),
+                finding: (!names).then_some((ti, partial)),
             });
         }
     }
@@ -700,6 +720,42 @@ mod tests {
         assert_eq!(
             decide(&r, true, &cfg, None),
             Decision::Deny("RiskGrep: command reads files that could not be determined".into())
+        );
+    }
+
+    #[test]
+    fn names_follow_on_error_for_unscanned_and_ignore_skipped() {
+        let mut cfg = Config::default().claude_code;
+        let mut bad = target("k/a.p12", "secret", 0.0);
+        bad.status = TargetStatus::Unscanned {
+            reason: "rule load failure".into(),
+        };
+        let mut skipped = target("k/b.png", "secret", 0.0);
+        skipped.status = TargetStatus::Skipped {
+            reason: "image".into(),
+        };
+        cfg.on_skipped = Action::Deny;
+        assert_eq!(
+            decide_names(&report(vec![bad.clone(), skipped.clone()]), &cfg),
+            Decision::Ask("RiskGrep: could not scan k/a.p12 (rule load failure)".into())
+        );
+        assert_eq!(
+            decide_names(&report(vec![skipped]), &cfg),
+            Decision::NoOpinion
+        );
+        cfg.on_error = Action::Allow;
+        assert_eq!(decide_names(&report(vec![bad]), &cfg), Decision::NoOpinion);
+    }
+
+    #[test]
+    fn names_reason_has_no_reading_guidance() {
+        let cfg = Config::default().claude_code;
+        let d = decide_names(&report(vec![target("k/a.p12", "secret", 90.0)]), &cfg);
+        assert_eq!(
+            d,
+            Decision::Ask(
+                "RiskGrep: file name k/a.p12 scored secret 90.0 (r1). Threshold: ask at 80.".into()
+            )
         );
     }
 }
