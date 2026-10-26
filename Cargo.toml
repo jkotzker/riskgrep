@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/riskgrep-core", "crates/riskgrep", "crates/riskgrep-claude", "xtask"]
 
 [workspace.package]
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 # The toolchain pinned in rust-toolchain.toml: the only release the project
 # is built and tested with.
