@@ -1665,7 +1665,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "riskgrep"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "riskgrep-claude"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "brush-parser",
  "glob",
@@ -1694,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "riskgrep-core"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "blake3",
  "getrandom",
@@ -2592,7 +2592,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "regex",
  "regex-syntax",
