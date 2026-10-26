@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Prepare the crates.io section and assets of a GitHub release.
 
-For every publishable workspace package, finds `<name>-<version>.crate` in
---package-dir, checks that its SHA-256 equals the checksum the crates.io index
+For every publishable workspace package, downloads `<name>-<version>.crate`
+from crates.io, checks that its SHA-256 equals the checksum the crates.io index
 records for that version (waiting for the index to catch up after a publish),
 and writes to --out-dir:
 
@@ -18,7 +18,6 @@ import argparse
 import hashlib
 import json
 import pathlib
-import shutil
 import subprocess
 import sys
 import time
@@ -26,6 +25,7 @@ import urllib.error
 import urllib.request
 
 INDEX = "https://index.crates.io"
+STATIC = "https://static.crates.io/crates"
 USER_AGENT = "riskgrep-release (https://github.com/jkotzker/riskgrep)"
 START = "<!-- crates.io: start -->"
 END = "<!-- crates.io: end -->"
@@ -72,6 +72,22 @@ def index_checksum(name, version, wait):
         time.sleep(15)
 
 
+def download(name, version, wait):
+    url = f"{STATIC}/{name}/{name}-{version}.crate"
+    deadline = time.monotonic() + wait
+    while True:
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            if error.code not in (403, 404):
+                raise
+        if time.monotonic() >= deadline:
+            sys.exit(f"{name}-{version}.crate is not downloadable from crates.io after {wait} s")
+        time.sleep(15)
+
+
 def section(rows, run_url):
     lines = [
         START,
@@ -94,7 +110,6 @@ def section(rows, run_url):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--package-dir", required=True, type=pathlib.Path)
     parser.add_argument("--out-dir", required=True, type=pathlib.Path)
     parser.add_argument("--body-in", required=True, type=pathlib.Path)
     parser.add_argument("--run-url", required=True)
@@ -106,15 +121,16 @@ def main():
     rows = []
     sums = []
     for name, version in packages():
-        crate = args.package_dir / f"{name}-{version}.crate"
-        digest = hashlib.sha256(crate.read_bytes()).hexdigest()
+        crate = f"{name}-{version}.crate"
         expected = index_checksum(name, version, args.wait)
+        data = download(name, version, args.wait)
+        digest = hashlib.sha256(data).hexdigest()
         if digest != expected:
-            sys.exit(f"{crate.name}: SHA-256 {digest} differs from the crates.io index ({expected})")
-        print(f"{crate.name}: {digest} matches the crates.io index")
-        shutil.copyfile(crate, assets / crate.name)
+            sys.exit(f"{crate}: SHA-256 {digest} differs from the crates.io index ({expected})")
+        print(f"{crate}: {digest} matches the crates.io index")
+        (assets / crate).write_bytes(data)
         rows.append((name, version, digest))
-        sums.append(f"{digest}  {crate.name}\n")
+        sums.append(f"{digest}  {crate}\n")
 
     body = args.body_in.read_text().rstrip()
     if START in body and END in body:
