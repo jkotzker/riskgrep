@@ -76,7 +76,7 @@ Merge the printed fragment into `~/.claude/settings.json` by hand: a `PreToolUse
 
 ## Configuration
 
-Settings are layered: built-in defaults, then `~/.config/riskgrep/config.toml` (both platforms), then the repository's `.riskgrep.toml`, then command-line options. Example:
+Settings are layered: built-in defaults, then `~/.config/riskgrep/config.toml` (both platforms), then the repository's `.riskgrep.toml`, then command-line options. The user configuration is read from `$HOME/.config/riskgrep/config.toml` on both macOS and Linux; `XDG_CONFIG_HOME` is not consulted. Example:
 
 ```toml
 trusted_repos = ["/Users/me/work/project"]
@@ -92,7 +92,7 @@ secret = 85
 walk_files = 20000
 ```
 
-Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weights (`weight_overrides`), and list paths and rules to ignore (`[ignore]`).
+`limits.walk_files` is the most files one directory walk visits (default 10,000); a directory with more is reported unscanned, and the Claude Code hook applies the same limit to the files a `Grep` would search. Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weights (`weight_overrides`), and list paths and rules to ignore (`[ignore]`).
 
 Trust: the Claude Code hook reads a repository's `.riskgrep.toml` and `.riskgrep-baseline.json` only when the repository is listed in `trusted_repos` in the user config. An agent can write files in a repository, so an untrusted repository file is never allowed to loosen the checks. The command line and the git hook read the repository files without this restriction. `trusted_repos` in a repository file is ignored.
 

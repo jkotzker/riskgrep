@@ -4,6 +4,10 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Fixed
+
+- Converted gitleaks rules no longer take a value from the line after an assignment. The separator between the assignment operator and the value admitted a line feed, so an empty `NAME=` followed by a line starting with a name of 10 or more characters scored secret 80 under `generic_api_key`, which blocked commits of `.env.example`-style files. The value must now start on the line of its assignment, in the 101 rules built from gitleaks' generic assignment pattern (`generic_api_key` and the provider-context rules such as `adafruit_api_key`). Rules marked `line_complete` are unchanged (111 of 222, `grep -c 'line_complete = true' crates/riskgrep-core/rulesets/secrets-core/gitleaks.yar`).
+
 ## [1.1.0] – 2026-10-25
 
 ### Changed

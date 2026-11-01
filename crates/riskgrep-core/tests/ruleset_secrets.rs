@@ -524,6 +524,46 @@ fn low_entropy_generic() {
 }
 
 #[test]
+fn value_must_start_on_the_assignment_line() {
+    // An empty `NAME=` does not take the next line as its value (#65).
+    for text in [
+        "DB_PASSWORD=\nINFLUXDB_ORG=\n",
+        "DB_PASSWORD=\nINFLUXDB_ORG=x\n",
+        "DB_PASSWORD=\n\nINFLUXDB_ORG=\n",
+        "DB_PASSWORD=\r\nINFLUXDB_ORG=\r\n",
+        "DB_PASSWORD= \n  INFLUXDB_ORG=\n",
+    ] {
+        let ev = scan(".env.example", text.as_bytes());
+        assert!(ev.is_empty(), "{text:?}: rules {:?}", rule_ids(&ev));
+    }
+    // The same separator in a provider-context rule.
+    let mut rng = synth::Rng::new(11);
+    let value: String = (0..32)
+        .map(|_| b"abcdefghijklmnopqrstuvwxyz0123456789"[(rng.next_u64() % 36) as usize] as char)
+        .collect();
+    let ev = scan(
+        ".env.example",
+        format!("ADAFRUIT_KEY=\n{value}\n").as_bytes(),
+    );
+    assert!(ev.is_empty(), "rules {:?}", rule_ids(&ev));
+    let line = format!("ADAFRUIT_KEY={value}\n");
+    let ev = scan(".env.example", line.as_bytes());
+    assert_span(&ev, "adafruit_api_key", 13..13 + value.len());
+
+    // A value on the assignment's own line, after an empty one, is found.
+    let assignment = synth::fake_secret("generic_api_key_assignment", 7);
+    let value = assignment.split('"').nth(1).unwrap();
+    for sep in ["=", "= ", "=\t", "=\""] {
+        let head = "DB_PASSWORD=\n";
+        let text = format!("{head}API_TOKEN{sep}{value}\n");
+        let start = head.len() + "API_TOKEN".len() + sep.len();
+        let ev = scan(".env.example", text.as_bytes());
+        assert_span(&ev, "generic_api_key", start..start + value.len());
+        assert_score(&ev, 80.0);
+    }
+}
+
+#[test]
 fn example_key_allowlisted() {
     let s = synth::fake_secret("aws_example_key", 7);
     assert!(s.ends_with("EXAMPLE"));

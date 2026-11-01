@@ -470,6 +470,34 @@ fn apply_local_changes(cfg: &mut Config) -> Result<(), String> {
     Ok(())
 }
 
+/// gitleaks' separator between an assignment operator and its value. `\s`
+/// admits a line feed, so after an empty `NAME=` the value could be the next
+/// line's text.
+const VALUE_SEPARATOR: &str = r#"[\x60'"\s=]{0,5}"#;
+/// The same separator without line breaks: the value starts on the line of
+/// its assignment.
+const SAME_LINE_SEPARATOR: &str = r#"[\x60'" \t=]{0,5}"#;
+
+/// Rewrites gitleaks' value separator so the value must start on the line of
+/// its assignment operator; returns the regex and whether it changed.
+pub fn same_line_value(re: &str) -> (String, bool) {
+    (
+        re.replace(VALUE_SEPARATOR, SAME_LINE_SEPARATOR),
+        re.contains(VALUE_SEPARATOR),
+    )
+}
+
+/// Applies [`same_line_value`] to every rule regex; returns how many changed.
+fn apply_same_line_value(cfg: &mut Config) -> usize {
+    let mut changed = 0;
+    for re in cfg.rules.iter_mut().filter_map(|r| r.regex.as_mut()) {
+        let (new, c) = same_line_value(re);
+        *re = new;
+        changed += usize::from(c);
+    }
+    changed
+}
+
 /// Applies [`go_to_rust`] to every regex in the configuration.
 fn normalise(cfg: &mut Config) {
     fn list(a: &mut Allowlist) {
@@ -901,6 +929,7 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
     let mut cfg: Config = toml::from_str(text).map_err(|e| format!("gitleaks config: {e}"))?;
     normalise(&mut cfg);
     apply_local_changes(&mut cfg)?;
+    let same_line = apply_same_line_value(&mut cfg);
     let sha = Sha256::digest(config)
         .iter()
         .fold(String::new(), |mut s, b| {
@@ -1168,7 +1197,8 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
         yar.push_str(&block);
     }
 
-    let upstream = upstream_md(tag, &sha, &cfg, marked, &classes, &defanged, &skipped);
+    let counts = Counts { marked, same_line };
+    let upstream = upstream_md(tag, &sha, &cfg, counts, &classes, &defanged, &skipped);
     Ok(Generated {
         yar,
         stopwords,
@@ -1176,11 +1206,19 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
     })
 }
 
+/// Rule counts reported in `UPSTREAM.md`.
+struct Counts {
+    /// Rules marked `line_complete`.
+    marked: usize,
+    /// Rules whose value separator [`same_line_value`] rewrote.
+    same_line: usize,
+}
+
 fn upstream_md(
     tag: &str,
     sha: &str,
     cfg: &Config,
-    marked: usize,
+    Counts { marked, same_line }: Counts,
     classes: &[(Class, String)],
     defanged: &[String],
     skipped: &[(String, String)],
@@ -1211,8 +1249,9 @@ fn upstream_md(
     writeln!(
         s,
         "- Each rule becomes one YARA-X rule named after the gitleaks id with `-` replaced by `_` (and `_` prepended to an id starting with a digit).\n\
-         - Regexes are read with Go (RE2) syntax: a `{{` that does not start a repetition is escaped for Rust and YARA-X; nothing else changes.\n\
-         - The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The original regex is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret: `secretGroup` when the rule sets it, otherwise as gitleaks does, the first capture group that matched non-empty, else the whole match (`secret_group = \"first_nonempty\"`; `secret_group = 1` when group 1 always takes part and is never empty, which selects the same text).\n\
+         - Regexes are read with Go (RE2) syntax: a `{{` that does not start a repetition is escaped for Rust and YARA-X; no other syntax changes.\n\
+         - The separator between an assignment operator and its value, `[\\x60'\"\\s=]{{0,5}}`, becomes `[\\x60'\" \\t=]{{0,5}}` in {same_line} rules, so the value starts on the line of its assignment. With `\\s`, an empty `NAME=` took the next line's text as its value, which flagged files that list names with empty values (`.env.example`).\n\
+         - The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The regex as changed above is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret: `secretGroup` when the rule sets it, otherwise as gitleaks does, the first capture group that matched non-empty, else the whole match (`secret_group = \"first_nonempty\"`; `secret_group = 1` when group 1 always takes part and is never empty, which selects the same text).\n\
          - In `$re` only, a repetition of 4 or more over a class of at most 11 characters with no letters (`[0-9]{{11}}`, `\\d{{15,16}}`) is written `(?:RUN|$^)`. YARA-X otherwise searches for every 4-digit string in place of the rule's literal prefix, which made digit-dense text scan as slowly as 0.8 MB/s. Without multi-line mode `$^` matches only an empty input and no converted regex matches the empty string, so `$re` matches exactly what it did. A regex that sets multi-line mode (an inline flag group containing `m`) is not rewritten, because `$^` also matches between lines there; the rule is listed under Not translated.\n\
          - The `span` post-processor reports every non-overlapping match of `span_regex` inside each `$re` match, so a match that runs over several secrets yields one location per secret.\n\
          - `line_complete = true` is set when every match of `span_regex` stays on the line of its secret. When the secret is one capture group (`secret_group` 1 or more) inside a top-level element of the regex, nothing up to the end of that element may match a line feed, and the rest of the regex either cannot match one or is one element whose every alternative that can is at most one byte long, such as gitleaks' trailing delimiter `(?:[\\x60'\"\\s;]|\\\\[nr]|$)`. Otherwise (`secret_group = 0` or `\"first_nonempty\"`) no part of `span_regex` may match a line feed. Any literal or class that admits one counts, including `\\s`, `\\W`, `\\D`, negated classes, `[\\s\\S]`, dot-all `.`, `[[:space:]]`, and `\\n` or `\\x0a`. A line feed can then only be the last byte of a match, which belongs to the line it ends; the search for the next match resumes at the start of the following line, and since nothing before a secret can match a line feed, no later match needs that byte. With one location per secret (above), the locations cover every secret, each on one line, and the Claude Code hook offers partial reads only for files whose findings all come from such rules. {marked} of the {} rules are marked; `cargo test -p riskgrep-core --test ruleset_secrets every_line_complete_rule_locates_every_secret` checks each of them with generated secrets on one line, on adjacent lines, with CRLF line endings, and at the end of a file without a final line feed.\n\

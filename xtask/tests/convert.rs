@@ -5,8 +5,8 @@ use riskgrep_core::ruleset::Ruleset;
 use std::fs;
 use std::path::{Path, PathBuf};
 use xtask::{
-    can_match_newline, convert_gitleaks, lazy_to_greedy, line_complete, sets_multi_line,
-    steer_atoms, PINNED_TAG,
+    can_match_newline, convert_gitleaks, lazy_to_greedy, line_complete, same_line_value,
+    sets_multi_line, steer_atoms, PINNED_TAG,
 };
 
 fn repo() -> PathBuf {
@@ -374,4 +374,36 @@ fn no_generated_regex_matches_its_own_rule() {
             "{name} matches its own source"
         );
     }
+}
+
+#[test]
+fn value_separator_stays_on_the_line() {
+    let upstream = r#"(?:=|:)[\x60'"\s=]{0,5}([a-z0-9]{20})(?:[\x60'"\s;]|$)"#;
+    let (re, changed) = same_line_value(upstream);
+    assert!(changed);
+    assert_eq!(
+        re,
+        r#"(?:=|:)[\x60'" \t=]{0,5}([a-z0-9]{20})(?:[\x60'"\s;]|$)"#
+    );
+    let rx = regex::Regex::new(&re).unwrap();
+    assert!(rx.is_match("=\t'abcdefghij0123456789"));
+    assert!(!rx.is_match("=\nabcdefghij0123456789"));
+    let other = r#"\b(abc[0-9]{4})(?:[\x60'"\s;]|$)"#;
+    assert_eq!(same_line_value(other), (other.to_string(), false));
+}
+
+#[test]
+fn no_generated_value_separator_crosses_a_line() {
+    let d = convert_to_temp();
+    let yar = fs::read_to_string(d.path().join("gitleaks.yar")).unwrap();
+    // Escaped once in `$re` and twice in the `span_regex` string.
+    assert!(!yar.contains(r#"[\x60'"\s=]{0,5}"#));
+    assert!(!yar.contains(r#"[\\x60'\"\\s=]{0,5}"#));
+    let rules = yar
+        .split("\nrule ")
+        .filter(|b| b.contains(r#"[\\x60'\" \\t=]{0,5}"#))
+        .count();
+    assert_eq!(rules, 101);
+    let md = fs::read_to_string(d.path().join("UPSTREAM.md")).unwrap();
+    assert!(md.contains("101 rules"), "UPSTREAM.md names the count");
 }
