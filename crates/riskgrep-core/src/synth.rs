@@ -104,6 +104,18 @@ pub fn npz(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
     w.finish().expect("zip finish").into_inner()
 }
 
+/// A zip archive of `(member name, bytes)` pairs, deflated.
+pub fn zip(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, data) in members {
+        w.start_file(*name, opts).expect("zip member");
+        w.write_all(data).expect("zip data");
+    }
+    w.finish().expect("zip finish").into_inner()
+}
+
 /// A safetensors file from `(name, dtype, shape)` triples, with random data.
 /// `dtype` uses safetensors names (`F32`, `I64`, ...).
 pub fn safetensors(tensors: &[(&str, &str, &[u64])]) -> Vec<u8> {

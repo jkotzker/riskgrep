@@ -4,6 +4,18 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- Zip archives are scanned. Members of a zip (including jar, docx, xlsx, wheel, and `.1pux` files) are decompressed in memory and scanned like files, nested zips included, and findings name their member: `backup.zip!/config/app.ini` in text output, the git hook, and the Claude Code hook, and an optional `member` field on each evidence item in JSON. For evidence with `member`, `start` and `end` are byte offsets into the member's uncompressed bytes, not into the archive, and lines are the member's lines; a consumer that ignores `member` would misplace them. Container targets gain a `container` object (format, member counts, and a table of members with findings or not read whole). The JSON of every other target is unchanged. A container's score merges its members' evidence by rule, so findings spread over several members count together. Ignore globs match the archive's path or the joined member path, and baselines record member findings under the joined path.
+- Limits shared by an archive and everything nested in it: `limits.container_bytes` and `limits.member_bytes` (8 MiB each), `limits.container_members` (1,000), `limits.container_depth` (3), `limits.container_ratio` (100, per member and for the whole archive, checked once 1 MiB has been produced), and one time budget for the whole archive. Encrypted members, unsupported compression methods, and members past a limit make the archive `partial`; images and unknown binaries inside it are counted as skipped and do not.
+- `on_partial` under `[claude_code]` and `[git]`, and `riskgrep scan --on-partial`: what an archive with members that were not read does. The default, `error`, follows `on_error` (ask in the Claude Code hook, block in the git hook, and `--on-error` in `riskgrep scan`).
+- `riskgrep rules test` accepts the `zip:MEMBER=SPEC` generator for samples inside an archive.
+
+### Changed
+
+- The evidence database's schema version is 4: rows can describe an archive's members. The first run after upgrading discards the existing rows and the cache refills as files are scanned; upgrade `riskgrep` and `riskgrep-claude` together, as for 1.1.0.
+- gzip, tar, 7z, PDF, and SQLite files are still reported unscanned; inside a zip they make it `partial`.
+
 ## [1.1.0] – 2026-10-25
 
 ### Changed

@@ -20,6 +20,8 @@ use std::fmt::Write as _;
 use std::io::Read;
 use std::time::Instant;
 
+pub mod zip;
+
 /// A container format, as classification recognises it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContainerKind {
@@ -74,8 +76,8 @@ pub fn not_scanned_reason(kind: ContainerKind) -> String {
 /// format is added to.
 pub fn extractor(kind: ContainerKind) -> Option<&'static dyn Extractor> {
     match kind {
-        ContainerKind::Zip
-        | ContainerKind::Tar
+        ContainerKind::Zip => Some(&zip::ZIP),
+        ContainerKind::Tar
         | ContainerKind::Gzip
         | ContainerKind::SevenZ
         | ContainerKind::Pdf

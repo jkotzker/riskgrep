@@ -86,3 +86,4 @@ Samples are generated at run time from fixed seeds, so nothing sensitive is stor
 | `prices:N`, `log:N` | N lines of price-list CSV or log text with small decimals (hard negatives for float rules) |
 | `file:KIND[:SEED]` | Whole-file text from `riskgrep_core::synth::credential_file`: one-time-password URIs, password-manager exports, and two-factor recovery codes, each with a hard-negative variant (kinds in `synth::CREDENTIAL_FILE_KINDS`) |
 | `text:LITERAL` | The literal text; `\n` and `\t` are escapes |
+| `zip:MEMBER=SPEC` | A deflated zip archive whose one member, named `MEMBER`, holds the sample `SPEC` generates (which may be another `zip:`), e.g. `zip:config/.env=secret:aws_access_key`; give the case a `path` ending in `.zip` |

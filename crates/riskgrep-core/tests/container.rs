@@ -1,0 +1,406 @@
+//! Zip archives through the `RiskGrep` facade: member evidence, the member
+//! table, the limits that stop decompression bombs, and caching. Archives
+//! are built at run time from synthetic members; secrets are generated and
+//! never printed.
+
+use riskgrep_core::config::Config;
+use riskgrep_core::model::{Category, Report, TargetReport, TargetStatus};
+use riskgrep_core::scanner::RiskGrep;
+use riskgrep_core::synth;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
+use tempfile::TempDir;
+
+fn shared_cache() -> PathBuf {
+    static D: OnceLock<TempDir> = OnceLock::new();
+    D.get_or_init(|| {
+        let d = tempfile::tempdir().unwrap();
+        let mut g = RiskGrep::with_cache_dir(Config::default(), None, Some(d.path().into()))
+            .expect("scanner builds");
+        g.scan_bytes("warm", b"nothing here\n");
+        d
+    })
+    .path()
+    .to_path_buf()
+}
+
+fn scanner_with(cfg: Config) -> RiskGrep {
+    RiskGrep::with_cache_dir(cfg, None, Some(shared_cache())).unwrap()
+}
+
+fn scanner() -> RiskGrep {
+    scanner_with(Config::default())
+}
+
+fn secret() -> Category {
+    Category("secret".into())
+}
+
+fn aws_file(seed: u64) -> Vec<u8> {
+    format!(
+        "# settings\nAPP=demo\nlet id = \"{}\";\n",
+        synth::fake_secret("aws_access_key", seed)
+    )
+    .into_bytes()
+}
+
+fn text(s: &str) -> Vec<u8> {
+    s.as_bytes().to_vec()
+}
+
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+    let p = dir.join(name);
+    fs::write(&p, bytes).unwrap();
+    let f = File::options().write(true).open(&p).unwrap();
+    f.set_modified(SystemTime::now() - Duration::from_secs(60))
+        .unwrap();
+    p
+}
+
+fn scan(g: &mut RiskGrep, p: &Path) -> Report {
+    g.scan_paths(&[p.to_path_buf()])
+}
+
+fn only(r: &Report) -> &TargetReport {
+    assert_eq!(r.targets.len(), 1);
+    &r.targets[0]
+}
+
+fn partial(t: &TargetReport) -> &str {
+    match &t.status {
+        TargetStatus::Partial { not_read } => not_read,
+        other => panic!("expected partial, got {other:?}"),
+    }
+}
+
+/// Offsets of each zip header with `sig` (local `PK\x03\x04`, central
+/// `PK\x01\x02`).
+fn headers(zip: &[u8], sig: &[u8; 4]) -> Vec<usize> {
+    zip.windows(4)
+        .enumerate()
+        .filter(|(_, w)| w == sig)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Mark member `i` encrypted in both its local and central headers.
+fn mark_encrypted(zip: &mut [u8], i: usize) {
+    let l = headers(zip, b"PK\x03\x04")[i];
+    zip[l + 6] |= 1;
+    let c = headers(zip, b"PK\x01\x02")[i];
+    zip[c + 8] |= 1;
+}
+
+/// Declare member `i`'s uncompressed size as `size` in both headers.
+fn declare_size(zip: &mut [u8], i: usize, size: u32) {
+    let l = headers(zip, b"PK\x03\x04")[i];
+    zip[l + 22..l + 26].copy_from_slice(&size.to_le_bytes());
+    let c = headers(zip, b"PK\x01\x02")[i];
+    zip[c + 24..c + 28].copy_from_slice(&size.to_le_bytes());
+}
+
+#[test]
+fn findings_in_members_are_attributed_to_them() {
+    let d = tempfile::tempdir().unwrap();
+    let z = synth::zip(&[
+        ("README.md", text("# Demo\n\nNothing to see.\n")),
+        ("config/.env", aws_file(1)),
+        ("logo.png", PNG.to_vec()),
+    ]);
+    let p = write(d.path(), "backup.zip", &z);
+    let r = scan(&mut scanner(), &p);
+    let t = only(&r);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert!(!t.text, "a member cannot be read by line ranges");
+    let e = t
+        .evidence
+        .iter()
+        .find(|e| e.rule == "aws_access_token")
+        .expect("aws evidence");
+    assert_eq!(e.member.as_deref(), Some("config/.env"));
+    // Offsets and lines are the member's own.
+    assert_eq!(e.locations[0].line_start, 3);
+    assert!(e.locations[0].start < 60);
+    let c = t.container.as_ref().expect("container report");
+    assert_eq!(c.format, "zip");
+    assert_eq!((c.members, c.scanned, c.skipped, c.not_read), (3, 2, 1, 0));
+    assert_eq!(c.listed.len(), 1);
+    assert_eq!(c.listed[0].path, "config/.env");
+    assert_eq!(c.listed[0].scores[&secret()], 95.0);
+    assert_eq!(r.summary.targets, 1);
+}
+
+#[test]
+fn nested_archives_are_opened_and_named() {
+    let d = tempfile::tempdir().unwrap();
+    let inner = synth::zip(&[("config/.env", aws_file(2))]);
+    let outer = synth::zip(&[("notes.txt", text("hi\n")), ("inner.zip", inner)]);
+    let p = write(d.path(), "outer.zip", &outer);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert!(t
+        .evidence
+        .iter()
+        .any(|e| e.member.as_deref() == Some("inner.zip!/config/.env")));
+    assert_eq!(t.container.unwrap().members, 3);
+}
+
+#[test]
+fn a_high_ratio_member_is_not_decompressed() {
+    let d = tempfile::tempdir().unwrap();
+    let bomb = vec![b'0'; 4 << 20];
+    let z = synth::zip(&[("zeros.txt", bomb), ("config/.env", aws_file(3))]);
+    assert!(
+        z.len() < 64 << 10,
+        "the member compresses far past the ratio"
+    );
+    let p = write(d.path(), "bomb.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(partial(&t), "member 1 not read (limits.container_ratio)");
+    // The rest of the archive is still scanned.
+    assert_eq!(t.scores[&secret()], 95.0);
+    let c = t.container.unwrap();
+    assert_eq!(c.not_read, 1);
+    assert!(c
+        .listed
+        .iter()
+        .any(|m| m.path == "zeros.txt" && matches!(m.status, TargetStatus::Unscanned { .. })));
+}
+
+#[test]
+fn a_member_lying_about_its_size_is_not_read_past_the_cap() {
+    let d = tempfile::tempdir().unwrap();
+    let body: Vec<u8> = (0..(3u32 << 20))
+        .map(|i| b"abcdefghij"[(i % 10) as usize])
+        .collect();
+    let mut z = synth::npz(&[("big.txt", body), ("ok.txt", text("fine\n"))]);
+    declare_size(&mut z, 0, 10);
+    let p = write(d.path(), "liar.zip", &z);
+    let mut cfg = Config::default();
+    cfg.limits.member_bytes = 1 << 20;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    // The stored data runs past the declared size; the reader stops at the
+    // member cap, whatever the header says.
+    assert_eq!(
+        partial(&t),
+        "member 1 read only in part (limits.member_bytes)"
+    );
+    let c = t.container.unwrap();
+    assert_eq!((c.scanned, c.not_read), (2, 1));
+    assert!(matches!(c.listed[0].status, TargetStatus::Partial { .. }));
+}
+
+#[test]
+fn nesting_past_the_depth_limit_is_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let mut z = synth::zip(&[("deep/.env", aws_file(4))]);
+    for i in 0..3 {
+        z = synth::zip(&[(&format!("level{i}.zip"), z)]);
+    }
+    let p = write(d.path(), "nested.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    // Depth 1 is the file; level2.zip (2) and level1.zip (3) open, level0.zip
+    // would be depth 4. Nothing in scope was read.
+    assert_eq!(
+        t.status,
+        TargetStatus::Unscanned {
+            reason: "member 3 not read (limits.container_depth)".into()
+        }
+    );
+    let mut cfg = Config::default();
+    cfg.limits.container_depth = 4;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&secret()], 95.0);
+}
+
+#[test]
+fn members_over_the_count_limit_are_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let names: Vec<String> = (0..8).map(|i| format!("f{i}.txt")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names.iter().map(|n| (n.as_str(), text("x\n"))).collect();
+    let p = write(d.path(), "many.zip", &synth::zip(&members));
+    let mut cfg = Config::default();
+    cfg.limits.container_members = 5;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert_eq!(
+        partial(&t),
+        "members 6..8 not read (limits.container_members)"
+    );
+    let c = t.container.unwrap();
+    assert_eq!((c.members, c.scanned, c.not_read), (8, 5, 3));
+}
+
+#[test]
+fn encrypted_members_are_partial_and_never_clean() {
+    let d = tempfile::tempdir().unwrap();
+    let mut z = synth::npz(&[("a.txt", text("plain\n")), ("private.txt", text("x\n"))]);
+    mark_encrypted(&mut z, 1);
+    let p = write(d.path(), "enc.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(partial(&t), "member 2 encrypted");
+    assert!(!partial(&t).contains("private"), "reasons name no member");
+    let mut all = synth::npz(&[("a.txt", text("x\n"))]);
+    mark_encrypted(&mut all, 0);
+    let p = write(d.path(), "all.zip", &all);
+    assert_eq!(
+        only(&scan(&mut scanner(), &p)).status,
+        TargetStatus::Unscanned {
+            reason: "member 1 encrypted".into()
+        }
+    );
+}
+
+#[test]
+fn an_unreadable_archive_is_unscanned() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "broken.zip", b"PK\x03\x04rest of a zip");
+    assert_eq!(
+        only(&scan(&mut scanner(), &p)).status,
+        TargetStatus::Unscanned {
+            reason: "zip central directory unreadable".into()
+        }
+    );
+}
+
+#[test]
+fn a_spent_time_budget_is_unscanned() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "t.zip", &synth::zip(&[("a.txt", text("a\n"))]));
+    let mut cfg = Config::default();
+    cfg.limits.time_budget = Duration::ZERO;
+    assert_eq!(
+        only(&scan(&mut scanner_with(cfg), &p)).status,
+        TargetStatus::Unscanned {
+            reason: "timeout".into()
+        }
+    );
+}
+
+#[test]
+fn whole_archives_are_cached_and_partial_ones_are_not() {
+    let d = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let mk = || RiskGrep::with_cache_dir(Config::default(), None, Some(cache.path().into()));
+    let p = write(
+        d.path(),
+        "c.zip",
+        &synth::zip(&[("config/.env", aws_file(5)), ("logo.png", PNG.to_vec())]),
+    );
+    let first = scan(&mut mk().unwrap(), &p);
+    let mut g = mk().unwrap();
+    let second = scan(&mut g, &p);
+    assert_eq!(first, second);
+    assert!(
+        !g.bundle_loaded(),
+        "a cached archive must not load the bundle"
+    );
+    assert_eq!(only(&second).container.as_ref().unwrap().skipped, 1);
+
+    let mut z = synth::npz(&[("a.txt", text("a\n")), ("b.txt", text("b\n"))]);
+    mark_encrypted(&mut z, 1);
+    let q = write(d.path(), "p.zip", &z);
+    scan(&mut mk().unwrap(), &q);
+    let mut g = mk().unwrap();
+    scan(&mut g, &q);
+    assert!(g.bundle_loaded(), "a partial archive is scanned again");
+}
+
+#[test]
+fn staged_archives_are_scanned_whole() {
+    let z = synth::zip(&[("config/.env", aws_file(6))]);
+    let mut g = scanner();
+    let t = g.scan_blob(
+        "fixtures/backup.zip",
+        b"zip-blob-1",
+        &z,
+        Some(std::slice::from_ref(&(100..=200))),
+    );
+    // Diff lines do not apply to a member.
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert_eq!(t.evidence[0].member.as_deref(), Some("config/.env"));
+    let again = g.scan_blob("fixtures/backup.zip", b"zip-blob-1", &z, None);
+    assert_eq!(again.container, t.container);
+}
+
+#[test]
+fn ignore_globs_match_container_and_member_paths() {
+    use riskgrep_core::suppress::{IgnoreRules, IgnoreSpec};
+    let d = tempfile::tempdir().unwrap();
+    let z = synth::zip(&[("config/.env", aws_file(7)), ("other/.env", aws_file(8))]);
+    let p = write(d.path(), "g.zip", &z);
+    let with = |glob: &str| {
+        let cfg = Config {
+            ignore: IgnoreRules::new(IgnoreSpec {
+                paths: vec![glob.into()],
+                rules: vec![],
+            })
+            .unwrap(),
+            ..Config::default()
+        };
+        only(&scan(&mut scanner_with(cfg), &p)).clone()
+    };
+    let t = with("**/g.zip!/config/**");
+    assert_eq!(t.suppressed, 1);
+    assert!(t
+        .evidence
+        .iter()
+        .all(|e| e.member.as_deref() == Some("other/.env")));
+    assert_eq!(t.scores[&secret()], 95.0);
+    let t = with("**/g.zip");
+    assert!(t.evidence.is_empty());
+    assert_eq!(t.scores[&secret()], 0.0);
+}
+
+#[test]
+fn reports_hold_member_names_but_no_member_content() {
+    let d = tempfile::tempdir().unwrap();
+    let value = synth::fake_secret("aws_access_key", 9);
+    let z = synth::zip(&[("config/.env", aws_file(9))]);
+    let p = write(d.path(), "leak.zip", &z);
+    let r = scan(&mut scanner(), &p);
+    let json = serde_json::to_string(&r).unwrap();
+    assert!(!json.contains(&value), "a matched value reached the report");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let t = &v["targets"][0];
+    assert_eq!(t["evidence"][0]["member"], "config/.env");
+    assert_eq!(t["container"]["format"], "zip");
+    assert_eq!(t["container"]["listed"][0]["path"], "config/.env");
+    assert_eq!(t["container"]["listed"][0]["status"], "scanned");
+    assert_eq!(t["container"]["listed"][0]["kind"], "file");
+}
+
+#[test]
+fn other_container_formats_stay_unscanned() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "a.7z", b"7z\xBC\xAF\x27\x1C rest");
+    assert_eq!(
+        only(&scan(&mut scanner(), &p)).status,
+        TargetStatus::Unscanned {
+            reason: "7z not scanned in v1".into()
+        }
+    );
+}
+
+#[test]
+fn a_1password_export_is_found_inside_its_1pux_archive() {
+    let d = tempfile::tempdir().unwrap();
+    let z = synth::zip(&[
+        ("export.attributes", text("{\"version\":3}\n")),
+        ("export.data", synth::credential_file("onepassword_json", 1)),
+    ]);
+    let p = write(d.path(), "vault.1pux", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert!(t
+        .evidence
+        .iter()
+        .all(|e| e.member.as_deref() == Some("export.data")));
+}

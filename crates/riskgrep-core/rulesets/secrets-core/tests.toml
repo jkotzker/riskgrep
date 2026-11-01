@@ -7,6 +7,13 @@ path = "src/main.rs"
 expect = 95
 
 [[case]]
+# A zip member is scanned like a file; the rules see `backup.zip!/config/.env`.
+rule = "aws_access_token"
+synth = "zip:config/.env=secret:aws_access_key"
+path = "backup.zip"
+expect = 95
+
+[[case]]
 rule = "github_pat"
 synth = "secret:github_pat"
 path = "src/main.rs"

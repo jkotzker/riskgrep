@@ -456,13 +456,13 @@ fn stat_entry_time_is_taken_before_the_read() {
 #[test]
 fn archive_unscanned() {
     let d = tempfile::tempdir().unwrap();
-    let f = d.path().join("a.zip");
-    fs::write(&f, b"PK\x03\x04rest of a zip").unwrap();
+    let f = d.path().join("a.tar.gz");
+    fs::write(&f, b"\x1f\x8b\x08\0rest of a gzip stream").unwrap();
     let r = scanner().scan_paths(&[f]);
     assert_eq!(
         only(&r).status,
         TargetStatus::Unscanned {
-            reason: "zip not scanned in v1".into()
+            reason: "gzip not scanned in v1".into()
         }
     );
     assert_eq!(r.summary.unscanned, 1);
