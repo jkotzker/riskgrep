@@ -449,6 +449,9 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "recovery_github",
     "recovery_google",
     "recovery_alnum",
+    "config_xml_credential",
+    "config_json_credential_object",
+    "config_yaml_credential_mapping",
     "otpauth_no_secret",
     "otpauth_short_secret",
     "otpauth_example_secret",
@@ -463,6 +466,9 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "recovery_source_like",
     "recovery_digit_at_ends",
     "otpauth_lowercase_secret",
+    "config_xml_non_secret",
+    "config_json_non_secret",
+    "config_yaml_non_secret",
     "lastpass_csv_bom_crlf",
     "chrome_csv_bom_crlf",
     "apple_csv_bom_crlf",
@@ -520,6 +526,47 @@ fn hex_pair_lines(r: &mut Rng, n: usize) -> String {
         .map(|_| format!("{}-{}\n", r.pick(LOWER_HEX, 5), r.pick(LOWER_HEX, 5)))
         .collect()
 }
+
+/// A random hex credential of `n` characters, upper case when `upper`.
+fn hex_value(r: &mut Rng, n: usize, upper: bool) -> String {
+    let h = r.pick(LOWER_HEX, n);
+    if upper {
+        h.to_uppercase()
+    } else {
+        h
+    }
+}
+
+/// XML element names that hold a credential, as configuration files spell
+/// them (the *arr apps use `ApiKey`).
+const XML_CREDENTIAL_ELEMENTS: &[&str] = &[
+    "ApiKey",
+    "api_key",
+    "AccessToken",
+    "ClientSecret",
+    "Password",
+    "Psk",
+    "EncryptionKey",
+    "SecretKey",
+];
+
+/// Object and mapping names whose members are credentials (Z-Wave JS UI keeps
+/// a network's keys under `securityKeys`), with member names for each.
+const CREDENTIAL_OBJECTS: &[(&str, &[&str])] = &[
+    (
+        "securityKeys",
+        &[
+            "S2_Unauthenticated",
+            "S2_Authenticated",
+            "S2_AccessControl",
+            "S0_Legacy",
+        ],
+    ),
+    ("credentials", &["primary", "fallback"]),
+    ("secrets", &["webhook", "session"]),
+    ("apiKeys", &["billing", "search"]),
+    ("encryption_keys", &["current", "previous"]),
+];
 
 /// The text of a credential file (or a hard negative for its rule) of the
 /// given kind, derived from `seed`. Panics on an unknown kind.
@@ -705,6 +752,59 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
                 writeln!(out, "{}", r.pick(LOWER36, 10)).unwrap();
             }
         }
+        "config_xml_credential" => {
+            let name = XML_CREDENTIAL_ELEMENTS[r.below(XML_CREDENTIAL_ELEMENTS.len())];
+            let upper = r.below(2) == 1;
+            let value = hex_value(&mut r, 32, upper);
+            out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Config>\n");
+            out.push_str("  <LogLevel>info</LogLevel>\n  <Port>8989</Port>\n");
+            writeln!(out, "  <{name}>{value}</{name}>").unwrap();
+            out.push_str("  <AuthenticationMethod>Forms</AuthenticationMethod>\n</Config>\n");
+        }
+        "config_json_credential_object" => {
+            let (parent, members) = CREDENTIAL_OBJECTS[r.below(CREDENTIAL_OBJECTS.len())];
+            let compact = r.below(2) == 0;
+            // A leading member that the filters reject (no digit) must not
+            // hide the keys after it.
+            let mut pairs = vec!["\"comment\": \"rotate-every-ninety-days\"".to_string()];
+            pairs.extend(
+                members
+                    .iter()
+                    .map(|m| format!("\"{m}\": \"{}\"", hex_value(&mut r, 32, true))),
+            );
+            if compact {
+                writeln!(out, "{{\"{parent}\": {{{}}}}}", pairs.join(", ")).unwrap();
+            } else {
+                out.push_str("{\n  \"mqtt\": {\"host\": \"localhost\", \"port\": 1883},\n");
+                writeln!(
+                    out,
+                    "  \"{parent}\": {{\n    {}\n  }}\n}}",
+                    pairs.join(",\n    ")
+                )
+                .unwrap();
+            }
+        }
+        "config_yaml_credential_mapping" => {
+            let (parent, members) = CREDENTIAL_OBJECTS[r.below(CREDENTIAL_OBJECTS.len())];
+            let nested = r.below(2) == 0;
+            let indent = if nested { "  " } else { "" };
+            if nested {
+                out.push_str("zwave:\n  port: /dev/ttyUSB0\n");
+            }
+            writeln!(out, "{indent}{parent}: # rotated quarterly").unwrap();
+            writeln!(out, "{indent}  comment: rotate-every-ninety-days").unwrap();
+            for (i, m) in members.iter().enumerate() {
+                let v = hex_value(&mut r, 32, true);
+                if i % 2 == 0 {
+                    writeln!(out, "{indent}  {m}: {v}").unwrap();
+                } else {
+                    writeln!(out, "{indent}  {m}: \"{v}\"").unwrap();
+                }
+            }
+            // A file path as the last member, at the end of the file without a
+            // final line feed, must not hide the keys before it.
+            write!(out, "{indent}  ca_file: ./certs/client-ca2.pem").unwrap();
+        }
         "otpauth_no_secret" => {
             writeln!(
                 out,
@@ -820,6 +920,92 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
         "otpauth_lowercase_secret" => {
             let uri = otpauth_uri(&mut r, "totp", 1);
             writeln!(out, "{}", uri.to_lowercase()).unwrap();
+        }
+        // Hex and token values under names that hold no credential: public
+        // keys, a bare `Key` (S3 listings, property lists), primary keys, and
+        // pagination tokens.
+        "config_xml_non_secret" => {
+            out.push_str("<Config>\n");
+            writeln!(
+                out,
+                "  <PublicKey>{}</PublicKey>",
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(out, "  <Key>{}</Key>", hex_value(&mut r, 32, false)).unwrap();
+            writeln!(
+                out,
+                "  <PublicSigningKey>{}</PublicSigningKey>",
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "  <PublicKeyToken>{}</PublicKeyToken>",
+                hex_value(&mut r, 16, false)
+            )
+            .unwrap();
+            writeln!(out, "  <NextToken>{}</NextToken>", r.pick(BASE62, 40)).unwrap();
+            writeln!(
+                out,
+                "  <PrimaryKey>{}</PrimaryKey>",
+                hex_value(&mut r, 32, false)
+            )
+            .unwrap();
+            out.push_str("</Config>\n");
+        }
+        "config_json_non_secret" => {
+            // One settings document: UUID key ids and subjects, public keys
+            // (also behind a qualifier), a bare `keys` object, hotkeys, and
+            // design tokens.
+            writeln!(
+                out,
+                "{{\"Credentials\": {{\"Kid\": \"{}\", \"Sub\": \"{}\"}},",
+                uuid_text(&mut r),
+                uuid_text(&mut r)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                " \"publicKeys\": {{\"main\": \"{}\"}}, \"publicSigningKeys\": {{\"main\": \"{}\"}},",
+                hex_value(&mut r, 64, false),
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                " \"keys\": {{\"id\": \"{}\"}}, \"hotkeys\": {{\"save\": \"{}\"}},",
+                hex_value(&mut r, 32, false),
+                hex_value(&mut r, 32, false)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                " \"tokens\": {{\"color\": \"{}\"}}}}",
+                hex_value(&mut r, 32, false)
+            )
+            .unwrap();
+        }
+        "config_yaml_non_secret" => {
+            writeln!(out, "publicKeys:\n  main: {}", hex_value(&mut r, 64, false)).unwrap();
+            writeln!(
+                out,
+                "publicEncryptionKeys:\n  main: {}",
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(out, "keys:\n  id: {}", hex_value(&mut r, 32, false)).unwrap();
+            writeln!(
+                out,
+                "primaryKeys:\n  users: {}",
+                hex_value(&mut r, 32, false)
+            )
+            .unwrap();
+            writeln!(out, "credentials:\n  user: admin").unwrap();
+            writeln!(out, "other: {}", hex_value(&mut r, 32, false)).unwrap();
+            // A sibling of an indented credential mapping is outside it.
+            writeln!(out, "app:\n  secrets:\n    enabled: true").unwrap();
+            writeln!(out, "  build_id: {}", hex_value(&mut r, 32, false)).unwrap();
         }
         other => panic!("unknown credential file kind `{other}`"),
     }

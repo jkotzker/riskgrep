@@ -4,6 +4,10 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- Credentials in configuration files are found by the name of the element, object, or mapping that holds them (`secrets-core/config.yar`, weight 80, the same as `generic_api_key`): an XML element named like a credential (`<ApiKey>…</ApiKey>`, the layout of the *arr apps' `config.xml`; also `…Token`, `…Secret`, `Password`, `Psk`, and qualified `…Key` names, but not `PublicKey`, `PrimaryKey`, a bare `Key`, `NextToken`, or any name containing `public`), and the string members of a JSON object or YAML mapping named like a credential store (`securityKeys`, `apiKeys`, `credentials`, `secrets`, and similar, as Z-Wave JS UI stores a network's keys), whatever the members are called. A value must be 16 to 200 token characters with Shannon entropy of at least 3.0, a digit, and a letter, and must not be a UUID, a placeholder, a template, a sequential run, or a file path. Files in these layouts with random 32-character hex values scored 0 before; the evaluation's 20 synthetic files of each layout are now all flagged (`cargo xtask eval --skip-oss`, kinds `config_xml`, `config_json_object`, and `config_yaml_mapping`). The XML rule is marked `line_complete`, so the Claude Code hook can offer partial reads around its findings.
+
 ### Changed
 
 - The Claude Code hook offers partial reads for files whose findings come from `generic_api_key` and the provider-context rules. With both separators on one line, 100 of the 101 rewritten rules are marked `line_complete`: 211 of the 222 converted rules, up from 111 (`grep -c 'line_complete = true' crates/riskgrep-core/rulesets/secrets-core/gitleaks.yar`). `atlassian_api_token` stays unmarked, because its regex is an alternation whose secret is the first non-empty group and its trailing delimiter can match a line feed. Each marked rule is checked by `cargo test -p riskgrep-core --test ruleset_secrets every_line_complete_rule_locates_every_secret`.
