@@ -114,6 +114,7 @@ fn score_target_uses_meta_weights_and_tiers() {
         shape: vec![],
         fingerprints: vec![],
         line_complete: false,
+        member: None,
     };
     let m = |w: f64, tiers: Option<&str>| RuleMeta {
         category: Category("secret".into()),
@@ -134,4 +135,61 @@ fn score_target_uses_meta_weights_and_tiers() {
     // Unknown rule: its own weight.
     let s = score_target(&[ev("zzz", 1)], &meta);
     assert!((s[&Category("secret".into())] - 99.0).abs() < 1e-9);
+}
+
+fn member_ev(rule: &str, member: &str, located: bool) -> riskgrep_core::model::Evidence {
+    riskgrep_core::model::Evidence {
+        rule: rule.into(),
+        category: Category("biometric".into()),
+        weight: 0.0,
+        count: 1,
+        locations: if located {
+            vec![riskgrep_core::model::Location {
+                start: 0,
+                end: 4,
+                line_start: 0,
+                line_end: 0,
+            }]
+        } else {
+            vec![]
+        },
+        shape: vec![],
+        fingerprints: vec![],
+        line_complete: false,
+        member: Some(member.into()),
+    }
+}
+
+#[test]
+fn container_scores_merge_member_evidence_by_rule() {
+    use riskgrep_core::meta::RuleMeta;
+    use std::collections::HashMap;
+    let meta_for = |tiers: &str| RuleMeta {
+        category: Category("biometric".into()),
+        weight: 0.0,
+        tiers: Some(tiers.parse().unwrap()),
+        family: None,
+        family_cap: None,
+        post: vec![],
+        line_complete: false,
+    };
+    let meta = HashMap::from([
+        ("b:bank".to_string(), meta_for("1:30,3:90")),
+        ("b:name".to_string(), meta_for("1:40,3:95")),
+    ]);
+    let bio = Category("biometric".into());
+    // One located match in each of three members: an embedding bank of 3.
+    let banks: Vec<_> = ["a.npy", "b.npy", "c.npy"]
+        .iter()
+        .map(|m| member_ev("bank", m, true))
+        .collect();
+    near(score_container(&banks, &meta)[&bio], 90.0);
+    // The maximum over members would see one embedding.
+    near(score_target(&banks[..1], &meta)[&bio], 30.0);
+    // A location-free rule firing on every member counts once.
+    let names: Vec<_> = ["a", "b", "c"]
+        .iter()
+        .map(|m| member_ev("name", m, false))
+        .collect();
+    near(score_container(&names, &meta)[&bio], 40.0);
 }

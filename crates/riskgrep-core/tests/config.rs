@@ -1,4 +1,6 @@
-use riskgrep_core::config::{baseline_path, load, Action, Mode, Overrides, Threshold};
+use riskgrep_core::config::{
+    baseline_path, load, Action, Config, Mode, OnPartial, Overrides, Threshold,
+};
 use riskgrep_core::meta::RuleMeta;
 use riskgrep_core::model::Category;
 use std::collections::HashMap;
@@ -501,4 +503,46 @@ fn cache_limits_must_be_positive_and_keys_known() {
         assert!(err.0.contains("config.toml"), "{err}");
         drop(e);
     }
+}
+
+#[test]
+fn container_limits_and_on_partial() {
+    let d = Config::default();
+    assert_eq!(d.limits.container_bytes, 8_388_608);
+    assert_eq!(d.limits.member_bytes, 8_388_608);
+    assert_eq!(d.limits.container_members, 1000);
+    assert_eq!(d.limits.container_depth, 3);
+    assert_eq!(d.limits.container_ratio, 100);
+    assert_eq!(d.claude_code.on_partial, OnPartial::Error);
+    assert_eq!(d.git.on_partial, OnPartial::Error);
+    assert_eq!(OnPartial::Error.action(Action::Block), Action::Block);
+    assert_eq!(OnPartial::Allow.action(Action::Block), Action::Allow);
+    let e = env(
+        Some(
+            r#"
+[limits]
+container_bytes = 100
+member_bytes = 50
+container_members = 7
+container_depth = 2
+container_ratio = 20
+[claude_code]
+on_partial = "deny"
+[git]
+on_partial = "allow"
+"#,
+        ),
+        None,
+    );
+    let c = load(Mode::Git, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!(c.limits.container_bytes, 100);
+    assert_eq!(c.limits.member_bytes, 50);
+    assert_eq!(c.limits.container_members, 7);
+    assert_eq!(c.limits.container_depth, 2);
+    assert_eq!(c.limits.container_ratio, 20);
+    assert_eq!(c.claude_code.on_partial, OnPartial::Deny);
+    assert_eq!(c.git.on_partial, OnPartial::Allow);
+    drop(e);
+    let bad = env(Some("[git]\non_partial = \"sometimes\"\n"), None);
+    assert!(load(Mode::Git, Some(bad.root()), Overrides::default()).is_err());
 }

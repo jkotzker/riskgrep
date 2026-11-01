@@ -384,6 +384,7 @@ fn scan(
             evidence: Vec::new(),
             suppressed: 0,
             text: false,
+            container: None,
         });
         report = Report::from_targets(&report.riskgrep_version, &report.rules_bundle, targets);
     }

@@ -15,6 +15,7 @@ fn target(name: &str, score: f64, status: TargetStatus) -> TargetReport {
         evidence: vec![],
         suppressed: 0,
         text: true,
+        container: None,
     }
 }
 
@@ -39,6 +40,7 @@ fn report_json_shape() {
         }],
         fingerprints: vec![[0u8; 32]],
         line_complete: false,
+        member: None,
     });
     let r = Report::from_targets("0.1.0", "bundle-1", vec![t]);
     let v: serde_json::Value = serde_json::to_value(&r).unwrap();
@@ -174,6 +176,7 @@ fn fingerprints_not_serialized() {
         shape: vec![],
         fingerprints: vec![[7u8; 32]],
         line_complete: false,
+        member: None,
     };
     let s = serde_json::to_string(&e).unwrap();
     assert!(!s.contains("fingerprints"));
@@ -199,5 +202,46 @@ fn tensor_name_is_never_serialized() {
             shape: vec![1, 192],
             name: None
         }
+    );
+}
+
+/// The JSON of a target that is not a container is byte-identical to the
+/// 1.1.0 report: container fields are added only to container targets.
+#[test]
+fn non_container_target_json_is_unchanged() {
+    let mut t = target("a.env", 90.0, TargetStatus::Scanned);
+    t.evidence.push(Evidence {
+        rule: "aws_access_token".into(),
+        category: cat("secret"),
+        weight: 90.0,
+        count: 1,
+        locations: vec![Location {
+            start: 4,
+            end: 24,
+            line_start: 1,
+            line_end: 1,
+        }],
+        shape: vec![],
+        fingerprints: vec![[0u8; 32]],
+        line_complete: true,
+        member: None,
+    });
+    let p = target(
+        "b.txt",
+        0.0,
+        TargetStatus::Partial {
+            not_read: "bytes 1..2 not read".into(),
+        },
+    );
+    assert_eq!(
+        serde_json::to_string(&[t, p]).unwrap(),
+        concat!(
+            r#"[{"target":"a.env","status":"scanned","scores":{"secret":90.0},"#,
+            r#""evidence":[{"rule":"aws_access_token","category":"secret","weight":90.0,"#,
+            r#""count":1,"locations":[{"start":4,"end":24,"line_start":1,"line_end":1}],"#,
+            r#""shape":[]}],"suppressed":0},"#,
+            r#"{"target":"b.txt","status":"partial","not_read":"bytes 1..2 not read","#,
+            r#""scores":{"secret":0.0},"evidence":[],"suppressed":0}]"#
+        )
     );
 }

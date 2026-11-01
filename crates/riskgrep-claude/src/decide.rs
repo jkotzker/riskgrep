@@ -107,6 +107,38 @@ fn flagged_lines(t: &TargetReport, cats: &[&Category]) -> Option<Vec<(u32, u32)>
     Some(merged)
 }
 
+/// ` in backup.zip!/config/.env, and 2 more members`: the container member
+/// with the highest score in `cat` among those with evidence in it, and how
+/// many others have some; `None` for evidence about the file itself.
+fn top_member(t: &TargetReport, cat: &Category) -> Option<String> {
+    let mut members: Vec<&str> = Vec::new();
+    for e in t.evidence.iter().filter(|e| &e.category == cat) {
+        if let Some(m) = e.member.as_deref() {
+            if !members.contains(&m) {
+                members.push(m);
+            }
+        }
+    }
+    let score = |m: &str| {
+        t.container
+            .as_ref()
+            .and_then(|c| c.listed.iter().find(|l| l.path == m))
+            .and_then(|l| l.scores.get(cat).copied())
+            .unwrap_or(0.0)
+    };
+    let top = members
+        .iter()
+        .copied()
+        .max_by(|a, b| score(a).total_cmp(&score(b)).then(b.cmp(a)))?;
+    let mut s = format!(" in {}!/{top}", t.target);
+    match members.len() - 1 {
+        0 => {}
+        1 => s.push_str(", and 1 more member"),
+        n => s.push_str(&format!(", and {n} more members")),
+    }
+    Some(s)
+}
+
 /// Whether the requested lines, widened by one line on each side, touch
 /// any of `ranges`.
 fn overlaps(req: Lines, ranges: &[(u32, u32)]) -> bool {
@@ -205,6 +237,21 @@ fn decide_targets(
                 finding: None,
             });
         }
+        // A container with members that were not read: part of what the
+        // call would read was never scanned.
+        if let (TargetStatus::Partial { not_read }, Some(c)) = (&t.status, &t.container) {
+            if let Some(sev) = severity(cfg.on_partial.action(cfg.on_error)) {
+                items.push(Item {
+                    sev,
+                    score: -1.0,
+                    text: format!(
+                        "RiskGrep: could not scan {} of {} members of {} ({not_read})",
+                        c.not_read, c.members, t.target
+                    ),
+                    finding: None,
+                });
+            }
+        }
         let mut hits: Vec<(&Category, f64, Sev, f64)> = Vec::new();
         for (cat, &raw) in &t.scores {
             let Some(th) = cfg.thresholds.get(cat) else {
@@ -240,6 +287,9 @@ fn decide_targets(
             let mut named = rules.join(", ");
             if extra > 0 {
                 named.push_str(&format!(", and {extra} more"));
+            }
+            if let Some(m) = top_member(t, cat) {
+                named.push_str(&m);
             }
             let located = own
                 .as_deref()
@@ -321,9 +371,11 @@ mod tests {
                 shape: vec![],
                 fingerprints: vec![],
                 line_complete: false,
+                member: None,
             }],
             suppressed: 0,
             text: true,
+            container: None,
         }
     }
 
@@ -352,6 +404,7 @@ mod tests {
             shape: vec![],
             fingerprints: vec![],
             line_complete: true,
+            member: None,
         }
     }
 
@@ -367,6 +420,7 @@ mod tests {
             evidence,
             suppressed: 0,
             text: true,
+            container: None,
         }
     }
 
@@ -756,6 +810,106 @@ mod tests {
             Decision::Ask(
                 "RiskGrep: file name k/a.p12 scored secret 90.0 (r1). Threshold: ask at 80.".into()
             )
+        );
+    }
+
+    /// A zip target whose `members` hold `secret` evidence, with member
+    /// scores in its member table.
+    fn zip_target(members: &[(&str, f64)], status: TargetStatus) -> TargetReport {
+        use riskgrep_core::model::{ContainerReport, MemberKind, MemberReport};
+        let evidence = members
+            .iter()
+            .map(|(m, _)| {
+                let mut e = ev("aws_access_token", "secret", &[(4, 4)]);
+                e.member = Some(m.to_string());
+                e
+            })
+            .collect();
+        let mut t = lined("/w/backup.zip", &[("secret", 95.0)], evidence);
+        t.text = false;
+        t.status = status;
+        t.container = Some(ContainerReport {
+            format: "zip".into(),
+            members: 12,
+            scanned: 10,
+            skipped: 0,
+            not_read: 2,
+            listed: members
+                .iter()
+                .map(|(m, score)| MemberReport {
+                    path: m.to_string(),
+                    kind: MemberKind::File,
+                    status: TargetStatus::Scanned,
+                    scores: BTreeMap::from([(Category("secret".into()), *score)]),
+                })
+                .collect(),
+        });
+        t
+    }
+
+    #[test]
+    fn findings_in_members_name_the_top_member_and_offer_no_partial_read() {
+        let cfg = Config::default().claude_code;
+        let one = zip_target(&[("config/.env", 95.0)], TargetStatus::Scanned);
+        assert_eq!(
+            decide(&report(vec![one]), false, &cfg, read(1, Some(2))),
+            Decision::Deny(format!(
+                "RiskGrep: /w/backup.zip scored secret 95.0 (aws_access_token in \
+                 /w/backup.zip!/config/.env). Threshold: deny at 95.{NP1}"
+            ))
+        );
+        let three = zip_target(
+            &[("a.txt", 80.0), ("inner.zip!/b.env", 95.0), ("c.txt", 80.0)],
+            TargetStatus::Scanned,
+        );
+        let Decision::Deny(reason) = decide(&report(vec![three]), false, &cfg, None) else {
+            panic!("expected deny");
+        };
+        assert!(
+            reason.contains(
+                "(aws_access_token in /w/backup.zip!/inner.zip!/b.env, and 2 more members)"
+            ),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn partial_containers_follow_on_partial() {
+        let p = TargetStatus::Partial {
+            not_read: "members 11..12 encrypted".into(),
+        };
+        let mut t = zip_target(&[], p.clone());
+        t.scores = BTreeMap::from([(Category("secret".into()), 0.0)]);
+        let mut cfg = Config::default().claude_code;
+        assert_eq!(
+            decide(&report(vec![t.clone()]), false, &cfg, None),
+            Decision::Ask(
+                "RiskGrep: could not scan 2 of 12 members of /w/backup.zip \
+                 (members 11..12 encrypted)"
+                    .into()
+            )
+        );
+        cfg.on_partial = riskgrep_core::config::OnPartial::Allow;
+        assert_eq!(
+            decide(&report(vec![t.clone()]), false, &cfg, None),
+            Decision::NoOpinion
+        );
+        cfg.on_partial = riskgrep_core::config::OnPartial::Deny;
+        assert!(matches!(
+            decide(&report(vec![t]), false, &cfg, None),
+            Decision::Deny(_)
+        ));
+        // A sampled text file is partial by design: no item.
+        let mut sampled = target("/big.txt", "secret", 0.0);
+        sampled.status = p;
+        assert_eq!(
+            decide(
+                &report(vec![sampled]),
+                false,
+                &Config::default().claude_code,
+                None
+            ),
+            Decision::NoOpinion
         );
     }
 }

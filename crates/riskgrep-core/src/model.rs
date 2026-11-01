@@ -26,7 +26,8 @@ fn ser_scores<S: Serializer>(m: &BTreeMap<Category, f64>, s: S) -> Result<S::Ok,
 pub struct Category(pub String);
 
 /// Byte offsets into the file (for formats read selectively, such as tensor
-/// headers, into the bytes read); lines are 1-based, and 0 when unknown:
+/// headers, into the bytes read; for evidence in a container member, into
+/// the member's uncompressed bytes); lines are 1-based, and 0 when unknown:
 /// evidence in the tail sample of a partly read text file has file offsets
 /// but no line numbers, because the lines it skipped were not counted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +71,12 @@ pub struct Evidence {
     /// rule metadata when the target is scored; never stored.
     #[serde(skip)]
     pub line_complete: bool,
+    /// For evidence found in a container member: the member's path inside
+    /// the container (`config/.env`, nested `inner.zip!/x`). Its locations
+    /// are offsets and lines in that member. Absent for evidence about the
+    /// file itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +106,48 @@ pub struct TargetReport {
     /// UTF-32 git blob, whose lines git numbers at 0x0A bytes.
     #[serde(skip)]
     pub text: bool,
+    /// Set for a container whose members were read (an archive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<ContainerReport>,
+}
+
+/// What a container's members held.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ContainerReport {
+    /// The extractor that read it, e.g. `zip`.
+    pub format: String,
+    /// Members examined or counted, nested members included.
+    pub members: u64,
+    /// Members read and scanned (whole or in part).
+    pub scanned: u64,
+    /// Members of formats that are not scanned (images, binary files of
+    /// unknown format).
+    pub skipped: u64,
+    /// Members not read whole.
+    pub not_read: u64,
+    /// Members with evidence, then members not read whole, at most
+    /// [`crate::container::LISTED_MAX`].
+    pub listed: Vec<MemberReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberKind {
+    /// An archive entry: the bytes of a file, read like a file on disk.
+    File,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MemberReport {
+    /// Path inside the container, as in [`Evidence::member`].
+    pub path: String,
+    pub kind: MemberKind,
+    #[serde(flatten)]
+    pub status: TargetStatus,
+    /// The member's own scores, for display; the container's scores cover
+    /// all of its members together.
+    #[serde(serialize_with = "ser_scores")]
+    pub scores: BTreeMap<Category, f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

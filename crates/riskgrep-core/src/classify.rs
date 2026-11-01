@@ -2,6 +2,7 @@
 //! much of it the scan engine sees. Reads container structure (an `.npz`
 //! archive's directory) only to choose what to read; never judges content.
 
+use crate::container::ContainerKind;
 use crate::encoding::{self, Decoded, Encoding, Utf};
 use crate::post::{NPZ_MAX_MEMBERS, NPZ_MEMBER_BYTES};
 use std::cell::Cell;
@@ -27,7 +28,9 @@ pub enum FileClass {
     /// UTF-16 or UTF-32 text, transcoded to UTF-8 for the scan engine.
     EncodedText(Encoding),
     KnownBinary(Known),
-    Archive(&'static str),
+    /// An archive, document, or database whose members may be read through
+    /// a [`crate::container::Extractor`].
+    Container(ContainerKind),
     Image(&'static str),
     UnknownBinary,
 }
@@ -56,6 +59,16 @@ pub struct Limits {
     pub sniff: usize,
     pub walk_files: usize,
     pub time_budget: Duration,
+    /// Uncompressed bytes read from all members of one container.
+    pub container_bytes: u64,
+    /// Bytes read from one container member.
+    pub member_bytes: u64,
+    /// Members examined in one container, nested members included.
+    pub container_members: u32,
+    /// Nesting depth; the top-level container is depth 1.
+    pub container_depth: u32,
+    /// Largest uncompressed-to-compressed ratio, per member and overall.
+    pub container_ratio: u32,
 }
 
 impl Default for Limits {
@@ -66,12 +79,17 @@ impl Default for Limits {
             sniff: 8192,
             walk_files: 10_000,
             time_budget: Duration::from_secs(2),
+            container_bytes: 8_388_608,
+            member_bytes: 8_388_608,
+            container_members: 1000,
+            container_depth: 3,
+            container_ratio: 100,
         }
     }
 }
 
 /// Bytes handed to the scan engine, plus a note when part of the file was not read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Content {
     pub bytes: Vec<u8>,
     pub partial: Option<String>,
@@ -210,7 +228,7 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
         return if ends_with_ignore_case(name, ".npz") {
             FileClass::KnownBinary(Known::Npz)
         } else {
-            FileClass::Archive("zip")
+            FileClass::Container(ContainerKind::Zip)
         };
     }
     if is_safetensors(head) {
@@ -237,19 +255,19 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
         return FileClass::KnownBinary(Known::KeyStore);
     }
     if head.starts_with(b"%PDF-") {
-        return FileClass::Archive("pdf");
+        return FileClass::Container(ContainerKind::Pdf);
     }
     if head.starts_with(b"SQLite format 3\0") {
-        return FileClass::Archive("sqlite");
+        return FileClass::Container(ContainerKind::Sqlite);
     }
     if head.starts_with(&[0x1F, 0x8B]) {
-        return FileClass::Archive("gzip");
+        return FileClass::Container(ContainerKind::Gzip);
     }
     if head.starts_with(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]) {
-        return FileClass::Archive("7z");
+        return FileClass::Container(ContainerKind::SevenZ);
     }
     if head.get(257..262) == Some(b"ustar") {
-        return FileClass::Archive("tar");
+        return FileClass::Container(ContainerKind::Tar);
     }
     if let Some(kind) = image_kind(head) {
         return FileClass::Image(kind);
@@ -265,8 +283,8 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
 }
 
 /// Something bytes can be read from at explicit offsets: an open file or an
-/// in-memory buffer (a git blob, raw text).
-trait Source {
+/// in-memory buffer (a git blob, raw text, a container member).
+pub trait Source {
     fn range(&self, offset: u64, len: u64) -> io::Result<Vec<u8>>;
 }
 
@@ -275,6 +293,12 @@ impl Source for File {
         let mut buf = vec![0u8; usize::try_from(len).map_err(io::Error::other)?];
         self.read_exact_at(&mut buf, offset)?;
         Ok(buf)
+    }
+}
+
+impl<T: Source + ?Sized> Source for &T {
+    fn range(&self, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+        (**self).range(offset, len)
     }
 }
 
@@ -305,12 +329,12 @@ fn read_prefix<S: Source + ?Sized>(
 
 /// A seekable reader over a [`Source`] that reads at most `left` more bytes
 /// in total; past that every read fails and `over` is set.
-struct Budgeted<'a, S: ?Sized> {
-    src: &'a S,
-    size: u64,
-    pos: u64,
-    left: &'a Cell<u64>,
-    over: &'a Cell<bool>,
+pub struct Budgeted<'a, S: ?Sized> {
+    pub src: &'a S,
+    pub size: u64,
+    pub pos: u64,
+    pub left: &'a Cell<u64>,
+    pub over: &'a Cell<bool>,
 }
 
 impl<S: Source + ?Sized> Read for Budgeted<'_, S> {
@@ -516,7 +540,7 @@ fn read_from<S: Source + ?Sized>(
         FileClass::KnownBinary(Known::Npz | Known::KeyStore) => {
             read_prefix(src, size, limits.text_max, true)
         }
-        FileClass::Archive(_) | FileClass::Image(_) | FileClass::UnknownBinary => {
+        FileClass::Container(_) | FileClass::Image(_) | FileClass::UnknownBinary => {
             Ok(Content::whole(Vec::new(), None))
         }
     }

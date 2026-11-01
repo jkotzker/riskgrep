@@ -1,6 +1,6 @@
 //! The `scan` and `baseline` commands.
 
-use crate::cli::{threshold_map, BaselineArgs, Format, OnError, ScanArgs};
+use crate::cli::{threshold_map, BaselineArgs, Format, OnError, OnPartial, ScanArgs};
 use crate::{text, CliError};
 use riskgrep_core::config::{self, Config, Mode, Overrides};
 use riskgrep_core::model::meets_threshold;
@@ -155,7 +155,12 @@ pub fn scan(a: ScanArgs) -> Result<i32, CliError> {
             .and_then(|()| writeln!(stdout)),
         Format::Text => stdout.write_all(text::render(&report).as_bytes()),
     };
-    let code = exit_code(&report, &thresholds, on_error);
+    let on_partial = match a.on_partial {
+        OnPartial::Error => on_error,
+        OnPartial::Allow => OnError::Allow,
+        OnPartial::Block => OnError::Block,
+    };
+    let code = exit_code(&report, &thresholds, on_error, on_partial);
     match written.and_then(|()| stdout.flush()) {
         // The reader closed the pipe on purpose: no message, and the exit
         // code the scan computed still applies (a gate must not pass).
@@ -178,8 +183,14 @@ fn merge(mut parts: Vec<Report>) -> Report {
 }
 
 /// 1 when a score meets its threshold (`meets_threshold`), else 2 when a target is
-/// unscanned and `on_error` blocks, else 0.
-pub fn exit_code(report: &Report, thresholds: &BTreeMap<String, f64>, on_error: OnError) -> i32 {
+/// unscanned and `on_error` blocks or a container is partial and
+/// `on_partial` blocks, else 0.
+pub fn exit_code(
+    report: &Report,
+    thresholds: &BTreeMap<String, f64>,
+    on_error: OnError,
+    on_partial: OnError,
+) -> i32 {
     let exceeded = report.targets.iter().any(|t| {
         thresholds.iter().any(|(cat, n)| {
             t.scores
@@ -191,6 +202,13 @@ pub fn exit_code(report: &Report, thresholds: &BTreeMap<String, f64>, on_error: 
         return EXIT_THRESHOLD;
     }
     if on_error == OnError::Block && report.summary.unscanned > 0 {
+        return EXIT_UNSCANNED;
+    }
+    let partial_container = report
+        .targets
+        .iter()
+        .any(|t| t.container.is_some() && matches!(t.status, TargetStatus::Partial { .. }));
+    if on_partial == OnError::Block && partial_container {
         return EXIT_UNSCANNED;
     }
     EXIT_OK
@@ -268,6 +286,7 @@ mod tests {
             evidence: vec![],
             suppressed: 0,
             text: true,
+            container: None,
         }
     }
 
@@ -279,23 +298,48 @@ mod tests {
     fn exit_codes() {
         let un = TargetStatus::Unscanned { reason: "r".into() };
         let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 80.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 1);
-        assert_eq!(exit_code(&r, &th(80.1), OnError::Block), 0);
-        assert_eq!(exit_code(&r, &BTreeMap::new(), OnError::Block), 0);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 1);
+        assert_eq!(exit_code(&r, &th(80.1), OnError::Block, OnError::Allow), 0);
+        assert_eq!(
+            exit_code(&r, &BTreeMap::new(), OnError::Block, OnError::Allow),
+            0
+        );
         let r = Report::from_targets("0", "b", vec![t(un.clone(), 0.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 2);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow), 0);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 2);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Allow), 0);
         let r = Report::from_targets("0", "b", vec![t(un, 0.0), t(TargetStatus::Scanned, 90.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 1);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 1);
+    }
+
+    #[test]
+    fn partial_containers_follow_on_partial() {
+        let p = TargetStatus::Partial {
+            not_read: "member 2 encrypted".into(),
+        };
+        let mut c = t(p.clone(), 0.0);
+        c.container = Some(riskgrep_core::model::ContainerReport {
+            format: "zip".into(),
+            members: 2,
+            scanned: 1,
+            skipped: 0,
+            not_read: 1,
+            listed: vec![],
+        });
+        let r = Report::from_targets("0", "b", vec![c]);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Block), 2);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
+        // A sampled text file is partial by design, not an error.
+        let r = Report::from_targets("0", "b", vec![t(p, 0.0)]);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Block), 0);
     }
 
     #[test]
     fn exit_code_uses_the_rounded_score() {
         let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 79.96)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 1);
-        assert_eq!(exit_code(&r, &th(80.1), OnError::Block), 0);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 1);
+        assert_eq!(exit_code(&r, &th(80.1), OnError::Block, OnError::Allow), 0);
         let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 79.94)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 0);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
     }
 
     #[test]

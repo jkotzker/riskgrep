@@ -378,6 +378,7 @@ fn located(start: u64, end: u64) -> riskgrep_core::model::Evidence {
         shape: Vec::new(),
         fingerprints: Vec::new(),
         line_complete: false,
+        member: None,
     }
 }
 

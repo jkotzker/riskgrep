@@ -237,6 +237,7 @@ impl Engine {
                 shape: Vec::new(),
                 fingerprints: Vec::new(),
                 line_complete: false,
+                member: None,
             };
             if has_anchor {
                 let index = lines.get_or_insert_with(|| LineIndex::new(content));

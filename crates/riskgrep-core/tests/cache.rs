@@ -35,6 +35,7 @@ fn ev(rule: &str, fp: [u8; 32]) -> Evidence {
         shape: vec![],
         fingerprints: vec![fp],
         line_complete: false,
+        member: None,
     }
 }
 
@@ -142,7 +143,56 @@ fn schema_v1_rows_are_dropped() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, 4);
+}
+
+#[test]
+fn schema_v3_rows_are_dropped_for_the_container_payload() {
+    // Version 3 (1.1.0) rows are bare evidence arrays; version 4 rows are
+    // objects that can describe a container. Old rows are discarded.
+    let d = tempfile::tempdir().unwrap();
+    {
+        let conn = rusqlite::Connection::open(d.path().join("evidence.sqlite")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE stat(realpath BLOB NOT NULL, dev INTEGER NOT NULL, ino INTEGER NOT NULL,
+               size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL,
+               hash BLOB NOT NULL, written_at_ns INTEGER NOT NULL, PRIMARY KEY(realpath));
+             CREATE TABLE evidence(hash BLOB NOT NULL, bundle TEXT NOT NULL, json TEXT NOT NULL,
+               written_at_ns INTEGER NOT NULL, PRIMARY KEY(hash, bundle));
+             INSERT INTO evidence VALUES (x'00', 'b1', '[]', 0);
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    }
+    let c = open(d.path());
+    assert!(c.evidence([0; 32], "b1").is_none());
+    let rows: i64 = rusqlite::Connection::open(d.path().join("evidence.sqlite"))
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM evidence", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn container_rows_round_trip() {
+    use riskgrep_core::cache::ContainerRow;
+    let d = tempfile::tempdir().unwrap();
+    let c = open(d.path());
+    let mut e = ev("r", [7; 32]);
+    e.member = Some("inner.zip!/config/.env".into());
+    let counts = ContainerRow {
+        format: "zip".into(),
+        members: 3,
+        scanned: 2,
+        skipped: 1,
+    };
+    c.put_entry([3; 32], "b1", &[e.clone()], Some(&counts));
+    let got = c.entry([3; 32], "b1").unwrap();
+    assert_eq!(got.evidence, vec![e]);
+    assert_eq!(got.container, Some(counts));
+    // A plain row has no container.
+    c.put_evidence([4; 32], "b1", &[ev("r", [0; 32])]);
+    assert_eq!(c.entry([4; 32], "b1").unwrap().container, None);
 }
 
 #[test]
