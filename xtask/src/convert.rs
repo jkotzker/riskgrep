@@ -478,24 +478,47 @@ const VALUE_SEPARATOR: &str = r#"[\x60'"\s=]{0,5}"#;
 /// its assignment.
 const SAME_LINE_SEPARATOR: &str = r#"[\x60'" \t=]{0,5}"#;
 
+/// gitleaks' assignment operators, which the value separator follows.
+const ASSIGNMENT: &str = r"(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)";
+
 /// Rewrites gitleaks' value separator so the value must start on the line of
-/// its assignment operator; returns the regex and whether it changed.
-pub fn same_line_value(re: &str) -> (String, bool) {
-    (
-        re.replace(VALUE_SEPARATOR, SAME_LINE_SEPARATOR),
-        re.contains(VALUE_SEPARATOR),
-    )
+/// its assignment operator; returns the regex and whether it changed. A regex
+/// whose assignment operator is followed by any other separator is an error,
+/// so a changed upstream template gets reviewed.
+pub fn same_line_value(re: &str) -> Result<(String, bool), String> {
+    if !re.contains(ASSIGNMENT) {
+        return Ok((re.to_string(), false));
+    }
+    let new = re.replace(
+        &format!("{ASSIGNMENT}{VALUE_SEPARATOR}"),
+        &format!("{ASSIGNMENT}{SAME_LINE_SEPARATOR}"),
+    );
+    if new.matches(ASSIGNMENT).count()
+        != new
+            .matches(&format!("{ASSIGNMENT}{SAME_LINE_SEPARATOR}"))
+            .count()
+    {
+        return Err(
+            "the separator after an assignment operator is not gitleaks' value separator: \
+             review same_line_value against the upstream regex"
+                .into(),
+        );
+    }
+    let changed = new != re;
+    Ok((new, changed))
 }
 
 /// Applies [`same_line_value`] to every rule regex; returns how many changed.
-fn apply_same_line_value(cfg: &mut Config) -> usize {
+fn apply_same_line_value(cfg: &mut Config) -> Result<usize, String> {
     let mut changed = 0;
-    for re in cfg.rules.iter_mut().filter_map(|r| r.regex.as_mut()) {
-        let (new, c) = same_line_value(re);
-        *re = new;
-        changed += usize::from(c);
+    for r in &mut cfg.rules {
+        if let Some(re) = r.regex.as_mut() {
+            let (new, c) = same_line_value(re).map_err(|e| format!("{}: {e}", r.id))?;
+            *re = new;
+            changed += usize::from(c);
+        }
     }
-    changed
+    Ok(changed)
 }
 
 /// Applies [`go_to_rust`] to every regex in the configuration.
@@ -929,7 +952,7 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
     let mut cfg: Config = toml::from_str(text).map_err(|e| format!("gitleaks config: {e}"))?;
     normalise(&mut cfg);
     apply_local_changes(&mut cfg)?;
-    let same_line = apply_same_line_value(&mut cfg);
+    let same_line = apply_same_line_value(&mut cfg)?;
     let sha = Sha256::digest(config)
         .iter()
         .fold(String::new(), |mut s, b| {

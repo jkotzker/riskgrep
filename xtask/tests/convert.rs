@@ -378,18 +378,24 @@ fn no_generated_regex_matches_its_own_rule() {
 
 #[test]
 fn value_separator_stays_on_the_line() {
-    let upstream = r#"(?:=|:)[\x60'"\s=]{0,5}([a-z0-9]{20})(?:[\x60'"\s;]|$)"#;
-    let (re, changed) = same_line_value(upstream);
+    let op = r"(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)";
+    let upstream = format!(r#"key{op}[\x60'"\s=]{{0,5}}([a-z0-9]{{20}})(?:[\x60'"\s;]|$)"#);
+    let (re, changed) = same_line_value(&upstream).unwrap();
     assert!(changed);
     assert_eq!(
         re,
-        r#"(?:=|:)[\x60'" \t=]{0,5}([a-z0-9]{20})(?:[\x60'"\s;]|$)"#
+        format!(r#"key{op}[\x60'" \t=]{{0,5}}([a-z0-9]{{20}})(?:[\x60'"\s;]|$)"#)
     );
     let rx = regex::Regex::new(&re).unwrap();
-    assert!(rx.is_match("=\t'abcdefghij0123456789"));
-    assert!(!rx.is_match("=\nabcdefghij0123456789"));
+    assert!(rx.is_match("key=\t'abcdefghij0123456789"));
+    assert!(!rx.is_match("key=\nabcdefghij0123456789"));
+    // No assignment operator: nothing to rewrite.
     let other = r#"\b(abc[0-9]{4})(?:[\x60'"\s;]|$)"#;
-    assert_eq!(same_line_value(other), (other.to_string(), false));
+    assert_eq!(same_line_value(other).unwrap(), (other.to_string(), false));
+    // An operator followed by a separator spelled differently is an error,
+    // so a changed upstream template gets reviewed.
+    let respelled = format!(r#"key{op}[\s\x60'"=]{{0,5}}([a-z0-9]{{20}})"#);
+    assert!(same_line_value(&respelled).is_err());
 }
 
 #[test]
@@ -399,11 +405,20 @@ fn no_generated_value_separator_crosses_a_line() {
     // Escaped once in `$re` and twice in the `span_regex` string.
     assert!(!yar.contains(r#"[\x60'"\s=]{0,5}"#));
     assert!(!yar.contains(r#"[\\x60'\"\\s=]{0,5}"#));
-    let rules = yar
+    let rewritten = yar
         .split("\nrule ")
         .filter(|b| b.contains(r#"[\\x60'\" \\t=]{0,5}"#))
         .count();
-    assert_eq!(rules, 101);
+    let upstream = String::from_utf8(pinned_config()).unwrap();
+    let templated = upstream
+        .lines()
+        .filter(|l| l.starts_with("regex = ") && l.contains(r#"[\x60'"\s=]{0,5}"#))
+        .count();
+    assert!(templated > 0);
+    assert_eq!(rewritten, templated);
     let md = fs::read_to_string(d.path().join("UPSTREAM.md")).unwrap();
-    assert!(md.contains("101 rules"), "UPSTREAM.md names the count");
+    assert!(
+        md.contains(&format!("in {templated} rules")),
+        "UPSTREAM.md names the count"
+    );
 }
