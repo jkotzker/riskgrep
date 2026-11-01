@@ -470,6 +470,13 @@ fn apply_local_changes(cfg: &mut Config) -> Result<(), String> {
     Ok(())
 }
 
+/// gitleaks' separator between a name and its assignment operator. `\s`
+/// admits a line feed, so a name could end one line and the operator start
+/// the next, as in a CSV header ending in `password` and a row starting with
+/// `,value`.
+const NAME_SEPARATOR: &str = r#"[\s'"]{0,3}"#;
+/// The same separator without line breaks.
+const SAME_LINE_NAME_SEPARATOR: &str = r#"[ \t'"]{0,3}"#;
 /// gitleaks' separator between an assignment operator and its value. `\s`
 /// admits a line feed, so after an empty `NAME=` the value could be the next
 /// line's text.
@@ -478,28 +485,38 @@ const VALUE_SEPARATOR: &str = r#"[\x60'"\s=]{0,5}"#;
 /// its assignment.
 const SAME_LINE_SEPARATOR: &str = r#"[\x60'" \t=]{0,5}"#;
 
-/// gitleaks' assignment operators, which the value separator follows.
+/// gitleaks' assignment operators, between the name and value separators.
 const ASSIGNMENT: &str = r"(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)";
 
-/// Rewrites gitleaks' value separator so the value must start on the line of
-/// its assignment operator; returns the regex and whether it changed. A regex
-/// whose assignment operator is followed by any other separator is an error,
-/// so a changed upstream template gets reviewed.
+/// Rewrites gitleaks' separators on both sides of an assignment operator so
+/// the name, the operator, and the start of the value share a line; returns
+/// the regex and whether it changed. The name separator may be followed by
+/// the `)` of a group that holds the name. A regex whose operator has any
+/// other separator on either side is an error, so a changed upstream
+/// template gets reviewed.
 pub fn same_line_value(re: &str) -> Result<(String, bool), String> {
     if !re.contains(ASSIGNMENT) {
         return Ok((re.to_string(), false));
     }
-    let new = re.replace(
-        &format!("{ASSIGNMENT}{VALUE_SEPARATOR}"),
-        &format!("{ASSIGNMENT}{SAME_LINE_SEPARATOR}"),
-    );
-    if new.matches(ASSIGNMENT).count()
-        != new
-            .matches(&format!("{ASSIGNMENT}{SAME_LINE_SEPARATOR}"))
+    let mut new = re.to_string();
+    for close in ["", ")"] {
+        new = new.replace(
+            &format!("{NAME_SEPARATOR}{close}{ASSIGNMENT}{VALUE_SEPARATOR}"),
+            &format!("{SAME_LINE_NAME_SEPARATOR}{close}{ASSIGNMENT}{SAME_LINE_SEPARATOR}"),
+        );
+    }
+    let rewritten: usize = ["", ")"]
+        .iter()
+        .map(|close| {
+            new.matches(&format!(
+                "{SAME_LINE_NAME_SEPARATOR}{close}{ASSIGNMENT}{SAME_LINE_SEPARATOR}"
+            ))
             .count()
-    {
+        })
+        .sum();
+    if new.matches(ASSIGNMENT).count() != rewritten {
         return Err(
-            "the separator after an assignment operator is not gitleaks' value separator: \
+            "an assignment operator is not between gitleaks' name and value separators: \
              review same_line_value against the upstream regex"
                 .into(),
         );
@@ -1233,7 +1250,7 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
 struct Counts {
     /// Rules marked `line_complete`.
     marked: usize,
-    /// Rules whose value separator [`same_line_value`] rewrote.
+    /// Rules whose assignment separators [`same_line_value`] rewrote.
     same_line: usize,
 }
 
@@ -1273,7 +1290,7 @@ fn upstream_md(
         s,
         "- Each rule becomes one YARA-X rule named after the gitleaks id with `-` replaced by `_` (and `_` prepended to an id starting with a digit).\n\
          - Regexes are read with Go (RE2) syntax: a `{{` that does not start a repetition is escaped for Rust and YARA-X; no other syntax changes.\n\
-         - The separator between an assignment operator and its value, `[\\x60'\"\\s=]{{0,5}}`, becomes `[\\x60'\" \\t=]{{0,5}}` in {same_line} rules, so the value starts on the line of its assignment. With `\\s`, an empty `NAME=` took the next line's text as its value, which flagged files that list names with empty values (`.env.example`).\n\
+         - The separators on both sides of an assignment operator lose their line breaks in {same_line} rules: `[\\s'\"]{{0,3}}` between the name and the operator becomes `[ \\t'\"]{{0,3}}`, and `[\\x60'\"\\s=]{{0,5}}` between the operator and the value becomes `[\\x60'\" \\t=]{{0,5}}`, so the name, the operator, and the start of the value share a line. With `\\s`, an empty `NAME=` took the next line's text as its value, which flagged files that list names with empty values (`.env.example`), and a CSV header ending in a credential name took the next row's first field as its value.\n\
          - The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The regex as changed above is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret: `secretGroup` when the rule sets it, otherwise as gitleaks does, the first capture group that matched non-empty, else the whole match (`secret_group = \"first_nonempty\"`; `secret_group = 1` when group 1 always takes part and is never empty, which selects the same text).\n\
          - In `$re` only, a repetition of 4 or more over a class of at most 11 characters with no letters (`[0-9]{{11}}`, `\\d{{15,16}}`) is written `(?:RUN|$^)`. YARA-X otherwise searches for every 4-digit string in place of the rule's literal prefix, which made digit-dense text scan as slowly as 0.8 MB/s. Without multi-line mode `$^` matches only an empty input and no converted regex matches the empty string, so `$re` matches exactly what it did. A regex that sets multi-line mode (an inline flag group containing `m`) is not rewritten, because `$^` also matches between lines there; the rule is listed under Not translated.\n\
          - The `span` post-processor reports every non-overlapping match of `span_regex` inside each `$re` match, so a match that runs over several secrets yields one location per secret.\n\

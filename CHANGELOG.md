@@ -4,9 +4,13 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Changed
+
+- The Claude Code hook offers partial reads for files whose findings come from `generic_api_key` and the provider-context rules. With both separators on one line, 100 of the 101 rewritten rules are marked `line_complete`: 211 of the 222 converted rules, up from 111 (`grep -c 'line_complete = true' crates/riskgrep-core/rulesets/secrets-core/gitleaks.yar`). `atlassian_api_token` stays unmarked, because its regex is an alternation whose secret is the first non-empty group and its trailing delimiter can match a line feed. Each marked rule is checked by `cargo test -p riskgrep-core --test ruleset_secrets every_line_complete_rule_locates_every_secret`.
+
 ### Fixed
 
-- Converted gitleaks rules no longer take a value from the line after an assignment. The separator between the assignment operator and the value admitted a line feed, so an empty `NAME=` followed by a line starting with a name of 10 or more characters scored secret 80 under `generic_api_key`, which blocked commits of `.env.example`-style files. The value must now start on the line of its assignment, in the 101 rules built from gitleaks' generic assignment pattern (`generic_api_key` and the provider-context rules such as `adafruit_api_key`). Rules marked `line_complete` are unchanged (111 of 222, `grep -c 'line_complete = true' crates/riskgrep-core/rulesets/secrets-core/gitleaks.yar`).
+- Converted gitleaks rules no longer read an assignment across a line break. The separators on both sides of the assignment operator admitted a line feed. After the operator, an empty `NAME=` followed by a line starting with a name of 10 or more characters scored secret 80 under `generic_api_key`, which blocked commits of `.env.example`-style files. Before the operator, a CSV header ending in a credential name such as `password` took the first field of the next row (`,value`) as its value. The name, the operator, and the start of the value must now share a line, in the 101 rules built from gitleaks' generic assignment pattern (`generic_api_key` and the provider-context rules such as `adafruit_api_key`).
 
 ## [1.1.0] – 2026-10-25
 
