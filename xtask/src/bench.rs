@@ -4,8 +4,9 @@
 //! whose rules bundle is already compiled. The p95 of the 60 runs is compared
 //! with `bench/targets.toml` and, when present, with
 //! `bench/baseline-<os>.json`. The one-time bundle compile is timed and
-//! reported separately. Inputs are generated text without secret-like or
-//! embedding-like content, and no output ever contains file content.
+//! reported separately. Inputs are generated text (one case reads a zip of
+//! such text) without secret-like or embedding-like content, and no output
+//! ever contains file content.
 
 use crate::eval::workspace_root;
 use serde::Deserialize;
