@@ -452,6 +452,7 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "config_xml_credential",
     "config_json_credential_object",
     "config_yaml_credential_mapping",
+    "config_dotnet_app_settings",
     "otpauth_no_secret",
     "otpauth_short_secret",
     "otpauth_example_secret",
@@ -469,6 +470,7 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "config_xml_non_secret",
     "config_json_non_secret",
     "config_yaml_non_secret",
+    "config_dotnet_non_secret",
     "lastpass_csv_bom_crlf",
     "chrome_csv_bom_crlf",
     "apple_csv_bom_crlf",
@@ -921,6 +923,27 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
             let uri = otpauth_uri(&mut r, "totp", 1);
             writeln!(out, "{}", uri.to_lowercase()).unwrap();
         }
+        // .NET `appSettings`: `<add key="…" value="…" />`, with the
+        // attributes in either order and `name` in place of `key`.
+        "config_dotnet_app_settings" => {
+            let name = XML_CREDENTIAL_ELEMENTS[r.below(XML_CREDENTIAL_ELEMENTS.len())];
+            let upper = r.below(2) == 1;
+            let value = hex_value(&mut r, 32, upper);
+            let attr = if r.below(2) == 0 { "key" } else { "name" };
+            let key = if r.below(2) == 0 {
+                name.to_string()
+            } else {
+                format!("Billing:{name}")
+            };
+            out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<configuration>\n");
+            out.push_str("  <appSettings>\n    <add key=\"Environment\" value=\"Production\" />\n");
+            if r.below(2) == 0 {
+                writeln!(out, "    <add {attr}=\"{key}\" value=\"{value}\" />").unwrap();
+            } else {
+                writeln!(out, "    <add value=\"{value}\" {attr}=\"{key}\"/>").unwrap();
+            }
+            out.push_str("  </appSettings>\n</configuration>\n");
+        }
         // Hex and token values under names that hold no credential: public
         // keys, a bare `Key` (S3 listings, property lists), primary keys, and
         // pagination tokens.
@@ -985,6 +1008,39 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
                 hex_value(&mut r, 32, false)
             )
             .unwrap();
+        }
+        // `appSettings` entries that hold no credential: public keys, a
+        // non-credential key with a hex value, a placeholder, a template, and
+        // a UUID under a credential name.
+        "config_dotnet_non_secret" => {
+            out.push_str("<configuration>\n  <appSettings>\n");
+            writeln!(
+                out,
+                "    <add key=\"PublicKey\" value=\"{}\" />",
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    <add value=\"{}\" key=\"PublicSigningKey\" />",
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    <add key=\"BuildId\" value=\"{}\" />",
+                hex_value(&mut r, 32, false)
+            )
+            .unwrap();
+            out.push_str("    <add key=\"ApiKey\" value=\"your-api-key-goes-here\" />\n");
+            out.push_str("    <add key=\"AuthToken\" value=\"${AUTH_TOKEN}\" />\n");
+            writeln!(
+                out,
+                "    <add key=\"ClientSecret\" value=\"{}\" />",
+                uuid_text(&mut r)
+            )
+            .unwrap();
+            out.push_str("  </appSettings>\n</configuration>\n");
         }
         "config_yaml_non_secret" => {
             writeln!(out, "publicKeys:\n  main: {}", hex_value(&mut r, 64, false)).unwrap();

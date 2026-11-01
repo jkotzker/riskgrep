@@ -44,11 +44,35 @@ rule xml_credential_element {
     secret_group = 1
     min_entropy = 3.0
     stopwords = "secrets_core_generic_api_key"
-    allow_regex = "^<[\\w.:-]{0,40}(?i:public)|^\"[\\w.-]{0,40}(?i:public)|^\\n?[ ]{0,6}[\\w.-]{0,40}(?i:public)[\\w.-]*:|^[^0-9]+$|^[^A-Za-z]+$|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$|^[A-Za-z0-9+/=_.-]*(?i:0123456|123456789|abcdef|fedcba)|^[A-Za-z0-9+/=_.-]*(?i:\\.(?:pem|key|crt|cer|p12|pfx|jks|keystore|txt|json|ya?ml|xml|conf|cfg|ini|der|asc|gpg|pub)$)|^/(?:bin|etc|home|opt|tmp|usr|var|run|srv|mnt|data|config|app|Users|private)/"
+    allow_regex = "^<[\\w.:-]{0,40}(?i:public)|^<add[ \\t][^>]*(?i:key|name)[ \\t]*=[ \\t]*[\"'][\\w.:-]{0,40}(?i:public)|^\"[\\w.-]{0,40}(?i:public)|^\\n?[ ]{0,6}[\\w.-]{0,40}(?i:public)[\\w.-]*:|^[^0-9]+$|^[^A-Za-z]+$|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$|^[A-Za-z0-9+/=_.-]*(?i:0123456|123456789|abcdef|fedcba)|^[A-Za-z0-9+/=_.-]*(?i:\\.(?:pem|key|crt|cer|p12|pfx|jks|keystore|txt|json|ya?ml|xml|conf|cfg|ini|der|asc|gpg|pub)$)|^/(?:bin|etc|home|opt|tmp|usr|var|run|srv|mnt|data|config|app|Users|private)/"
   strings:
     $re = /<([\w.:-]{0,40}(api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?key|[\w.:-]{0,40}(access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?token|token|[\w.:-]{0,40}(secret|passw(or)?d|passphrase|pwd|psk|credentials?))>[ \t]*[A-Za-z0-9+\/=_.-]{16,200}[ \t]*<\/[\w.:-]{1,80}>/ nocase
   condition:
     $re
+}
+
+// `<add key="ApiKey" value="…" />`, the .NET `appSettings` layout (`name` in
+// place of `key` as `connectionStrings` spells it), with the two attributes in
+// either order and adjacent. The same names, exclusions, and value filter as
+// `xml_credential_element`; a connection string's embedded `Password=` is a
+// different layout and is not read. A match is one line, and the location is
+// the value alone.
+rule xml_add_key_value {
+  meta:
+    category = "secret"
+    weight = 80
+    line_complete = true
+    post = "allow_regex,span,entropy,stopwords,allow_regex"
+    span_regex = "(?i)<add[ \\t]+(?:key|name)[ \\t]*=[ \\t]*[\"'](?:[\\w.:-]{0,40}(?:api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?key|[\\w.:-]{0,40}(?:access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?token|token|[\\w.:-]{0,40}(?:secret|passw(?:or)?d|passphrase|pwd|psk|credentials?))[\"'][ \\t]+value[ \\t]*=[ \\t]*[\"']([A-Za-z0-9+/=_.-]{16,200})[\"']|<add[ \\t]+value[ \\t]*=[ \\t]*[\"']([A-Za-z0-9+/=_.-]{16,200})[\"'][ \\t]+(?:key|name)[ \\t]*=[ \\t]*[\"'](?:[\\w.:-]{0,40}(?:api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?key|[\\w.:-]{0,40}(?:access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?token|token|[\\w.:-]{0,40}(?:secret|passw(?:or)?d|passphrase|pwd|psk|credentials?))[\"']"
+    secret_group = "first_nonempty"
+    min_entropy = 3.0
+    stopwords = "secrets_core_generic_api_key"
+    allow_regex = "^<[\\w.:-]{0,40}(?i:public)|^<add[ \\t][^>]*(?i:key|name)[ \\t]*=[ \\t]*[\"'][\\w.:-]{0,40}(?i:public)|^\"[\\w.-]{0,40}(?i:public)|^\\n?[ ]{0,6}[\\w.-]{0,40}(?i:public)[\\w.-]*:|^[^0-9]+$|^[^A-Za-z]+$|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$|^[A-Za-z0-9+/=_.-]*(?i:0123456|123456789|abcdef|fedcba)|^[A-Za-z0-9+/=_.-]*(?i:\\.(?:pem|key|crt|cer|p12|pfx|jks|keystore|txt|json|ya?ml|xml|conf|cfg|ini|der|asc|gpg|pub)$)|^/(?:bin|etc|home|opt|tmp|usr|var|run|srv|mnt|data|config|app|Users|private)/"
+  strings:
+    $re = /<add[ \t]+(key|name)[ \t]*=[ \t]*["']([\w.:-]{0,40}(api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?key|[\w.:-]{0,40}(access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?token|token|[\w.:-]{0,40}(secret|passw(or)?d|passphrase|pwd|psk|credentials?))["'][ \t]+value[ \t]*=[ \t]*["'][A-Za-z0-9+\/=_.-]{16,200}["']/ nocase
+    $rev = /<add[ \t]+value[ \t]*=[ \t]*["'][A-Za-z0-9+\/=_.-]{16,200}["'][ \t]+(key|name)[ \t]*=[ \t]*["']([\w.:-]{0,40}(api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?key|[\w.:-]{0,40}(access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?token|token|[\w.:-]{0,40}(secret|passw(or)?d|passphrase|pwd|psk|credentials?))["']/ nocase
+  condition:
+    any of ($re*)
 }
 
 // ---- JSON --------------------------------------------------------------------
@@ -67,7 +91,7 @@ rule json_credential_object_member {
     secret_group = 1
     min_entropy = 3.0
     stopwords = "secrets_core_generic_api_key"
-    allow_regex = "^<[\\w.:-]{0,40}(?i:public)|^\"[\\w.-]{0,40}(?i:public)|^\\n?[ ]{0,6}[\\w.-]{0,40}(?i:public)[\\w.-]*:|^[^0-9]+$|^[^A-Za-z]+$|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$|^[A-Za-z0-9+/=_.-]*(?i:0123456|123456789|abcdef|fedcba)|^[A-Za-z0-9+/=_.-]*(?i:\\.(?:pem|key|crt|cer|p12|pfx|jks|keystore|txt|json|ya?ml|xml|conf|cfg|ini|der|asc|gpg|pub)$)|^/(?:bin|etc|home|opt|tmp|usr|var|run|srv|mnt|data|config|app|Users|private)/"
+    allow_regex = "^<[\\w.:-]{0,40}(?i:public)|^<add[ \\t][^>]*(?i:key|name)[ \\t]*=[ \\t]*[\"'][\\w.:-]{0,40}(?i:public)|^\"[\\w.-]{0,40}(?i:public)|^\\n?[ ]{0,6}[\\w.-]{0,40}(?i:public)[\\w.-]*:|^[^0-9]+$|^[^A-Za-z]+$|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$|^[A-Za-z0-9+/=_.-]*(?i:0123456|123456789|abcdef|fedcba)|^[A-Za-z0-9+/=_.-]*(?i:\\.(?:pem|key|crt|cer|p12|pfx|jks|keystore|txt|json|ya?ml|xml|conf|cfg|ini|der|asc|gpg|pub)$)|^/(?:bin|etc|home|opt|tmp|usr|var|run|srv|mnt|data|config|app|Users|private)/"
   strings:
     $re = /"([\w.-]{0,40}(api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?keys|[\w.-]{0,40}(access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?tokens|[\w.-]{0,40}(secrets?|credentials?|creds|passwords|passphrases))"[ \t\r\n]*:[ \t\r\n]*\{[^{}]{0,2000}"[^"\r\n]{1,64}"[ \t\r\n]*:[ \t\r\n]*"[A-Za-z0-9+\/=_.-]{16,200}"/ nocase
   condition:
@@ -93,7 +117,7 @@ rule yaml_credential_mapping_member {
     secret_group = 1
     min_entropy = 3.0
     stopwords = "secrets_core_generic_api_key"
-    allow_regex = "^<[\\w.:-]{0,40}(?i:public)|^\"[\\w.-]{0,40}(?i:public)|^\\n?[ ]{0,6}[\\w.-]{0,40}(?i:public)[\\w.-]*:|^[^0-9]+$|^[^A-Za-z]+$|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$|^[A-Za-z0-9+/=_.-]*(?i:0123456|123456789|abcdef|fedcba)|^[A-Za-z0-9+/=_.-]*(?i:\\.(?:pem|key|crt|cer|p12|pfx|jks|keystore|txt|json|ya?ml|xml|conf|cfg|ini|der|asc|gpg|pub)$)|^/(?:bin|etc|home|opt|tmp|usr|var|run|srv|mnt|data|config|app|Users|private)/"
+    allow_regex = "^<[\\w.:-]{0,40}(?i:public)|^<add[ \\t][^>]*(?i:key|name)[ \\t]*=[ \\t]*[\"'][\\w.:-]{0,40}(?i:public)|^\"[\\w.-]{0,40}(?i:public)|^\\n?[ ]{0,6}[\\w.-]{0,40}(?i:public)[\\w.-]*:|^[^0-9]+$|^[^A-Za-z]+$|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$|^[A-Za-z0-9+/=_.-]*(?i:0123456|123456789|abcdef|fedcba)|^[A-Za-z0-9+/=_.-]*(?i:\\.(?:pem|key|crt|cer|p12|pfx|jks|keystore|txt|json|ya?ml|xml|conf|cfg|ini|der|asc|gpg|pub)$)|^/(?:bin|etc|home|opt|tmp|usr|var|run|srv|mnt|data|config|app|Users|private)/"
   strings:
     $re0 = /(^|\n)([\w.-]{0,40}(api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?keys|[\w.-]{0,40}(access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?tokens|[\w.-]{0,40}(secrets?|credentials?|creds|passwords|passphrases)):[ \t]*(#[^\r\n]*)?\r?\n(([ ]+[^\r\n]*)?\r?\n){0,30}[ ]+(- )?[\w.-]{1,64}:[ \t]+['"]?[A-Za-z0-9+\/=_.-]{16,200}['"]?[ \t]*(#[^\r\n]*)?(\r?\n|$)/ nocase
     $re2 = /\n  ([\w.-]{0,40}(api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?keys|[\w.-]{0,40}(access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?tokens|[\w.-]{0,40}(secrets?|credentials?|creds|passwords|passphrases)):[ \t]*(#[^\r\n]*)?\r?\n(([ ]{3,}[^\r\n]*)?\r?\n){0,30}[ ]{3,}(- )?[\w.-]{1,64}:[ \t]+['"]?[A-Za-z0-9+\/=_.-]{16,200}['"]?[ \t]*(#[^\r\n]*)?(\r?\n|$)/ nocase

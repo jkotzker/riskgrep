@@ -623,3 +623,34 @@ rule = "json_credential_object_member"
 synth = "text:{\"secrets\": {\"existingSecret\": \"app-db-credentials-v2\", \"host\": \"db1.internal.example.test\"}}\n"
 path = "settings.json"
 expect = "none"
+
+[[case]]
+rule = "xml_add_key_value"
+synth = "file:config_dotnet_app_settings"
+path = "web.config"
+expect = 80
+
+[[case]]
+rule = "xml_add_key_value"
+synth = "file:config_dotnet_app_settings:11"
+path = "web.config"
+expect = 80
+
+[[case]]
+rule = "xml_add_key_value"
+synth = "file:config_dotnet_app_settings:12"
+path = "web.config"
+expect = 80
+
+[[case]]
+rule = "xml_add_key_value"
+synth = "file:config_dotnet_app_settings:13"
+path = "web.config"
+expect = 80
+
+[[case]]
+# Public keys, a non-credential key, a placeholder, a template, and a UUID.
+rule = "xml_add_key_value"
+synth = "file:config_dotnet_non_secret"
+path = "web.config"
+expect = "none"

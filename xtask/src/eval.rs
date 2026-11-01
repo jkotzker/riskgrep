@@ -122,6 +122,7 @@ pub const CONFIG_CREDENTIAL_KINDS: &[(&str, &str, &str)] = &[
         "config_yaml_credential_mapping",
         "settings.yaml",
     ),
+    ("config_dotnet", "config_dotnet_app_settings", "web.config"),
 ];
 
 /// Probe sets (reported, not gated).
@@ -499,6 +500,7 @@ fn credential_files(out: &mut Vec<Sample>) {
         ("config_xml_non_secret", "config.xml"),
         ("config_json_non_secret", "settings.json"),
         ("config_yaml_non_secret", "settings.yaml"),
+        ("config_dotnet_non_secret", "web.config"),
     ];
     for (k, name) in near_misses {
         for i in 0..3 {
