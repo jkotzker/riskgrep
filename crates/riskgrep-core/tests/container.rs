@@ -185,15 +185,16 @@ fn a_member_lying_about_its_size_is_not_read_past_the_cap() {
     let mut cfg = Config::default();
     cfg.limits.member_bytes = 1 << 20;
     let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
-    // The stored data runs past the declared size; the reader stops at the
-    // member cap, whatever the header says.
-    assert_eq!(
-        partial(&t),
-        "member 1 read only in part (limits.member_bytes)"
-    );
+    // The stored data runs past the declared size. The zip reader refuses
+    // the mismatch, so the member is not read; whatever a reader does, no
+    // more than the member cap is read and the archive is never whole.
+    assert_eq!(partial(&t), "member 1 unreadable");
     let c = t.container.unwrap();
-    assert_eq!((c.scanned, c.not_read), (2, 1));
-    assert!(matches!(c.listed[0].status, TargetStatus::Partial { .. }));
+    assert_eq!((c.scanned, c.not_read), (1, 1));
+    assert!(c
+        .listed
+        .iter()
+        .any(|m| m.path == "big.txt" && matches!(m.status, TargetStatus::Unscanned { .. })));
 }
 
 #[test]
@@ -528,4 +529,24 @@ fn a_comment_over_the_member_cap_makes_it_partial() {
         partial(&t),
         "member 2 read only in part (limits.member_bytes)"
     );
+}
+
+#[test]
+fn a_member_name_that_is_not_utf8_is_still_named_and_read() {
+    let d = tempfile::tempdir().unwrap();
+    let mut z = synth::npz(&[("aXX.ini", aws_file(17))]);
+    // Flag the name UTF-8 (bit 11) and make it invalid UTF-8.
+    let l = headers(&z, b"PK\x03\x04")[0];
+    z[l + 7] |= 0x08;
+    z[l + 31] = 0xFF;
+    z[l + 32] = 0xFE;
+    let c = headers(&z, b"PK\x01\x02")[0];
+    z[c + 9] |= 0x08;
+    z[c + 47] = 0xFF;
+    z[c + 48] = 0xFE;
+    let p = write(d.path(), "badname.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.scores[&secret()], 95.0, "{:?}", t.status);
+    // The zip reader falls back to code page 437 for the bad name.
+    assert_eq!(t.evidence[0].member.as_deref(), Some("a\u{a0}\u{25a0}.ini"));
 }

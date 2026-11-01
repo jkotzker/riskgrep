@@ -12,6 +12,14 @@ const DIRECTORY_MAX: u64 = 8_388_608;
 
 pub struct Zip;
 
+/// Entry `i`'s stored name; empty when it is missing or cannot be decoded.
+fn entry_name<R: std::io::Read + std::io::Seek>(zip: &zip::ZipArchive<R>, i: usize) -> String {
+    zip.name_for_index(i)
+        .and_then(Result::ok)
+        .map(std::borrow::Cow::into_owned)
+        .unwrap_or_default()
+}
+
 /// An entry as the central directory and its local header describe it.
 struct Entry {
     name: String,
@@ -128,7 +136,7 @@ impl Extractor for Zip {
                     complete = false;
                     return None;
                 }
-                let name = zip.name_for_index(i).unwrap_or_default().to_string();
+                let name = entry_name(&zip, i);
                 let f = zip.by_index_raw(i).ok()?;
                 Some(Entry {
                     is_dir: name.ends_with('/') && f.size() == 0,
@@ -144,7 +152,7 @@ impl Extractor for Zip {
             .collect();
         if !complete {
             let files = (0..n)
-                .filter(|&i| !zip.name_for_index(i).is_some_and(|x| x.ends_with('/')))
+                .filter(|&i| !entry_name(&zip, i).ends_with('/'))
                 .count();
             walk.rest(files as u64 + u64::from(!zip.comment().is_empty()));
             return Ok(());
@@ -158,7 +166,7 @@ impl Extractor for Zip {
             let flow = match &entries[i] {
                 None => walk.not_read(
                     MemberMeta {
-                        name: zip.name_for_index(i).unwrap_or_default().to_string(),
+                        name: entry_name(&zip, i),
                         declared_size: None,
                         compressed_size: None,
                     },
