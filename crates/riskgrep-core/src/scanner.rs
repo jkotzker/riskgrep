@@ -225,21 +225,9 @@ pub(crate) fn classify_member(name: &str, head: &[u8], size: u64) -> FileClass {
     classify(name, head, size)
 }
 
-/// The largest container file whose result is cached: caching needs a
-/// hash of the whole file, read in addition to its members.
+/// The largest container file whose result is cached: such a file is read
+/// into memory whole, hashed, and walked from that copy.
 const CONTAINER_HASH_MAX: u64 = 64 << 20;
-
-/// BLAKE3 of `size` bytes of `src`, read in 1 MiB pieces.
-fn hash_source(src: &dyn Source, size: u64) -> io::Result<[u8; 32]> {
-    let mut h = blake3::Hasher::new();
-    let mut at = 0;
-    while at < size {
-        let n = (size - at).min(1 << 20);
-        h.update(&src.range(at, n)?);
-        at += n;
-    }
-    Ok(*h.finalize().as_bytes())
-}
 
 /// The extractor that reads `class`, when it is a container with one.
 fn container_of(class: &FileClass) -> Option<&'static dyn Extractor> {
@@ -782,13 +770,34 @@ impl RiskGrep {
         }
         if let Some(ext) = ext {
             let start = Instant::now();
-            let x = container::extract(
-                ext,
-                &file,
-                size,
-                &self.cfg.limits,
-                start + self.cfg.limits.time_budget,
-            );
+            // A container small enough to cache is read once into memory,
+            // hashed, and walked from that copy, so the cache key is the
+            // hash of exactly the bytes whose members were scanned.
+            let whole = if size <= CONTAINER_HASH_MAX {
+                Some(file.range(0, size)?)
+            } else {
+                None
+            };
+            let hash = whole.as_deref().map(|b| *blake3::hash(b).as_bytes());
+            if let (Some(c), Some(h)) = (cache, hash) {
+                if let Some(entry) = c.entry(h, &ekey) {
+                    // As for other files: the stat row only when the file
+                    // did not change while it was read.
+                    let stable = fs::metadata(&real)
+                        .map(|m| StatKey::from_metadata(&real, &m) == key)
+                        .unwrap_or(false);
+                    if stable {
+                        c.put_stat(&key, h, now);
+                    }
+                    return hit(entry);
+                }
+            }
+            let deadline = start + self.cfg.limits.time_budget;
+            let x = match &whole {
+                Some(b) => container::extract(ext, &b.as_slice(), size, &self.cfg.limits, deadline),
+                None => container::extract(ext, &file, size, &self.cfg.limits, deadline),
+            };
+            drop(whole);
             if let Some(hook) = AFTER_READ.get() {
                 hook(&real);
             }
@@ -796,22 +805,12 @@ impl RiskGrep {
             if let TargetStatus::Unscanned { reason } = status {
                 return done(unscanned(&reason));
             }
+            // As for other files, the content-addressed row is cached even
+            // if the file changed; the stat row only if it did not.
             let stable = fs::metadata(&real)
                 .map(|m| StatKey::from_metadata(&real, &m) == key)
                 .unwrap_or(false);
-            // Only a container read whole from a file that did not change
-            // is cached, keyed by the hash of the whole file.
-            let hash = if stable && status == TargetStatus::Scanned && size <= CONTAINER_HASH_MAX {
-                Some(hash_source(&file, size)?)
-            } else {
-                None
-            };
-            if let (Some(c), Some(h)) = (cache, hash) {
-                if let Some(entry) = c.entry(h, &ekey) {
-                    c.put_stat(&key, h, now);
-                    return hit(entry);
-                }
-            }
+            let hash = hash.filter(|_| status == TargetStatus::Scanned);
             return Ok(Step::Scan(Box::new(Pending {
                 target: target.to_string(),
                 rel,
@@ -954,7 +953,7 @@ impl RiskGrep {
             }
         }
         scanner.set_timeout(self.cfg.limits.time_budget);
-        let status = container::status(scanned > 0, &unread, x.error.as_deref());
+        let status = container::status(scanned > 0, &unread, x.uncovered, x.error.as_deref());
         if let TargetStatus::Unscanned { reason } = status {
             return Raw::status(p.target, TargetStatus::Unscanned { reason });
         }

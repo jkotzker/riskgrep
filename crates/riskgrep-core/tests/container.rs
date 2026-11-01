@@ -404,3 +404,66 @@ fn a_1password_export_is_found_inside_its_1pux_archive() {
         .iter()
         .all(|e| e.member.as_deref() == Some("export.data")));
 }
+
+/// Rename member `i` to `name` (same length) in both headers.
+fn rename(zip: &mut [u8], i: usize, name: &str) {
+    let l = headers(zip, b"PK\x03\x04")[i];
+    zip[l + 30..l + 30 + name.len()].copy_from_slice(name.as_bytes());
+    let c = headers(zip, b"PK\x01\x02")[i];
+    zip[c + 46..c + 46 + name.len()].copy_from_slice(name.as_bytes());
+}
+
+#[test]
+fn a_member_hidden_behind_a_duplicate_name_makes_it_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let mut z = synth::npz(&[("a.ini", aws_file(10)), ("b.ini", text("plain=1\n"))]);
+    rename(&mut z, 1, "a.ini");
+    let p = write(d.path(), "dup.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert!(
+        matches!(t.status, TargetStatus::Partial { .. }),
+        "{:?}",
+        t.status
+    );
+    assert!(partial(&t).contains("bytes outside the listed members"));
+}
+
+#[test]
+fn bytes_outside_the_members_make_it_partial() {
+    use std::io::Write as _;
+    let d = tempfile::tempdir().unwrap();
+    // A comment after the central directory.
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    w.start_file("a.txt", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    w.write_all(b"a\n").unwrap();
+    w.set_comment("note").unwrap();
+    let commented = w.finish().unwrap().into_inner();
+    let p = write(d.path(), "comment.zip", &commented);
+    assert!(partial(only(&scan(&mut scanner(), &p))).contains("bytes outside"));
+    // A local entry ahead of the archive that its directory does not list.
+    let hidden = synth::npz(&[("hidden.ini", aws_file(12))]);
+    let mut z = hidden[..headers(&hidden, b"PK\x01\x02")[0]].to_vec();
+    z.extend(synth::zip(&[("a.txt", text("a\n"))]));
+    let p = write(d.path(), "prefixed.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert!(partial(&t).contains("bytes outside"), "{:?}", t.status);
+    assert_eq!(t.scores[&secret()], 0.0, "the unlisted entry is not read");
+}
+
+#[test]
+fn data_descriptors_are_accounted_for() {
+    use std::io::Write as _;
+    let d = tempfile::tempdir().unwrap();
+    let mut w = zip::ZipWriter::new_stream(Vec::new());
+    for (name, body) in [("a.txt", text("a\n")), ("b.ini", aws_file(11))] {
+        w.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        w.write_all(&body).unwrap();
+    }
+    let z = w.finish().unwrap().into_inner();
+    let p = write(d.path(), "stream.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&secret()], 95.0);
+}

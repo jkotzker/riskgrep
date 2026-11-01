@@ -126,6 +126,13 @@ pub trait Walk {
     fn not_read(&mut self, meta: MemberMeta, why: NotRead) -> Flow;
     /// The number of members left unoffered after a `Flow::Stop`.
     fn rest(&mut self, n: u64);
+    /// The deadline has passed: work done before offering members (such as
+    /// reading headers) should stop.
+    fn expired(&self) -> bool;
+    /// Bytes of the container that belong to no member offered (data
+    /// before the first member or between members, a comment): they are
+    /// not read, so the container is never reported whole.
+    fn unaccounted(&mut self, bytes: u64);
 }
 
 /// Bytes a member may always produce whatever its compression ratio, so a
@@ -214,6 +221,9 @@ pub struct Extracted {
     /// files of unknown format); they do not make the container partial.
     pub skipped: u64,
     pub unread: Vec<Unread>,
+    /// Bytes of the container, nested ones included, outside every member
+    /// (see [`Walk::unaccounted`]).
+    pub uncovered: u64,
     /// Set when the container's own structure could not be read.
     pub error: Option<String>,
 }
@@ -224,6 +234,7 @@ impl Extracted {
         status(
             !self.members.is_empty(),
             &self.unread,
+            self.uncovered,
             self.error.as_deref(),
         )
     }
@@ -233,24 +244,29 @@ impl Extracted {
 /// (`read_any` false) but something was not, or its structure could not be
 /// read at all; `partial` when some member was not read whole or the
 /// structure failed part way; else `scanned`.
-pub fn status(read_any: bool, unread: &[Unread], error: Option<&str>) -> TargetStatus {
+pub fn status(
+    read_any: bool,
+    unread: &[Unread],
+    uncovered: u64,
+    error: Option<&str>,
+) -> TargetStatus {
     if !read_any {
         if let (Some(e), true) = (error, unread.is_empty()) {
             return TargetStatus::Unscanned {
                 reason: e.to_string(),
             };
         }
-        if !unread.is_empty() {
+        if !unread.is_empty() || uncovered > 0 {
             return TargetStatus::Unscanned {
-                reason: describe(unread, error),
+                reason: describe(unread, uncovered, error),
             };
         }
     }
-    if unread.is_empty() && error.is_none() {
+    if unread.is_empty() && uncovered == 0 && error.is_none() {
         TargetStatus::Scanned
     } else {
         TargetStatus::Partial {
-            not_read: describe(unread, error),
+            not_read: describe(unread, uncovered, error),
         }
     }
 }
@@ -279,7 +295,7 @@ pub fn unread_count(unread: &[Unread]) -> u64 {
 /// `members 3, 7..9 encrypted; members 1001..4096 not read
 /// (limits.container_members)`: causes in order of first appearance, each
 /// with its member positions as ranges. Never a member name.
-pub fn describe(unread: &[Unread], error: Option<&str>) -> String {
+pub fn describe(unread: &[Unread], uncovered: u64, error: Option<&str>) -> String {
     const RANGES: usize = 10;
     let mut causes: Vec<(String, Vec<(u64, u64)>)> = Vec::new();
     for u in unread {
@@ -314,6 +330,11 @@ pub fn describe(unread: &[Unread], error: Option<&str>) -> String {
         let noun = if one { "member" } else { "members" };
         parts.push(format!("{noun} {} {phrase}", shown.join(", ")));
     }
+    if uncovered > 0 {
+        parts.push(format!(
+            "{uncovered} bytes outside the listed members not read"
+        ));
+    }
     if let Some(e) = error {
         parts.push(format!("container structure: {e}"));
     }
@@ -333,6 +354,11 @@ pub fn escape_name(name: &str, seq: u64) -> String {
         }
     }
     let mut s = s.replace("!/", "!!/");
+    if s.ends_with('!') {
+        // Else `a!` joined to a nested member `x` (`a!!/x`) would read as
+        // the escaped name `a!/x`.
+        s.push('!');
+    }
     if s.len() > NAME_MAX {
         let mark = format!("…#{seq}");
         let mut cut = NAME_MAX - mark.len();
@@ -405,6 +431,7 @@ fn extract_with(
             total: 0,
             skipped: 0,
             unread: Vec::new(),
+            uncovered: 0,
             error: None,
         },
     };
@@ -444,9 +471,6 @@ impl Walker<'_> {
         }
         if Instant::now() >= self.deadline {
             return Err(self.halt(Cause::Limit("limits.time_budget_ms".into())));
-        }
-        if self.bytes_left == 0 {
-            return Err(self.halt(Cause::Limit("limits.container_bytes".into())));
         }
         Ok(self.seq)
     }
@@ -521,6 +545,13 @@ impl Walk for Walker<'_> {
             }
         };
         let path = self.path(&meta.name, seq);
+        if self.bytes_left == 0 {
+            // Spent bytes stop only members that need some: an encrypted
+            // member after this keeps its own cause.
+            let cause = Cause::Limit("limits.container_bytes".into());
+            self.unread(seq, Some(path), cause, false);
+            return Flow::Continue;
+        }
         let (bytes, truncated) = match self.read(data, meta.compressed_size) {
             Got::Bytes(b, t) => (b, t),
             Got::Failed(cause) => {
@@ -562,11 +593,22 @@ impl Walk for Walker<'_> {
         Flow::Continue
     }
 
+    fn expired(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+
+    fn unaccounted(&mut self, bytes: u64) {
+        self.out.uncovered = self.out.uncovered.saturating_add(bytes);
+    }
+
     fn rest(&mut self, n: u64) {
-        let cause = self
-            .stop
-            .clone()
-            .unwrap_or_else(|| Cause::Limit("limits.container_members".into()));
+        let cause = self.stop.clone().unwrap_or_else(|| {
+            Cause::Limit(if self.expired() {
+                "limits.time_budget_ms".into()
+            } else {
+                "limits.container_members".into()
+            })
+        });
         if n == 0 {
             return;
         }

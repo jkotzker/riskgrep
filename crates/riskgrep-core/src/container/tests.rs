@@ -289,6 +289,26 @@ fn encrypted_unsupported_and_broken_members_make_it_partial() {
 }
 
 #[test]
+fn members_needing_no_bytes_keep_their_own_cause() {
+    let limits = Limits {
+        container_bytes: 4,
+        ..Limits::default()
+    };
+    let x = run(
+        &[
+            Entry::Data("a.txt", text("abcd")),
+            Entry::Encrypted("b.txt"),
+            Entry::Data("c.txt", text("c\n")),
+        ],
+        &limits,
+    );
+    assert_eq!(
+        partial(&x),
+        "member 2 encrypted; member 3 not read (limits.container_bytes)"
+    );
+}
+
+#[test]
 fn nothing_read_is_unscanned() {
     let x = run(
         &[Entry::Encrypted("a.txt"), Entry::Encrypted("b.txt")],
@@ -418,6 +438,13 @@ fn reasons_never_name_members() {
 fn names_are_escaped_and_capped() {
     assert_eq!(escape_name("a\nb\tc", 1), "a\\nb\\tc");
     assert_eq!(escape_name("odd!/name", 1), "odd!!/name");
+    // A trailing `!` is escaped too, so `a!` joined to `x` is `a!!!/x`,
+    // never the escaped single name `a!/x`.
+    assert_eq!(escape_name("a!", 1), "a!!");
+    assert_ne!(
+        format!("{}!/x", escape_name("a!", 1)),
+        escape_name("a!/x", 2)
+    );
     let long = "é".repeat(800);
     let e = escape_name(&long, 42);
     assert!(e.len() <= NAME_MAX);
@@ -439,7 +466,7 @@ fn describe_merges_positions_into_ranges() {
         .chain([u(40, Cause::Corrupt), u(41, Cause::Corrupt)])
         .collect();
     assert_eq!(
-        describe(&unread, Some("truncated")),
+        describe(&unread, 0, Some("truncated")),
         "members 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, … encrypted; \
          members 40..41 unreadable; container structure: truncated"
     );
