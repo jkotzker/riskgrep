@@ -381,8 +381,9 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
     for i in 0..zip.len().min(NPZ_MAX_MEMBERS) {
         let Some(name) = zip
             .name_for_index(i)
+            .and_then(Result::ok)
             .filter(|n| n.ends_with(".npy"))
-            .map(str::to_string)
+            .map(std::borrow::Cow::into_owned)
         else {
             continue;
         };

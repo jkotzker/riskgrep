@@ -149,7 +149,11 @@ impl Post for NpzMembers {
         let mut banks: BTreeMap<Vec<u64>, (u64, usize, ShapeFacts)> = BTreeMap::new();
         for i in 0..zip.len().min(NPZ_MAX_MEMBERS) {
             let Ok(file) = zip.by_index(i) else { continue };
-            let Some(name) = file.name().strip_suffix(".npy").map(str::to_string) else {
+            let Some(name) = file
+                .name()
+                .ok()
+                .and_then(|n| n.strip_suffix(".npy").map(str::to_string))
+            else {
                 continue;
             };
             let mut head = Vec::new();

@@ -442,7 +442,7 @@ fn npz_over_limit_reads_member_headers_only() {
     assert!(c.bytes.len() < data.len() / 2, "{}", c.bytes.len());
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(&c.bytes)).unwrap();
     let names: Vec<String> = (0..z.len())
-        .map(|i| z.by_index(i).unwrap().name().to_string())
+        .map(|i| z.by_index(i).unwrap().name().unwrap().to_string())
         .collect();
     assert_eq!(names, ["alice.npy", "zz_noise.npy"]);
     // Each member keeps the first bytes of its array: the whole small one,
