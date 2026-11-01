@@ -55,10 +55,15 @@ const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
 fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let p = dir.join(name);
     fs::write(&p, bytes).unwrap();
-    let f = File::options().write(true).open(&p).unwrap();
+    age(&p);
+    p
+}
+
+/// Set a file's mtime into the past so a fresh stat entry is not racy.
+fn age(p: &Path) {
+    let f = File::options().write(true).open(p).unwrap();
     f.set_modified(SystemTime::now() - Duration::from_secs(60))
         .unwrap();
-    p
 }
 
 fn scan(g: &mut RiskGrep, p: &Path) -> Report {
@@ -573,9 +578,7 @@ fn archives_over_the_hash_cap_are_walked_from_the_file_and_not_cached() {
         w.finish().unwrap();
     }
     assert!(fs::metadata(&p).unwrap().len() > 64 << 20);
-    let f = File::options().write(true).open(&p).unwrap();
-    f.set_modified(SystemTime::now() - Duration::from_secs(60))
-        .unwrap();
+    age(&p);
     let mut cfg = Config::default();
     cfg.limits.member_bytes = 80 << 20;
     cfg.limits.container_bytes = 80 << 20;
