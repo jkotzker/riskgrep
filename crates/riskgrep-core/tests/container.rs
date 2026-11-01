@@ -550,3 +550,45 @@ fn a_member_name_that_is_not_utf8_is_still_named_and_read() {
     // The zip reader falls back to code page 437 for the bad name.
     assert_eq!(t.evidence[0].member.as_deref(), Some("a\u{a0}\u{25a0}.ini"));
 }
+
+#[test]
+fn archives_over_the_hash_cap_are_walked_from_the_file_and_not_cached() {
+    use std::io::Write as _;
+    let d = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let p = d.path().join("large.zip");
+    {
+        // 65 MiB in all: over the 64 MiB cap on archives read into memory.
+        let mut w = zip::ZipWriter::new(File::create(&p).unwrap());
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true);
+        w.start_file("config.ini", stored).unwrap();
+        w.write_all(&aws_file(18)).unwrap();
+        w.start_file("zeros.bin", stored).unwrap();
+        let chunk = vec![0u8; 1 << 20];
+        for _ in 0..65 {
+            w.write_all(&chunk).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    assert!(fs::metadata(&p).unwrap().len() > 64 << 20);
+    let f = File::options().write(true).open(&p).unwrap();
+    f.set_modified(SystemTime::now() - Duration::from_secs(60))
+        .unwrap();
+    let mut cfg = Config::default();
+    cfg.limits.member_bytes = 80 << 20;
+    cfg.limits.container_bytes = 80 << 20;
+    cfg.limits.time_budget = Duration::from_secs(60);
+    let mk = || RiskGrep::with_cache_dir(cfg.clone(), None, Some(cache.path().into())).unwrap();
+    let first = scan(&mut mk(), &p);
+    let t = only(&first);
+    // Read whole from the file (the zero-filled member is a skipped binary).
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert_eq!(t.container.as_ref().unwrap().skipped, 1);
+    // Not cached: the next scan walks and scans it again.
+    let mut g = mk();
+    assert_eq!(scan(&mut g, &p), first);
+    assert!(g.bundle_loaded(), "an archive over the cap is not cached");
+}
