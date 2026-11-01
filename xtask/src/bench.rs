@@ -91,6 +91,28 @@ fn filler(bytes: usize, seed: usize) -> String {
     out
 }
 
+/// Members of the `claude_read_zip_uncached` archive.
+const ZIP_MEMBERS: usize = 100;
+
+/// A deflated zip of [`ZIP_MEMBERS`] filler text members, about 1 MiB
+/// uncompressed in all: read whole under the default container limits.
+fn zip_fixture() -> Vec<u8> {
+    let names: Vec<String> = (0..ZIP_MEMBERS)
+        .map(|i| format!("src/module{i:03}.rs"))
+        .collect();
+    let members: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            (
+                n.as_str(),
+                filler((1 << 20) / ZIP_MEMBERS, 100 + i).into_bytes(),
+            )
+        })
+        .collect();
+    riskgrep_core::synth::zip(&members)
+}
+
 /// `s` as one single-quoted shell word.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -340,16 +362,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // Fixtures.
     let read_cached = b.work.join("cached.rs");
     let read_uncached = b.work.join("uncached.rs");
+    let read_zip = b.work.join("uncached.zip");
     let stdin_4k = b.work.join("stdin-4kb.txt");
     let stdin_1m = b.work.join("stdin-1mb.txt");
     fs::write(&read_cached, filler(8 * 1024, 2)).map_err(|e| e.to_string())?;
     fs::write(&read_uncached, filler(64 * 1024, 3)).map_err(|e| e.to_string())?;
+    fs::write(&read_zip, zip_fixture()).map_err(|e| e.to_string())?;
     fs::write(&stdin_4k, filler(4 * 1024, 4)).map_err(|e| e.to_string())?;
     fs::write(&stdin_1m, filler(1024 * 1024, 5)).map_err(|e| e.to_string())?;
     let hook_cached = b.out.join("hook-cached.json");
     let hook_uncached = b.out.join("hook-uncached.json");
+    let hook_zip = b.out.join("hook-zip.json");
     fs::write(&hook_cached, hook_input(&b.work, &read_cached)).map_err(|e| e.to_string())?;
     fs::write(&hook_uncached, hook_input(&b.work, &read_uncached)).map_err(|e| e.to_string())?;
+    fs::write(&hook_zip, hook_input(&b.work, &read_zip)).map_err(|e| e.to_string())?;
 
     let git = |args: &[&str]| -> Result<(), String> {
         let mut c = Command::new("git");
@@ -386,6 +412,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
             &b.work,
             &cl,
             Some(&hook_uncached),
+            Some(&wipe),
+        )?,
+    );
+    measured.insert(
+        "claude_read_zip_uncached",
+        b.measure(
+            "claude_read_zip_uncached",
+            &b.work,
+            &cl,
+            Some(&hook_zip),
             Some(&wipe),
         )?,
     );
@@ -508,5 +544,26 @@ mod tests {
         assert!(s.ends_with('\n'));
         assert!(filler(64 * 1024, 3).len() <= 65_536);
         assert_eq!(s, filler(4096, 1));
+    }
+
+    #[test]
+    fn zip_fixture_is_read_whole_within_the_container_limits() {
+        use riskgrep_core::classify::Limits;
+        let z = zip_fixture();
+        let x = riskgrep_core::container::extract(
+            &riskgrep_core::container::zip::ZIP,
+            &&z[..],
+            z.len() as u64,
+            &Limits::default(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        assert_eq!(x.status(), riskgrep_core::TargetStatus::Scanned);
+        assert_eq!(x.members.len(), ZIP_MEMBERS);
+        let total: usize = x.members.iter().map(|m| m.content.bytes.len()).sum();
+        assert!(
+            total <= 1 << 20 && total > (1 << 20) - ZIP_MEMBERS * 256,
+            "{total}"
+        );
+        assert!(x.members.iter().all(|m| m.text));
     }
 }
