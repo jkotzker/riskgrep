@@ -1636,6 +1636,8 @@ rule generic_api_key {
   meta:
     category = "secret"
     weight = 80
+    family = "credential_assignment"
+    family_cap = 80
     post = "span,entropy,stopwords,allow_regex"
     span_regex = "(?i)[\\w.-]{0,50}?(?:secret|passw(?:or)?d|token|credentials?|creds|auth|(?:api|access|private|secret|auth|client|encryption|signing)[_.-]?key|(?-i:[A-Z0-9_]+_KEY))[ \\t'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\" \\t=]{0,5}([\\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)"
     secret_group = 1

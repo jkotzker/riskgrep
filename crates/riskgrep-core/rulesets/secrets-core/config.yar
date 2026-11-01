@@ -28,7 +28,11 @@
 //
 // Weight 80, the same as `generic_api_key`: the evidence is the same kind (a
 // credential-named key with a high-entropy literal), and 80 is the secret
-// flag threshold (`git.block_at`, `claude_code.ask`).
+// flag threshold (`git.block_at`, `claude_code.ask`). Every rule here is in
+// family `credential_assignment` with cap 80, shared with `generic_api_key`
+// (the converter's `FAMILIES`), so a value two of them find (`token:` inside
+// `credentials:`) scores 80, not the noisy-or 96, which would pass the
+// `claude_code` deny threshold of 95.
 
 // ---- XML ---------------------------------------------------------------------
 // `<ApiKey>…</ApiKey>`, the layout of Sonarr, Radarr, and the other *arr apps'
@@ -38,6 +42,8 @@ rule xml_credential_element {
   meta:
     category = "secret"
     weight = 80
+    family = "credential_assignment"
+    family_cap = 80
     line_complete = true
     post = "allow_regex,span,entropy,stopwords,allow_regex"
     span_regex = "(?i)<(?:[\\w.:-]{0,40}(?:api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?key|[\\w.:-]{0,40}(?:access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?token|token|[\\w.:-]{0,40}(?:secret|passw(?:or)?d|passphrase|pwd|psk|credentials?))>[ \\t]*([A-Za-z0-9+/=_.-]{16,200})[ \\t]*</[\\w.:-]{1,80}>"
@@ -61,6 +67,8 @@ rule xml_add_key_value {
   meta:
     category = "secret"
     weight = 80
+    family = "credential_assignment"
+    family_cap = 80
     line_complete = true
     post = "allow_regex,span,entropy,stopwords,allow_regex"
     span_regex = "(?i)<add[ \\t]+(?:key|name)[ \\t]*=[ \\t]*[\"'](?:[\\w.:-]{0,40}(?:api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?key|[\\w.:-]{0,40}(?:access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?token|token|[\\w.:-]{0,40}(?:secret|passw(?:or)?d|passphrase|pwd|psk|credentials?))[\"'][ \\t]+value[ \\t]*=[ \\t]*[\"']([A-Za-z0-9+/=_.-]{16,200})[\"']|<add[ \\t]+value[ \\t]*=[ \\t]*[\"']([A-Za-z0-9+/=_.-]{16,200})[\"'][ \\t]+(?:key|name)[ \\t]*=[ \\t]*[\"'](?:[\\w.:-]{0,40}(?:api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?key|[\\w.:-]{0,40}(?:access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?token|token|[\\w.:-]{0,40}(?:secret|passw(?:or)?d|passphrase|pwd|psk|credentials?))[\"']"
@@ -86,6 +94,8 @@ rule json_credential_object_member {
   meta:
     category = "secret"
     weight = 80
+    family = "credential_assignment"
+    family_cap = 80
     post = "allow_regex,span,entropy,stopwords,allow_regex"
     span_regex = "\"[^\"\\r\\n]{1,64}\"[ \\t\\r\\n]*:[ \\t\\r\\n]*\"([A-Za-z0-9+/=_.-]{16,200})\""
     secret_group = 1
@@ -112,6 +122,8 @@ rule yaml_credential_mapping_member {
   meta:
     category = "secret"
     weight = 80
+    family = "credential_assignment"
+    family_cap = 80
     post = "allow_regex,span,entropy,stopwords,allow_regex"
     span_regex = "(?m)^[ ]+(?:- )?[\\w.-]{1,64}:[ \\t]+['\"]?([A-Za-z0-9+/=_.-]{16,200})['\"]?[ \\t]*(?:#[^\\r\\n]*)?\\r?$"
     secret_group = 1

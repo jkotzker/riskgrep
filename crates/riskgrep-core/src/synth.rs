@@ -453,6 +453,8 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "config_json_credential_object",
     "config_yaml_credential_mapping",
     "config_dotnet_app_settings",
+    "config_key_hex_low_entropy",
+    "config_yaml_credential_named_member",
     "otpauth_no_secret",
     "otpauth_short_secret",
     "otpauth_example_secret",
@@ -471,6 +473,7 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "config_json_non_secret",
     "config_yaml_non_secret",
     "config_dotnet_non_secret",
+    "config_key_hex_non_secret",
     "lastpass_csv_bom_crlf",
     "chrome_csv_bom_crlf",
     "apple_csv_bom_crlf",
@@ -536,6 +539,36 @@ fn hex_value(r: &mut Rng, n: usize, upper: bool) -> String {
         h.to_uppercase()
     } else {
         h
+    }
+}
+
+/// Shannon entropy in bits per character.
+fn shannon(text: &str) -> f64 {
+    let mut counts = [0usize; 256];
+    for b in text.bytes() {
+        counts[b as usize] += 1;
+    }
+    let n = text.len() as f64;
+    counts
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// A random 32-character hex value whose entropy is at least 3.0 and below
+/// 3.5, the band `generic_api_key` (minimum 3.5) drops: about one random
+/// value in five falls in it.
+fn hex_value_low_entropy(r: &mut Rng) -> String {
+    loop {
+        let v = hex_value(r, 32, false);
+        let e = shannon(&v);
+        if (3.0..3.5).contains(&e) {
+            return v;
+        }
     }
 }
 
@@ -944,6 +977,26 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
             }
             out.push_str("  </appSettings>\n</configuration>\n");
         }
+        // A credential-named key on one line with a hex value that
+        // `generic_api_key`'s entropy minimum drops.
+        "config_key_hex_low_entropy" => {
+            let v = hex_value_low_entropy(&mut r);
+            match r.below(4) {
+                0 => writeln!(out, "{{\n  \"user\": \"svc\",\n  \"apiKey\": \"{v}\"\n}}").unwrap(),
+                1 => writeln!(out, "service:\n  api_key: {v}").unwrap(),
+                2 => writeln!(out, "API_TOKEN={v}").unwrap(),
+                _ => writeln!(out, "[oauth]\nclient_secret = \"{v}\"").unwrap(),
+            }
+        }
+        // A member that is credential-named itself inside a credential
+        // mapping: `generic_api_key` and the mapping rule both find it.
+        "config_yaml_credential_named_member" => {
+            let mut v = hex_value(&mut r, 32, false);
+            while shannon(&v) < 3.5 {
+                v = hex_value(&mut r, 32, false);
+            }
+            writeln!(out, "credentials:\n  token: {v}").unwrap();
+        }
         // Hex and token values under names that hold no credential: public
         // keys, a bare `Key` (S3 listings, property lists), primary keys, and
         // pagination tokens.
@@ -1041,6 +1094,14 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
             )
             .unwrap();
             out.push_str("  </appSettings>\n</configuration>\n");
+        }
+        // Hex values under names that are not credential nouns: no rule
+        // may flag them. (Short or sequential values under credential names
+        // are `generic_api_key`'s to judge, which flags some by design.)
+        "config_key_hex_non_secret" => {
+            writeln!(out, "key_sha256: {}", hex_value_low_entropy(&mut r)).unwrap();
+            writeln!(out, "commit_sha: {}", hex_value(&mut r, 40, false)).unwrap();
+            writeln!(out, "cache_key: {}", hex_value_low_entropy(&mut r)).unwrap();
         }
         "config_yaml_non_secret" => {
             writeln!(out, "publicKeys:\n  main: {}", hex_value(&mut r, 64, false)).unwrap();

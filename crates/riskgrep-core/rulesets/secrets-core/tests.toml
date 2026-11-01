@@ -654,3 +654,49 @@ rule = "xml_add_key_value"
 synth = "file:config_dotnet_non_secret"
 path = "web.config"
 expect = "none"
+
+[[case]]
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_low_entropy"
+path = "settings.conf"
+expect = 80
+
+[[case]]
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_low_entropy:11"
+path = "settings.conf"
+expect = 80
+
+[[case]]
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_low_entropy:12"
+path = "settings.conf"
+expect = 80
+
+[[case]]
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_low_entropy:13"
+path = "settings.conf"
+expect = 80
+
+[[case]]
+# Hex values under names that are not credential nouns.
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_non_secret"
+path = "settings.yaml"
+expect = "none"
+
+[[case]]
+# Found by `generic_api_key` and this rule; the shared family caps the pair at 80.
+rule = "yaml_credential_mapping_member"
+synth = "file:config_yaml_credential_named_member"
+path = "settings.yaml"
+expect = 80
+
+
+[[case]]
+# gitleaks' global path allowlist applies, as it does to `generic_api_key`.
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_low_entropy"
+path = "node_modules/pkg/settings.conf"
+expect = "none"
