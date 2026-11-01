@@ -440,7 +440,11 @@ fn bytes_outside_the_members_make_it_partial() {
     w.set_comment("note").unwrap();
     let commented = w.finish().unwrap().into_inner();
     let p = write(d.path(), "comment.zip", &commented);
-    assert!(partial(only(&scan(&mut scanner(), &p))).contains("bytes outside"));
+    // A comment is scanned as text, not counted as bytes outside.
+    assert_eq!(
+        only(&scan(&mut scanner(), &p)).status,
+        TargetStatus::Scanned
+    );
     // A local entry ahead of the archive that its directory does not list.
     let hidden = synth::npz(&[("hidden.ini", aws_file(12))]);
     let mut z = hidden[..headers(&hidden, b"PK\x01\x02")[0]].to_vec();
@@ -466,4 +470,62 @@ fn data_descriptors_are_accounted_for() {
     let t = only(&scan(&mut scanner(), &p)).clone();
     assert_eq!(t.status, TargetStatus::Scanned);
     assert_eq!(t.scores[&secret()], 95.0);
+}
+
+fn commented_zip(comment: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    w.start_file("a.txt", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    w.write_all(b"plain\n").unwrap();
+    w.set_raw_comment(comment.to_vec().into_boxed_slice())
+        .unwrap();
+    w.finish().unwrap().into_inner()
+}
+
+#[test]
+fn the_archive_comment_is_scanned_as_a_reserved_member() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "c.zip", &commented_zip(&aws_file(13)));
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&secret()], 95.0);
+    let e = &t.evidence[0];
+    assert_eq!(e.member.as_deref(), Some("comment!"));
+    assert_eq!(e.locations[0].line_start, 3);
+    let c = t.container.unwrap();
+    assert_eq!((c.members, c.scanned), (2, 2));
+    assert_eq!(c.listed[0].path, "comment!");
+    // A comment holding a NUL byte is still read as text.
+    let mut nul = b"\0\n".to_vec();
+    nul.extend(aws_file(14));
+    let p = write(d.path(), "nul.zip", &commented_zip(&nul));
+    assert_eq!(only(&scan(&mut scanner(), &p)).scores[&secret()], 95.0);
+    // A nested archive's comment is named through its container.
+    let outer = synth::zip(&[("inner.zip", commented_zip(&aws_file(16)))]);
+    let p = write(d.path(), "outer.zip", &outer);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.evidence[0].member.as_deref(), Some("inner.zip!/comment!"));
+}
+
+#[test]
+fn a_real_member_cannot_take_the_comment_name() {
+    let d = tempfile::tempdir().unwrap();
+    let z = synth::zip(&[("comment!", aws_file(15))]);
+    let p = write(d.path(), "named.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.evidence[0].member.as_deref(), Some("comment!!"));
+}
+
+#[test]
+fn a_comment_over_the_member_cap_makes_it_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "big.zip", &commented_zip(&vec![b'x'; 2000]));
+    let mut cfg = Config::default();
+    cfg.limits.member_bytes = 1000;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert_eq!(
+        partial(&t),
+        "member 2 read only in part (limits.member_bytes)"
+    );
 }

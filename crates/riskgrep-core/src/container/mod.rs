@@ -124,6 +124,9 @@ pub trait Walk {
     fn member(&mut self, meta: MemberMeta, data: &mut dyn Read) -> Flow;
     /// A member that could not be read.
     fn not_read(&mut self, meta: MemberMeta, why: NotRead) -> Flow;
+    /// The container's comment, scanned as text under [`COMMENT_MEMBER`]
+    /// with the same limits as a member.
+    fn comment(&mut self, data: &mut dyn Read) -> Flow;
     /// The number of members left unoffered after a `Flow::Stop`.
     fn rest(&mut self, n: u64);
     /// The deadline has passed: work done before offering members (such as
@@ -138,6 +141,11 @@ pub trait Walk {
 /// Bytes a member may always produce whatever its compression ratio, so a
 /// small, very repetitive file is not mistaken for a decompression bomb.
 pub const RATIO_FLOOR: u64 = 1 << 20;
+
+/// The member name an archive's comment is scanned under. It ends in a
+/// single `!`, which [`escape_name`] never produces (a stored name ending
+/// in `!` gains one more), so no stored member can take it.
+pub const COMMENT_MEMBER: &str = "comment!";
 
 /// Longest member path reported, in bytes; longer names are cut and marked.
 pub const NAME_MAX: usize = 1024;
@@ -453,7 +461,12 @@ enum Got {
 
 impl Walker<'_> {
     fn path(&self, name: &str, seq: u64) -> String {
-        let own = escape_name(name, seq);
+        self.join(escape_name(name, seq))
+    }
+
+    /// `own`, an escaped or reserved name, under the nested containers
+    /// being walked.
+    fn join(&self, own: String) -> String {
         if self.prefix.is_empty() {
             own
         } else {
@@ -593,6 +606,46 @@ impl Walk for Walker<'_> {
         Flow::Continue
     }
 
+    fn comment(&mut self, data: &mut dyn Read) -> Flow {
+        let seq = match self.admit() {
+            Ok(s) => s,
+            Err(cause) => {
+                self.unread(self.seq, None, cause, false);
+                return Flow::Stop;
+            }
+        };
+        let path = self.join(COMMENT_MEMBER.to_string());
+        if self.bytes_left == 0 {
+            let cause = Cause::Limit("limits.container_bytes".into());
+            self.unread(seq, Some(path), cause, false);
+            return Flow::Continue;
+        }
+        let (bytes, truncated) = match self.read(data, None) {
+            Got::Bytes(b, t) => (b, t),
+            Got::Failed(cause) => {
+                self.unread(seq, Some(path), cause, false);
+                return Flow::Continue;
+            }
+        };
+        let len = bytes.len() as u64;
+        self.bytes_left -= len;
+        self.produced += len;
+        self.consumed += len;
+        // Text whatever it holds: a NUL byte must not turn it into a
+        // skipped binary, nor its first bytes into a nested container.
+        let head = &bytes[..bytes.len().min(self.limits.sniff)];
+        let class = match crate::scanner::classify_member(COMMENT_MEMBER, head, len) {
+            c @ FileClass::EncodedText(_) => c,
+            _ => FileClass::Text,
+        };
+        self.keep(seq, path, &class, &bytes, truncated);
+        if self.stop.is_some() {
+            Flow::Stop
+        } else {
+            Flow::Continue
+        }
+    }
+
     fn expired(&self) -> bool {
         Instant::now() >= self.deadline
     }
@@ -679,7 +732,20 @@ impl Walker<'_> {
             self.out.skipped += 1;
             return;
         }
-        let content = match classify::slice_for_scan(&bytes, &class, self.limits) {
+        self.keep(seq, path, &class, &bytes, truncated);
+    }
+
+    /// Prepare a member's bytes for the scan as `class`, recording it as
+    /// read in part or not read when so.
+    fn keep(
+        &mut self,
+        seq: u64,
+        path: String,
+        class: &FileClass,
+        bytes: &[u8],
+        truncated: Option<Cause>,
+    ) {
+        let content = match classify::slice_for_scan(bytes, class, self.limits) {
             Ok(c) => c,
             Err(_) => {
                 self.unread(seq, Some(path), Cause::Corrupt, false);

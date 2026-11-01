@@ -43,11 +43,12 @@ fn is_descriptor(gap: &[u8], e: &Entry) -> bool {
 /// Bytes before the central directory that no entry covers (data ahead of
 /// the first entry, an entry the central directory does not list, such as
 /// one hidden by a later entry of the same name, or anything between
-/// entries other than a data descriptor), plus the archive comment.
-fn unaccounted(src: &dyn Source, entries: &[Option<Entry>], directory: u64, comment: u64) -> u64 {
+/// entries other than a data descriptor). The archive comment is scanned
+/// on its own.
+fn unaccounted(src: &dyn Source, entries: &[Option<Entry>], directory: u64) -> u64 {
     let mut spans: Vec<&Entry> = entries.iter().flatten().collect();
     spans.sort_by_key(|e| e.start);
-    let mut missing = comment;
+    let mut missing = 0;
     let mut cursor = 0u64;
     let mut prev: Option<&Entry> = None;
     let gap = |from: u64, to: u64, prev: Option<&Entry>| {
@@ -145,15 +146,11 @@ impl Extractor for Zip {
             let files = (0..n)
                 .filter(|&i| !zip.name_for_index(i).is_some_and(|x| x.ends_with('/')))
                 .count();
-            walk.rest(files as u64);
+            walk.rest(files as u64 + u64::from(!zip.comment().is_empty()));
             return Ok(());
         }
-        walk.unaccounted(unaccounted(
-            src,
-            &entries,
-            zip.central_directory_start(),
-            zip.comment().len() as u64,
-        ));
+        walk.unaccounted(unaccounted(src, &entries, zip.central_directory_start()));
+        let comment = zip.comment().to_vec();
         let offered: Vec<usize> = (0..n)
             .filter(|&i| !entries[i].as_ref().is_some_and(|e| e.is_dir))
             .collect();
@@ -192,9 +189,13 @@ impl Extractor for Zip {
                 }
             };
             if flow == Flow::Stop {
-                walk.rest((offered.len() - k - 1) as u64);
-                break;
+                let unread_comment = u64::from(!comment.is_empty());
+                walk.rest((offered.len() - k - 1) as u64 + unread_comment);
+                return Ok(());
             }
+        }
+        if !comment.is_empty() {
+            walk.comment(&mut &comment[..]);
         }
         Ok(())
     }
