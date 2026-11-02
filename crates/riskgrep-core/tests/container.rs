@@ -1052,14 +1052,7 @@ fn an_unreadable_npy_in_an_npz_member_makes_it_partial() {
 #[test]
 fn an_npz_member_over_the_text_limit_keeps_its_reason() {
     let d = tempfile::tempdir().unwrap();
-    let npz = synth::npz(&[
-        ("bad.npy", synth::npy("<f4", &[1, 128])),
-        ("zz_noise.npy", synth::npy("<i4", &[5000])),
-    ]);
-    let central = npz.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
-    let mut npz = npz;
-    npz[14..18].fill(0);
-    npz[central + 16..central + 20].fill(0);
+    let npz = synth::npz_with_unreadable_first(&[("zz_noise.npy", synth::npy("<i4", &[5000]))]);
     let p = write(d.path(), "big.zip", &synth::zip(&[("m.npz", npz)]));
     let mut cfg = Config::default();
     cfg.limits.text_max = 1024;

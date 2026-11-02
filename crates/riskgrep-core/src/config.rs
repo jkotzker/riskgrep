@@ -38,8 +38,7 @@ pub enum Action {
 
 /// What a target does when part of its content could not be read, as with a
 /// container's unread members or an `.npz`'s unreadable member (`on_partial`;
-/// a file sampled by design is not affected): `error`
-/// applies the integration's `on_error` action, as for a target that could
+/// a file read in part by design is not affected): `error` applies the integration's `on_error` action, as for a target that could
 /// not be scanned; the other values are actions of their own.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -53,7 +52,8 @@ pub enum OnPartial {
 }
 
 impl OnPartial {
-    /// The action for a partly read container, given `on_error`.
+    /// The action for a target with content that could not be read, given
+    /// `on_error`.
     pub fn action(self, on_error: Action) -> Action {
         match self {
             OnPartial::Error => on_error,
@@ -77,7 +77,7 @@ pub struct ClaudeCodeConfig {
     pub thresholds: BTreeMap<Category, Threshold>,
     pub on_error: Action,
     pub on_skipped: Action,
-    /// A container with members that were not read (see [`OnPartial`]).
+    /// A target with content that could not be read (see [`OnPartial`]).
     pub on_partial: OnPartial,
     pub on_unresolved: Action,
     pub time_budget_ms: u64,
@@ -91,7 +91,7 @@ pub struct GitConfig {
     pub block_at: BTreeMap<Category, f64>,
     pub on_error: Action,
     pub on_skipped: Action,
-    /// A container with members that were not read (see [`OnPartial`]).
+    /// A target with content that could not be read (see [`OnPartial`]).
     pub on_partial: OnPartial,
     pub full_files: bool,
 }
