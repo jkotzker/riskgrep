@@ -51,8 +51,7 @@ fn is_descriptor(gap: &[u8], e: &Entry) -> bool {
 /// Bytes before the central directory that no entry covers (data ahead of
 /// the first entry, an entry the central directory does not list, such as
 /// one hidden by a later entry of the same name, or anything between
-/// entries other than a data descriptor). The archive comment is scanned
-/// on its own.
+/// entries other than a data descriptor).
 fn unaccounted(src: &dyn Source, entries: &[Option<Entry>], directory: u64) -> u64 {
     let mut spans: Vec<&Entry> = entries.iter().flatten().collect();
     spans.sort_by_key(|e| e.start);
@@ -82,6 +81,50 @@ fn unaccounted(src: &dyn Source, entries: &[Option<Entry>], directory: u64) -> u
         }
     }
     missing + gap(cursor, directory, prev)
+}
+
+/// Bytes from the central directory on that are not its `listed` entries,
+/// a fixed-size zip64 end record and locator, or the end record and its
+/// comment. The entries are walked rather than trusting the end record's
+/// directory size, and zip64 extensible data is not read, so hidden bytes
+/// cannot be claimed as directory. Only a directory that fits the budget can
+/// have opened, so bytes past [`DIRECTORY_MAX`] are not read and count as
+/// outside.
+fn after_directory(src: &dyn Source, size: u64, directory: u64, listed: usize) -> u64 {
+    let total = size.saturating_sub(directory);
+    let Ok(buf) = src.range(directory, total.min(DIRECTORY_MAX)) else {
+        return total;
+    };
+    let le16 = |at: usize| usize::from(u16::from_le_bytes([buf[at], buf[at + 1]]));
+    let at_sig = |at: usize, sig: &[u8]| buf.get(at..).is_some_and(|b| b.starts_with(sig));
+    let mut pos = 0;
+    for _ in 0..listed {
+        if !at_sig(pos, b"PK\x01\x02") || pos + 46 > buf.len() {
+            break;
+        }
+        pos += 46 + le16(pos + 28) + le16(pos + 30) + le16(pos + 32);
+    }
+    if at_sig(pos, b"PK\x06\x06") && at_sig(pos + 56, b"PK\x06\x07") {
+        pos += 56;
+    }
+    if at_sig(pos, b"PK\x06\x07") {
+        pos += 20;
+    }
+    let walked = pos.min(buf.len());
+    // What follows the walk, less the end record: right there, or else the
+    // last one in it.
+    let rest = &buf[walked..];
+    let sig = b"PK\x05\x06";
+    let at = if rest.starts_with(sig) {
+        Some(0)
+    } else {
+        rest.windows(4).rposition(|w| w == sig)
+    };
+    let end = at.filter(|at| at + 22 <= rest.len()).map_or(0, |at| {
+        let comment = usize::from(u16::from_le_bytes([rest[at + 20], rest[at + 21]]));
+        (22 + comment).min(rest.len() - at)
+    });
+    total - walked as u64 - end as u64
 }
 
 pub static ZIP: Zip = Zip;
@@ -172,7 +215,10 @@ impl Extractor for Zip {
             walk.rest(files as u64 + u64::from(!zip.comment().is_empty()));
             return Ok(());
         }
-        walk.unaccounted(unaccounted(src, &entries, zip.central_directory_start()));
+        let directory = zip.central_directory_start();
+        walk.unaccounted(
+            unaccounted(src, &entries, directory) + after_directory(src, size, directory, n),
+        );
         let comment = zip.comment().to_vec();
         let offered: Vec<usize> = (0..n)
             .filter(|&i| !entries[i].as_ref().is_some_and(|e| e.is_dir))

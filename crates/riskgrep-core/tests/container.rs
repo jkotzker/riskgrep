@@ -664,3 +664,127 @@ fn archives_over_the_hash_cap_are_walked_from_the_file_and_not_cached() {
     assert_eq!(scan(&mut g, &p), first);
     assert!(g.bundle_loaded(), "an archive over the cap is not cached");
 }
+
+/// An unlisted local entry holding a secret.
+fn unlisted_entry() -> Vec<u8> {
+    let z = synth::npz(&[("hidden.ini", aws_file(40))]);
+    z[..headers(&z, b"PK\x01\x02")[0]].to_vec()
+}
+
+#[test]
+fn bytes_after_the_central_directory_make_it_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let base = synth::zip(&[("a.txt", text("a\n"))]);
+    let end = headers(&base, b"PK\x05\x06")[0];
+    let body = unlisted_entry();
+    let between = [&base[..end], &body, &base[end..]].concat();
+    let after = [&base[..], &body].concat();
+    for (name, z) in [("between.zip", between), ("after.zip", after)] {
+        let p = write(d.path(), name, &z);
+        let t = only(&scan(&mut scanner(), &p)).clone();
+        let not_read = partial(&t);
+        assert_eq!(
+            not_read,
+            format!("{} bytes outside the listed members not read", body.len()),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_directory_end_past_its_entries_makes_it_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let base = synth::zip(&[("a.txt", text("a\n"))]);
+    let end = headers(&base, b"PK\x05\x06")[0];
+    let body = unlisted_entry();
+    // The end record's directory size claims the hidden bytes as directory.
+    let mut z = [&base[..end], &body, &base[end..]].concat();
+    let at = headers(&z, b"PK\x05\x06")[0] + 12;
+    let v = u32::from_le_bytes(z[at..at + 4].try_into().unwrap());
+    z[at..at + 4].copy_from_slice(&(v + body.len() as u32).to_le_bytes());
+    let p = write(d.path(), "claimed.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert!(partial(&t).contains("bytes outside"), "{:?}", t.status);
+}
+
+#[test]
+fn zip64_end_records_are_accounted_for() {
+    let d = tempfile::tempdir().unwrap();
+    let base = synth::zip(&[("a.txt", text("a\n"))]);
+    let start = headers(&base, b"PK\x01\x02")[0] as u64;
+    let end = headers(&base, b"PK\x05\x06")[0];
+    let mut record = b"PK\x06\x06".to_vec();
+    record.extend(44u64.to_le_bytes());
+    record.extend([45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    record.extend(1u64.to_le_bytes());
+    record.extend(1u64.to_le_bytes());
+    record.extend((end as u64 - start).to_le_bytes());
+    record.extend(start.to_le_bytes());
+    let mut locator = b"PK\x06\x07\0\0\0\0".to_vec();
+    locator.extend((end as u64).to_le_bytes());
+    locator.extend(1u32.to_le_bytes());
+    let z = [&base[..end], &record, &locator, &base[end..]].concat();
+    let p = write(d.path(), "zip64.zip", &z);
+    assert_eq!(
+        only(&scan(&mut scanner(), &p)).status,
+        TargetStatus::Scanned
+    );
+}
+
+#[test]
+fn a_comment_holding_the_end_signature_is_not_counted_as_outside() {
+    use std::io::Write as _;
+    let d = tempfile::tempdir().unwrap();
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    w.start_file("a.txt", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    w.write_all(b"a\n").unwrap();
+    w.set_comment("PK\x05\x06 and more than twenty-two bytes after it")
+        .unwrap();
+    let z = w.finish().unwrap().into_inner();
+    let p = write(d.path(), "signature.zip", &z);
+    assert_eq!(
+        only(&scan(&mut scanner(), &p)).status,
+        TargetStatus::Scanned
+    );
+}
+
+#[test]
+fn a_central_header_past_the_listed_entries_makes_it_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let base = synth::zip(&[("a.txt", text("a\n"))]);
+    let end = headers(&base, b"PK\x05\x06")[0];
+    let body = aws_file(41);
+    let mut extra = b"PK\x01\x02".to_vec();
+    extra.resize(46, 0);
+    extra[28..30].copy_from_slice(&(body.len() as u16).to_le_bytes());
+    extra.extend(&body);
+    let z = [&base[..end], &extra, &base[end..]].concat();
+    let p = write(d.path(), "extra-header.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert!(partial(&t).contains("bytes outside"), "{:?}", t.status);
+}
+
+#[test]
+fn zip64_extensible_data_makes_it_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let base = synth::zip(&[("a.txt", text("a\n"))]);
+    let start = headers(&base, b"PK\x01\x02")[0] as u64;
+    let end = headers(&base, b"PK\x05\x06")[0];
+    let hidden = aws_file(42);
+    let mut record = b"PK\x06\x06".to_vec();
+    record.extend((44 + hidden.len() as u64).to_le_bytes());
+    record.extend([45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    record.extend(1u64.to_le_bytes());
+    record.extend(1u64.to_le_bytes());
+    record.extend((end as u64 - start).to_le_bytes());
+    record.extend(start.to_le_bytes());
+    record.extend(&hidden);
+    let mut locator = b"PK\x06\x07\0\0\0\0".to_vec();
+    locator.extend((end as u64).to_le_bytes());
+    locator.extend(1u32.to_le_bytes());
+    let z = [&base[..end], &record, &locator, &base[end..]].concat();
+    let p = write(d.path(), "extensible.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert!(partial(&t).contains("bytes outside"), "{:?}", t.status);
+}
