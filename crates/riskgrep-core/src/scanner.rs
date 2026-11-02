@@ -777,7 +777,8 @@ impl RiskGrep {
         let ext = container_of(&class);
         let ekey = evidence_key(&self.key, ext, &path_ext);
         let rel = relative_to(self.rel_base.as_deref(), &real);
-        let cache = self.cache.as_ref();
+        let beside = ext.map_or_else(Vec::new, |x| x.beside(&real));
+        let cache = self.cache.as_ref().filter(|_| beside.is_empty());
         let text = class.is_text();
         let hit = |entry: Entry| {
             Ok(Step::Done(Raw::cached(
@@ -820,7 +821,7 @@ impl RiskGrep {
                 }
             }
             let deadline = start + self.cfg.limits.time_budget;
-            let x = match &whole {
+            let mut x = match &whole {
                 Some(b) => container::extract_named(
                     ext,
                     &name,
@@ -834,6 +835,9 @@ impl RiskGrep {
                 }
             };
             drop(whole);
+            for (member, what) in beside {
+                x.beside_not_read(member, what);
+            }
             if let Some(hook) = AFTER_READ.get() {
                 hook(&real);
             }

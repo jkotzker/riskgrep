@@ -7,6 +7,33 @@ path = "src/main.rs"
 expect = 95
 
 [[case]]
+# A database's cell is scanned as text, under the column's region.
+rule = "aws_access_token"
+synth = "sqlite:notes.body=secret:aws_access_key"
+path = "app.db"
+expect = 95
+
+[[case]]
+# The schema of a database naming a credential column, and nothing else.
+rule = "sqlite_credential_column"
+synth = "sqlite:logins.password_value=text:hello"
+path = "logins.db"
+expect = 20
+
+[[case]]
+rule = "sqlite_credential_column"
+synth = "sqlite:notes.title=text:hello"
+path = "notes.db"
+expect = "none"
+
+[[case]]
+# The same statement in an ordinary file is not a database's schema.
+rule = "sqlite_credential_column"
+synth = "text:CREATE TABLE logins(password_value BLOB);\n"
+path = "schema.sql"
+expect = "none"
+
+[[case]]
 # A zip member is scanned like a file; the rules see `backup.zip!/config/.env`.
 rule = "aws_access_token"
 synth = "zip:config/.env=secret:aws_access_key"

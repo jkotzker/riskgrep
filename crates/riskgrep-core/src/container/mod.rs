@@ -19,9 +19,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::Read;
+use std::path::Path;
 use std::time::Instant;
 
 pub mod gzip;
+pub mod sqlite;
 pub mod tar;
 pub mod zip;
 
@@ -63,6 +65,13 @@ pub trait Extractor: Sync {
     /// Bumped whenever the extractor's output for some input changes, so
     /// cached evidence of the old output is not used.
     fn version(&self) -> u32;
+    /// Files beside the container at `path` that hold part of its content and
+    /// are not read: each one's reserved member name and what it is. They
+    /// can change while the container's own bytes stay the same, so a cached
+    /// answer is not used while there are any.
+    fn beside(&self, _path: &Path) -> Vec<(&'static str, &'static str)> {
+        Vec::new()
+    }
     /// Walk the container in `src` (`size` bytes). An error means its
     /// structure could not be read; problems with single members are
     /// reported through [`Walk::not_read`].
@@ -86,10 +95,8 @@ pub fn extractor(kind: ContainerKind) -> Option<&'static dyn Extractor> {
         ContainerKind::Zip => Some(&zip::ZIP),
         ContainerKind::Tar => Some(&tar::TAR),
         ContainerKind::Gzip => Some(&gzip::GZIP),
-        ContainerKind::SevenZ
-        | ContainerKind::Pdf
-        | ContainerKind::Sqlite
-        | ContainerKind::Compressed(_) => None,
+        ContainerKind::Sqlite => Some(&sqlite::SQLITE),
+        ContainerKind::SevenZ | ContainerKind::Pdf | ContainerKind::Compressed(_) => None,
     }
 }
 
@@ -129,6 +136,12 @@ pub enum Hidden {
     LocalHeader,
     /// Its data ends before it should, or a checksum over it does not hold.
     Damaged,
+    /// Rows of the table, or parts of its cells, were not read.
+    RowsNotRead,
+    /// Free pages of the database were not read.
+    FreePagesNotRead,
+    /// Pages or cells of the table could not be read.
+    PagesUnreadable,
 }
 
 impl Hidden {
@@ -139,6 +152,9 @@ impl Hidden {
             Hidden::LocalName => "local header name differs from the directory".into(),
             Hidden::LocalHeader => "local header not read".into(),
             Hidden::Damaged => "its data ends early or is corrupt".into(),
+            Hidden::RowsNotRead => "rows not read".into(),
+            Hidden::FreePagesNotRead => "free pages not read".into(),
+            Hidden::PagesUnreadable => "unreadable pages".into(),
         }
     }
 }
@@ -154,6 +170,28 @@ pub struct StreamLimits {
     pub bytes: u64,
     /// Bytes produced per byte consumed, past [`RATIO_FLOOR`].
     pub ratio: u64,
+}
+
+/// How a region that is not a stored file is named.
+#[derive(Debug, Clone, Copy)]
+pub enum Region<'a> {
+    /// A name as stored; the framework escapes it.
+    Stored(&'a str),
+    /// A reserved name, already in its final form (it ends in a single `!`).
+    Reserved(&'a str),
+}
+
+/// What the scanner makes of a value stored inside a member's structure, such
+/// as a database's BLOB cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredValue {
+    /// No format the scanner knows: its bytes belong with the text around it.
+    Bytes,
+    /// A format with a reader of its own: offer it as a member.
+    Member,
+    /// A format that is not scanned (an image). Counted as a skipped member,
+    /// without using up the member limit.
+    Skipped,
 }
 
 /// Whether the extractor should go on offering members.
@@ -200,6 +238,14 @@ pub trait Walk {
     /// The container's own name as stored (empty when not known), for a format
     /// that names its one member after the container.
     fn own_name(&self) -> &str;
+    /// Bytes of a region that always scans as text, whatever they hold: a
+    /// NUL byte does not make it a skipped binary, nor its first bytes a
+    /// nested container. [`Walk::read_to_end`] and [`Walk::hidden`] apply to it.
+    fn region(&mut self, name: Region<'_>, data: &mut dyn Read) -> Flow;
+    /// Uncompressed bytes the shared budget still allows.
+    fn bytes_left(&self) -> u64;
+    /// Tell a stored value's format from its first bytes and its size.
+    fn stored_value(&mut self, head: &[u8], size: u64) -> StoredValue;
 }
 
 /// Bytes a member may always produce whatever its compression ratio, so a
@@ -243,6 +289,9 @@ pub enum Cause {
     Sampled(String),
     /// Part of the entry's stored form was not in the member's stream.
     Hidden(Hidden),
+    /// A file beside the container holding part of its content, as the
+    /// extractor describes it (see [`Extractor::beside`]).
+    Beside(String),
 }
 
 impl Cause {
@@ -256,6 +305,7 @@ impl Cause {
             Cause::Corrupt => "unreadable".into(),
             Cause::Nested(reason) => format!("not opened ({reason})"),
             Cause::Scan(reason) => format!("not scanned ({reason})"),
+            Cause::Beside(what) => format!("not read ({what})"),
             Cause::Sampled(_) | Cause::Hidden(_) => self.truncated_phrase(),
         }
     }
@@ -322,6 +372,19 @@ pub struct Extracted {
 }
 
 impl Extracted {
+    /// Record a file beside the container (see [`Extractor::beside`]) as a
+    /// member that was not read, under its reserved name `path`.
+    pub fn beside_not_read(&mut self, path: &str, what: &str) {
+        self.total += 1;
+        self.unread.push(Unread {
+            seq: self.total,
+            last: self.total,
+            path: Some(path.to_string()),
+            cause: Cause::Beside(what.to_string()),
+            partly: false,
+        });
+    }
+
     /// Status before scanning (see [`status`]).
     pub fn status(&self) -> TargetStatus {
         status(
@@ -784,34 +847,47 @@ impl Walk for Walker<'_> {
             Some(name) => format!("{}{ENTRY_COMMENT}", escape_name(name, seq)),
             None => COMMENT_MEMBER.to_string(),
         });
-        if self.bytes_left == 0 {
-            let cause = Cause::Limit("limits.container_bytes".into());
-            self.unread(seq, Some(path), cause, false);
-            return Flow::Continue;
-        }
-        let (bytes, truncated) = match self.read(data, None) {
-            Got::Bytes(b, t) => (b, t),
-            Got::Failed(cause) => {
-                self.unread(seq, Some(path), cause, false);
-                return Flow::Continue;
+        // Text whatever it holds, unless a byte-order mark says how to read it.
+        self.keep_text(
+            seq,
+            path,
+            data,
+            |head, len| match crate::scanner::classify_member(COMMENT_MEMBER, head, len) {
+                c @ FileClass::EncodedText(_) => c,
+                _ => FileClass::Text,
+            },
+        )
+    }
+
+    fn region(&mut self, name: Region<'_>, data: &mut dyn Read) -> Flow {
+        let seq = match self.admit() {
+            Ok(s) => s,
+            Err(cause) => {
+                self.unread(self.seq, None, cause, false);
+                return Flow::Stop;
             }
         };
-        let len = bytes.len() as u64;
-        self.bytes_left -= len;
-        self.produced += len;
-        self.consumed += len;
-        // Text whatever it holds: a NUL byte must not turn it into a
-        // skipped binary, nor its first bytes into a nested container.
-        let head = &bytes[..bytes.len().min(self.limits.sniff)];
-        let class = match crate::scanner::classify_member(COMMENT_MEMBER, head, len) {
-            c @ FileClass::EncodedText(_) => c,
-            _ => FileClass::Text,
+        let path = match name {
+            Region::Stored(n) => self.path(n, seq),
+            Region::Reserved(n) => self.join(n.to_string()),
         };
-        self.keep(seq, path, &class, &bytes, truncated);
-        if self.stop.is_some() {
-            Flow::Stop
-        } else {
-            Flow::Continue
+        self.keep_text(seq, path, data, |_, _| FileClass::Text)
+    }
+
+    fn bytes_left(&self) -> u64 {
+        self.bytes_left
+    }
+
+    fn stored_value(&mut self, head: &[u8], size: u64) -> StoredValue {
+        let head = &head[..head.len().min(self.limits.sniff)];
+        match crate::scanner::classify_member("", head, size) {
+            FileClass::Image(_) => {
+                self.out.total += 1;
+                self.out.skipped += 1;
+                StoredValue::Skipped
+            }
+            FileClass::KnownBinary(_) | FileClass::Container(_) => StoredValue::Member,
+            _ => StoredValue::Bytes,
         }
     }
 
@@ -953,6 +1029,53 @@ impl Walker<'_> {
             return Placed::Skipped;
         }
         self.keep(seq, path, &class, &bytes, truncated)
+    }
+
+    /// Read a comment or region and keep it for the scan as text, as `class`
+    /// says: a NUL byte must not turn it into a skipped binary, nor its first
+    /// bytes into a nested container.
+    fn keep_text(
+        &mut self,
+        seq: u64,
+        path: String,
+        data: &mut dyn Read,
+        class: impl Fn(&[u8], u64) -> FileClass,
+    ) -> Flow {
+        if self.bytes_left == 0 {
+            let cause = Cause::Limit("limits.container_bytes".into());
+            self.unread(seq, Some(path), cause, false);
+            return Flow::Continue;
+        }
+        let (bytes, truncated) = match self.read(data, None) {
+            Got::Bytes(b, t) => (b, t),
+            Got::Failed(cause) => {
+                let stop = matches!(&cause, Cause::Limit(k) if k == "limits.time_budget_ms");
+                if stop {
+                    self.halt(cause.clone());
+                }
+                self.unread(seq, Some(path), cause, false);
+                return if stop { Flow::Stop } else { Flow::Continue };
+            }
+        };
+        let len = bytes.len() as u64;
+        self.bytes_left -= len;
+        self.produced += len;
+        self.consumed += len;
+        let head = &bytes[..bytes.len().min(self.limits.sniff)];
+        let class = class(head, len);
+        let whole = truncated.is_none();
+        let placed = self.keep(seq, path.clone(), &class, &bytes, truncated);
+        self.last = (placed != Placed::NotRead).then_some(Last {
+            seq,
+            path,
+            placed,
+            whole,
+        });
+        if self.stop.is_some() {
+            Flow::Stop
+        } else {
+            Flow::Continue
+        }
     }
 
     /// Prepare a member's bytes for the scan as `class`, recording it as

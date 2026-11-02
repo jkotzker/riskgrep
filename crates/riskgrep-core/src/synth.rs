@@ -124,6 +124,38 @@ pub fn npz_with_unreadable_first(rest: &[(&str, Vec<u8>)]) -> Vec<u8> {
     z
 }
 
+/// A database with one row: `value` as text in `table`.`column`. SQLite writes
+/// only to files here, so it is built in a scratch file and read back.
+pub fn sqlite(table: &str, column: &str, value: &[u8]) -> Vec<u8> {
+    let mut id = [0u8; 16];
+    getrandom::fill(&mut id).expect("random scratch name");
+    let id: String = id.iter().map(|b| format!("{b:02x}")).collect();
+    let path = std::env::temp_dir().join(format!("riskgrep-synth-{id}.sqlite"));
+    // Claimed first: a path someone else made, such as a symlink, is refused.
+    std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .expect("scratch database name");
+    let conn = rusqlite::Connection::open(&path).expect("scratch database");
+    let name = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    conn.execute_batch(&format!(
+        "CREATE TABLE {}({} TEXT);",
+        name(table),
+        name(column)
+    ))
+    .expect("create table");
+    conn.execute(
+        &format!("INSERT INTO {} VALUES (?1)", name(table)),
+        [String::from_utf8_lossy(value)],
+    )
+    .expect("insert");
+    conn.close().expect("close");
+    let out = std::fs::read(&path).expect("read back");
+    std::fs::remove_file(&path).expect("remove scratch database");
+    out
+}
+
 /// A zip archive of `(member name, bytes)` pairs, deflated.
 pub fn zip(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
