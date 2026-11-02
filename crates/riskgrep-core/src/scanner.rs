@@ -987,7 +987,13 @@ impl RiskGrep {
         }
         scanner.set_timeout(self.cfg.limits.time_budget);
         let any = !scanned.is_empty();
-        let status = container::status(any, &unread, x.uncovered, x.error.as_deref());
+        let status = container::status(
+            any,
+            &unread,
+            x.uncovered,
+            &x.directories,
+            x.error.as_deref(),
+        );
         if let TargetStatus::Unscanned { reason } = status {
             return Raw::status(p.target, TargetStatus::Unscanned { reason });
         }

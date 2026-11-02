@@ -16,7 +16,7 @@
 use crate::classify::{self, Content, FileClass, Limits, Source};
 use crate::model::TargetStatus;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::Read;
 use std::time::Instant;
@@ -118,6 +118,19 @@ pub enum Hidden {
     PastData(u64),
     /// The local header names the entry differently from the directory.
     LocalName,
+    /// The local header could not be read to compare its name.
+    LocalHeader,
+}
+
+impl Hidden {
+    fn phrase(self) -> String {
+        match self {
+            Hidden::PastData(1) => "1 byte after its data not read".into(),
+            Hidden::PastData(n) => format!("{n} bytes after its data not read"),
+            Hidden::LocalName => "local header name differs from the directory".into(),
+            Hidden::LocalHeader => "local header not read".into(),
+        }
+    }
 }
 
 /// Whether the extractor should go on offering members.
@@ -144,6 +157,9 @@ pub trait Walk {
     /// Part of the member last offered was not in its stream, so it was not
     /// read. Ignored when that member was not read at all.
     fn hidden(&mut self, what: Hidden);
+    /// Part of an entry that is no member (a directory entry) was not seen.
+    /// No member is unread for it, but the container is never reported whole.
+    fn directory_entry(&mut self, what: Hidden);
     /// The number of members left unoffered after a `Flow::Stop`.
     fn rest(&mut self, n: u64);
     /// The deadline has passed: work done before offering members (such as
@@ -214,15 +230,7 @@ impl Cause {
         match self {
             Cause::Limit(what) | Cause::Scan(what) => format!("read only in part ({what})"),
             Cause::Sampled(note) => format!("sampled ({note})"),
-            Cause::Hidden(Hidden::PastData(1)) => {
-                "read only in part (1 byte after its data not read)".into()
-            }
-            Cause::Hidden(Hidden::PastData(n)) => {
-                format!("read only in part ({n} bytes after its data not read)")
-            }
-            Cause::Hidden(Hidden::LocalName) => {
-                "read only in part (local header name differs from the directory)".into()
-            }
+            Cause::Hidden(what) => format!("read only in part ({})", what.phrase()),
             other => other.phrase(),
         }
     }
@@ -271,6 +279,9 @@ pub struct Extracted {
     /// Bytes of the container, nested ones included, outside every member
     /// (see [`Walk::unaccounted`]).
     pub uncovered: u64,
+    /// Entries that are no members, by what their stored form does not show
+    /// (see [`Walk::directory_entry`]).
+    pub directories: BTreeMap<Hidden, u64>,
     /// Set when the container's own structure could not be read.
     pub error: Option<String>,
 }
@@ -282,39 +293,39 @@ impl Extracted {
             !self.members.is_empty(),
             &self.unread,
             self.uncovered,
+            &self.directories,
             self.error.as_deref(),
         )
     }
 }
 
-/// A container's status: `unscanned` when no member in scope was read
-/// (`read_any` false) but something was not, or its structure could not be
-/// read at all; `partial` when some member was not read whole or the
-/// structure failed part way; else `scanned`.
+/// A container's status: `unscanned` when no member in scope was read, whole
+/// (`read_any`) or in part (listed in `unread` as such), but something was not,
+/// or its structure could not be read at all; `partial` when some member was
+/// not read whole, an entry's stored form was not all seen, or the structure
+/// failed part way; else `scanned`.
 pub fn status(
     read_any: bool,
     unread: &[Unread],
     uncovered: u64,
+    directories: &BTreeMap<Hidden, u64>,
     error: Option<&str>,
 ) -> TargetStatus {
-    if !read_any {
+    let reason = || describe(unread, uncovered, directories, error);
+    if !read_any && unread_counts(unread).1.is_empty() {
         if let (Some(e), true) = (error, unread.is_empty()) {
             return TargetStatus::Unscanned {
                 reason: e.to_string(),
             };
         }
         if !unread.is_empty() || uncovered > 0 {
-            return TargetStatus::Unscanned {
-                reason: describe(unread, uncovered, error),
-            };
+            return TargetStatus::Unscanned { reason: reason() };
         }
     }
-    if unread.is_empty() && uncovered == 0 && error.is_none() {
+    if unread.is_empty() && uncovered == 0 && directories.is_empty() && error.is_none() {
         TargetStatus::Scanned
     } else {
-        TargetStatus::Partial {
-            not_read: describe(unread, uncovered, error),
-        }
+        TargetStatus::Partial { not_read: reason() }
     }
 }
 
@@ -353,7 +364,12 @@ pub fn unread_counts(unread: &[Unread]) -> (u64, BTreeSet<u64>) {
 /// `members 3, 7..9 encrypted; members 1001..4096 not read
 /// (limits.container_members)`: causes in order of first appearance, each
 /// with its member positions as ranges. Never a member name.
-pub fn describe(unread: &[Unread], uncovered: u64, error: Option<&str>) -> String {
+pub fn describe(
+    unread: &[Unread],
+    uncovered: u64,
+    directories: &BTreeMap<Hidden, u64>,
+    error: Option<&str>,
+) -> String {
     const RANGES: usize = 10;
     let mut causes: Vec<(String, Vec<(u64, u64)>)> = Vec::new();
     for u in unread {
@@ -392,6 +408,10 @@ pub fn describe(unread: &[Unread], uncovered: u64, error: Option<&str>) -> Strin
         parts.push(format!(
             "{uncovered} bytes outside the listed members not read"
         ));
+    }
+    for (what, n) in directories {
+        let noun = if *n == 1 { "entry" } else { "entries" };
+        parts.push(format!("{n} directory {noun}: {}", what.phrase()));
     }
     if let Some(e) = error {
         parts.push(format!("container structure: {e}"));
@@ -512,6 +532,7 @@ fn extract_with(
             opened: 0,
             unread: Vec::new(),
             uncovered: 0,
+            directories: BTreeMap::new(),
             error: None,
         },
     };
@@ -750,6 +771,10 @@ impl Walk for Walker<'_> {
         last.placed = Placed::Kept;
         let (seq, path) = (last.seq, last.path.clone());
         self.unread(seq, Some(path), Cause::Hidden(what), true);
+    }
+
+    fn directory_entry(&mut self, what: Hidden) {
+        *self.out.directories.entry(what).or_insert(0) += 1;
     }
 
     fn unaccounted(&mut self, bytes: u64) {

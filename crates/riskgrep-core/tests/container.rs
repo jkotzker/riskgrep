@@ -1576,15 +1576,134 @@ fn a_local_name_differing_from_the_directory_makes_it_partial() {
 
 #[test]
 fn a_directory_entry_whose_local_name_differs_makes_it_partial() {
-    let local = b"secret-looking-name";
+    // Longer, shorter, equally long, and empty; the name is never reported.
+    for local in [&b"secret-looking-name"[..], b"d", b"xxxx/", b""] {
+        let z = hand_zip(&[
+            Hand::stored("docs/", b"").named_locally(local),
+            Hand::stored("a.ini", &aws_file(44)),
+        ]);
+        let t = scan_zip(&z);
+        assert_eq!(
+            partial(&t),
+            "1 directory entry: local header name differs from the directory"
+        );
+        assert!(t.unseen_part().is_some());
+        assert_eq!(t.scores[&secret()], 95.0, "the member was read");
+        assert_eq!(buckets(&t), (1, 1, 0, 0, 0, 0));
+        assert!(!format!("{t:?}").contains("secret-looking"));
+    }
+}
+
+#[test]
+fn directory_entries_whose_local_names_differ_are_counted_with_other_reasons() {
     let z = hand_zip(&[
-        Hand::stored("docs/", b"").named_locally(local),
+        Hand::stored("docs/", b"").named_locally(b""),
+        Hand::stored("more/", b"").named_locally(b"elsewhere/"),
+        Hand::stored("full/", b"").then(b"held"),
         Hand::stored("a.txt", b"a\n"),
     ]);
     assert_eq!(
         partial(&scan_zip(&z)),
-        format!("{} bytes outside the listed members not read", local.len())
+        "4 bytes outside the listed members not read; \
+         2 directory entries: local header name differs from the directory"
     );
+}
+
+#[test]
+fn a_directory_entry_whose_local_name_differs_in_a_nested_archive_counts() {
+    let inner = hand_zip(&[
+        Hand::stored("docs/", b"").named_locally(b""),
+        Hand::stored("x.txt", b"x\n"),
+    ]);
+    let t = scan_zip(&synth::zip(&[("i.zip", inner)]));
+    assert_eq!(
+        partial(&t),
+        "1 directory entry: local header name differs from the directory"
+    );
+}
+
+#[test]
+fn an_archive_of_one_directory_entry_whose_local_name_differs_is_partial() {
+    let t = scan_zip(&hand_zip(&[Hand::stored("docs/", b"").named_locally(b"")]));
+    assert_eq!(
+        partial(&t),
+        "1 directory entry: local header name differs from the directory"
+    );
+    assert_eq!(buckets(&t), (0, 0, 0, 0, 0, 0));
+}
+
+#[test]
+fn a_directory_entry_matching_its_local_name_stays_scanned() {
+    let z = hand_zip(&[
+        Hand::stored("docs/", b""),
+        Hand::deflated("empty/", b""),
+        Hand::stored("a.txt", b"a\n"),
+    ]);
+    assert_eq!(scan_zip(&z).status, TargetStatus::Scanned);
+    let lone = hand_zip(&[Hand::stored("docs/", b"")]);
+    assert_eq!(scan_zip(&lone).status, TargetStatus::Scanned);
+}
+
+#[test]
+fn an_archive_with_a_differing_directory_name_is_not_cached() {
+    let d = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let mk = || RiskGrep::with_cache_dir(Config::default(), None, Some(cache.path().into()));
+    let z = hand_zip(&[
+        Hand::stored("docs/", b"").named_locally(b""),
+        Hand::stored("a.txt", b"a\n"),
+    ]);
+    let p = write(d.path(), "h.zip", &z);
+    scan(&mut mk().unwrap(), &p);
+    let mut g = mk().unwrap();
+    assert!(partial(only(&scan(&mut g, &p))).contains("1 directory entry"));
+    assert!(g.bundle_loaded(), "a partial archive is scanned again");
+}
+
+#[test]
+fn a_lone_skipped_member_with_hidden_bytes_is_partial_and_keeps_its_counts() {
+    for (entry, reason) in [
+        (
+            Hand::deflated("l.png", PNG).then(b"hidden"),
+            "member 1 read only in part (6 bytes after its data not read)",
+        ),
+        (
+            Hand::deflated("l.png", PNG).named_locally(b"m.png"),
+            "member 1 read only in part (local header name differs from the directory)",
+        ),
+        (
+            Hand::deflated("blob", b"\x00\x01\x02\x03\xff\xfe").then(b"x"),
+            "member 1 read only in part (1 byte after its data not read)",
+        ),
+    ] {
+        let t = scan_zip(&hand_zip(&[entry]));
+        assert_eq!(partial(&t), reason);
+        assert!(t.unseen_part().is_some());
+        assert_eq!(buckets(&t), (1, 0, 1, 0, 0, 0));
+    }
+}
+
+#[test]
+fn a_nested_archive_of_skipped_members_with_hidden_bytes_is_partial() {
+    let inner = synth::zip(&[("l.png", PNG.to_vec())]);
+    let t = scan_zip(&hand_zip(
+        &[Hand::deflated("i.zip", &inner).then(b"hidden")],
+    ));
+    assert_eq!(
+        partial(&t),
+        "member 1 read only in part (6 bytes after its data not read)"
+    );
+    assert_eq!(buckets(&t), (2, 0, 1, 1, 0, 0));
+}
+
+#[test]
+fn an_archive_with_nothing_read_stays_unscanned() {
+    let mut z = synth::zip(&[("a.txt", text("a\n"))]);
+    mark_encrypted(&mut z, 0);
+    assert!(matches!(
+        scan_zip(&z).status,
+        TargetStatus::Unscanned { .. }
+    ));
 }
 
 #[test]
