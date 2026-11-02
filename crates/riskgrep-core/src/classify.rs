@@ -259,6 +259,21 @@ fn is_password_safe_layout(head: &[u8], size: u64) -> bool {
         && iterations.is_some_and(|n| (2048..1 << 28).contains(&n))
 }
 
+/// Whether a file looks like a database encrypted from its first byte, as
+/// SQLCipher lays one out: there is no magic to see, so this takes a database's
+/// name, a size in whole pages of the smallest page size, and first bytes as
+/// even as ciphertext.
+fn is_encrypted_database(name: &str, head: &[u8], size: u64) -> bool {
+    const NAMES: [&str; 5] = [".db", ".db3", ".sqlite", ".sqlite3", ".sqlcipher"];
+    /// Bits per byte: ciphertext is about 7.95 over the shortest head allowed
+    /// (1,024 bytes), and page-structured or text data is far below.
+    const MIN_ENTROPY: f64 = 7.5;
+    head.len() >= 1024
+        && size.is_multiple_of(512)
+        && NAMES.iter().any(|ext| ends_with_ignore_case(name, ext))
+        && crate::post::shannon(head) >= MIN_ENTROPY
+}
+
 /// The largest `.der` or `.key` file read as a key store (1 MiB). Larger
 /// files take the text or binary path, so a text file whose first bytes
 /// happen to look like a DER header is scanned like any other text.
@@ -308,7 +323,10 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
     if head.starts_with(b"%PDF-") {
         return FileClass::Container(ContainerKind::Pdf);
     }
-    if head.starts_with(b"SQLite format 3\0") {
+    if head.starts_with(crate::container::sqlite::MAGIC)
+        || crate::container::sqlite::is_log(head)
+        || is_encrypted_database(name, head, size)
+    {
         return FileClass::Container(ContainerKind::Sqlite);
     }
     if head.starts_with(&[0x1F, 0x8B]) {

@@ -517,6 +517,15 @@ impl Walk for Expiring {
     fn own_name(&self) -> &str {
         ""
     }
+    fn region(&mut self, _: Region<'_>, _: &mut dyn Read) -> Flow {
+        panic!("offered a region past the deadline");
+    }
+    fn bytes_left(&self) -> u64 {
+        0
+    }
+    fn stored_value(&mut self, _: &[u8], _: u64) -> StoredValue {
+        StoredValue::Bytes
+    }
 }
 
 fn left_at_deadline(z: &[u8], checks: u32) -> u64 {

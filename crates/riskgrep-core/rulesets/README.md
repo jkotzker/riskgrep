@@ -89,3 +89,4 @@ Samples are generated at run time from fixed seeds, so nothing sensitive is stor
 | `file:KIND[:SEED]` | Whole-file text from `riskgrep_core::synth::credential_file`: one-time-password URIs, password-manager exports, and two-factor recovery codes, each with a hard-negative variant (kinds in `synth::CREDENTIAL_FILE_KINDS`) |
 | `text:LITERAL` | The literal text; `\n` and `\t` are escapes |
 | `zip:MEMBER=SPEC` | A deflated zip archive whose one member, named `MEMBER`, holds the sample `SPEC` generates (which may be another `zip:`), e.g. `zip:config/.env=secret:aws_access_key`; give the case a `path` ending in `.zip` |
+| `sqlite:TABLE.COLUMN=SPEC` | A SQLite database with one row, holding the sample `SPEC` generates as text in that column (`sqlite:notes.body=secret:aws_access_key`); give the case a `path` that says it is a database, such as `app.db` |
