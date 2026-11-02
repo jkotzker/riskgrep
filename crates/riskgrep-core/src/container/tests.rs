@@ -471,3 +471,70 @@ fn describe_merges_positions_into_ranges() {
          members 40..41 unreadable; container structure: truncated"
     );
 }
+
+/// A walk whose deadline passes after `checks` calls to `expired`; it records
+/// what the extractor says is left and refuses to read anything.
+struct Expiring {
+    checks: std::cell::Cell<u32>,
+    rest: u64,
+}
+
+impl Walk for Expiring {
+    fn member(&mut self, _: MemberMeta, _: &mut dyn Read) -> Flow {
+        panic!("offered a member past the deadline");
+    }
+    fn not_read(&mut self, _: MemberMeta, _: NotRead) -> Flow {
+        panic!("offered a member past the deadline");
+    }
+    fn comment(&mut self, _: Option<&str>, _: &mut dyn Read) -> Flow {
+        panic!("offered a comment past the deadline");
+    }
+    fn rest(&mut self, n: u64) {
+        self.rest = n;
+    }
+    fn expired(&self) -> bool {
+        let left = self.checks.get();
+        self.checks.set(left.saturating_sub(1));
+        left == 0
+    }
+    fn unaccounted(&mut self, _: u64) {}
+}
+
+fn left_at_deadline(z: &[u8], checks: u32) -> u64 {
+    let mut w = Expiring {
+        checks: checks.into(),
+        rest: 0,
+    };
+    zip::ZIP.extract(&z, z.len() as u64, &mut w).unwrap();
+    w.rest
+}
+
+#[test]
+fn entries_past_the_deadline_are_counted_as_not_read() {
+    let empty = Vec::new;
+    // Directory entries not examined may hold comments, like files.
+    let z = crate::synth::zip(&[("docs/", empty()), ("a.txt", text("a\n"))]);
+    assert_eq!(left_at_deadline(&z, 0), 2);
+    let z = crate::synth::zip(&[("docs/", empty())]);
+    assert_eq!(left_at_deadline(&z, 0), 1);
+}
+
+#[test]
+fn comments_found_before_the_deadline_are_counted_as_not_read() {
+    let names: Vec<String> = (0..257).map(|i| format!("f{i}.txt")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names.iter().map(|n| (n.as_str(), text("x\n"))).collect();
+    let z = crate::synth::zip(&members);
+    // A comment on the first central header, and the end record's size to match.
+    let end = z.len() - 22;
+    let le32 = |at: usize| u32::from_le_bytes(z[at..at + 4].try_into().unwrap());
+    let (size, cd) = (le32(end + 12), le32(end + 16) as usize);
+    let name = 46 + "f0.txt".len();
+    let mut out = z[..cd + name].to_vec();
+    out[cd + 32..cd + 34].copy_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(b"note");
+    out.extend_from_slice(&z[cd + name..]);
+    let end = out.len() - 22;
+    out[end + 12..end + 16].copy_from_slice(&(size + 4).to_le_bytes());
+    // The headers are checked for the deadline at entries 0 and 256.
+    assert_eq!(left_at_deadline(&out, 1), 257 + 1);
+}

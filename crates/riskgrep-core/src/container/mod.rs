@@ -134,9 +134,9 @@ pub trait Walk {
     /// The deadline has passed: work done before offering members (such as
     /// reading headers) should stop.
     fn expired(&self) -> bool;
-    /// Bytes of the container that belong to no member offered (data
-    /// before the first member or between members, a comment): they are
-    /// not read, so the container is never reported whole.
+    /// Bytes of the container that belong to no member or comment offered
+    /// (data before the first member or between members): they are not read,
+    /// so the container is never reported whole.
     fn unaccounted(&mut self, bytes: u64);
 }
 
