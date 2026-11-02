@@ -336,7 +336,7 @@ fn read_prefix<S: Source + ?Sized>(
 /// kept, and reads inside it cost nothing: a [`BufReader`] drops its buffer
 /// on every seek, so a directory parser that seeks per entry would otherwise
 /// pay for the same bytes again each time.
-pub struct Budgeted<'a, S: ?Sized> {
+pub(crate) struct Budgeted<'a, S: ?Sized> {
     src: &'a S,
     size: u64,
     pos: u64,
@@ -348,7 +348,7 @@ pub struct Budgeted<'a, S: ?Sized> {
 }
 
 impl<'a, S: ?Sized> Budgeted<'a, S> {
-    pub fn new(src: &'a S, size: u64, left: &'a Cell<u64>, over: &'a Cell<bool>) -> Self {
+    pub(crate) fn new(src: &'a S, size: u64, left: &'a Cell<u64>, over: &'a Cell<bool>) -> Self {
         Budgeted {
             src,
             size,
