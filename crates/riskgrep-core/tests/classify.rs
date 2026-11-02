@@ -544,11 +544,160 @@ fn npz_directory_search_is_bounded() {
     .unwrap();
     // zip 9.0.5 limits its end-record search to the last 64 KiB, so a file
     // with no end record is rejected before the directory budget is reached.
-    assert!(matches!(
+    assert_eq!(
         c.unscanned.as_deref(),
         Some("npz central directory unreadable")
-            | Some("npz central directory not read within 8388608 bytes")
-    ));
+    );
+}
+
+/// A zip with `entries` central directory records and no members, each record
+/// carrying a `comment` of that many bytes, then a valid end record.
+fn hostile_directory(entries: usize, comment: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 0..entries {
+        let name = format!("m{i:05}.npy");
+        out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[20, 0, 20, 0]);
+        out.extend_from_slice(&[0; 4 + 4 + 4 + 4 + 4]);
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(comment as u16).to_le_bytes());
+        out.extend_from_slice(&[0; 2 + 2 + 4 + 4]);
+        out.extend_from_slice(name.as_bytes());
+        out.resize(out.len() + comment, b'x');
+    }
+    let directory = out.len() as u32;
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(entries as u16).to_le_bytes());
+    out.extend_from_slice(&(entries as u16).to_le_bytes());
+    out.extend_from_slice(&directory.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+#[test]
+fn npz_directory_over_budget_is_unscanned() {
+    // A central directory over 8 MiB with a valid end record at the end of the
+    // file: the end record is found, and the directory itself runs past the
+    // budget.
+    let limits = Limits {
+        text_max: 4096,
+        ..Limits::default()
+    };
+    let data = hostile_directory(200, 65_535);
+    assert!(data.len() > 8_388_608 + 4096, "{}", data.len());
+    let c = slice_for_scan(&data, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
+    assert!(c.bytes.is_empty());
+    assert_eq!(
+        c.unscanned.as_deref(),
+        Some("npz central directory not read within 8388608 bytes")
+    );
+    // The same records with short comments fit the budget: the directory
+    // parses, and the first member (which has no data) is the failure.
+    let small = hostile_directory(200, 10);
+    let c = slice_for_scan(&small, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
+    assert_eq!(
+        c.unscanned.as_deref(),
+        Some("npz member 0 could not be read")
+    );
+}
+
+/// Offsets of the central and local headers of the member called `name`.
+fn member_headers(data: &[u8], name: &str) -> (usize, usize) {
+    let sig = b"PK\x01\x02";
+    let mut at = 0;
+    while let Some(i) = data[at..].windows(4).position(|w| w == sig) {
+        let cd = at + i;
+        let len = u16::from_le_bytes([data[cd + 28], data[cd + 29]]) as usize;
+        if &data[cd + 46..cd + 46 + len] == name.as_bytes() {
+            let local = u32::from_le_bytes(data[cd + 42..cd + 46].try_into().unwrap());
+            return (cd, local as usize);
+        }
+        at = cd + 4;
+    }
+    panic!("no member {name}");
+}
+
+fn put_u32(data: &mut [u8], at: usize, v: u32) {
+    data[at..at + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+/// An over-limit `.npz` whose member `name` has had `damage(data, central,
+/// local)` applied to its headers.
+fn damaged_npz(name: &str, damage: fn(&mut [u8], usize, usize)) -> Vec<u8> {
+    let members = [
+        (name, synth::npy("<f4", &[192])),
+        ("alice.npy", synth::npy("<f4", &[192])),
+    ];
+    let mut data = big_npz(&members, 4096);
+    let (cd, local) = member_headers(&data, name);
+    damage(&mut data, cd, local);
+    data
+}
+
+fn wrong_crc(data: &mut [u8], cd: usize, local: usize) {
+    put_u32(data, cd + 16, 0);
+    put_u32(data, local + 14, 0);
+}
+
+fn understated_size(data: &mut [u8], cd: usize, local: usize) {
+    put_u32(data, cd + 24, 64);
+    put_u32(data, local + 22, 64);
+}
+
+#[test]
+fn npz_over_limit_unreadable_npy_member_is_unscanned() {
+    let limits = Limits {
+        text_max: 4096,
+        ..Limits::default()
+    };
+    for damage in [wrong_crc as fn(&mut [u8], usize, usize), understated_size] {
+        let data = damaged_npz("bad.npy", damage);
+        let c = slice_for_scan(&data, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
+        assert!(c.bytes.is_empty());
+        let reason = c.unscanned.expect("an unreadable .npy member");
+        assert!(reason.starts_with("npz member"), "{reason}");
+        // The member's name is never put in a reason.
+        assert!(!reason.contains("bad"), "{reason}");
+    }
+}
+
+#[test]
+fn npz_over_limit_unreadable_other_member_is_ignored() {
+    let limits = Limits {
+        text_max: 4096,
+        ..Limits::default()
+    };
+    for damage in [wrong_crc as fn(&mut [u8], usize, usize), understated_size] {
+        let data = damaged_npz("bad.txt", damage);
+        let c = slice_for_scan(&data, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
+        assert_eq!(c.unscanned, None);
+        let z = zip::ZipArchive::new(std::io::Cursor::new(&c.bytes)).unwrap();
+        let names: Vec<String> = z.file_names().map(|n| n.unwrap().into_owned()).collect();
+        assert_eq!(names, ["alice.npy", "zz_noise.npy"]);
+    }
+}
+
+#[test]
+fn npz_over_limit_with_many_members_reads_them_all() {
+    // The directory budget counts bytes fetched, not buffer refills: a
+    // directory of a thousand short records is far under 8 MiB.
+    let limits = Limits {
+        text_max: 4096,
+        ..Limits::default()
+    };
+    let names: Vec<String> = (0..1000).map(|i| format!("m{i:05}.npy")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|n| (n.as_str(), synth::npy("<f4", &[8])))
+        .collect();
+    let data = big_npz(&members, 4096);
+    let c = slice_for_scan(&data, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
+    assert_eq!(c.unscanned, None);
+    let z = zip::ZipArchive::new(std::io::Cursor::new(&c.bytes)).unwrap();
+    assert_eq!(z.len(), 1001);
 }
 
 #[test]

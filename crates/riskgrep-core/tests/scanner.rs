@@ -816,6 +816,43 @@ fn npz_over_text_limit_scores_like_small() {
 }
 
 #[test]
+fn npz_over_text_limit_with_a_thousand_members_scores_like_small() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("manymembers.npz");
+    let names: Vec<String> = (0..1000).map(|i| format!("m{i:05}.npy")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|n| (n.as_str(), synth::npy("<f4", &[5, 512])))
+        .collect();
+    let big = synth::npz(&members);
+    assert!(big.len() > 8 << 20, "{}", big.len());
+    fs::write(&f, big).unwrap();
+    let r = scanner().scan_paths(&[f]);
+    let t = only(&r);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&biometric()], 94.0);
+}
+
+/// Known limitation (docs/known-limitations.md): an `.npz` read whole is
+/// post-processed without a way to report an unreadable member, so the file
+/// is scanned with that member left out.
+#[test]
+fn small_npz_with_unreadable_member_is_scanned_without_it() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("badcrc.npz");
+    let mut data = synth::npz(&[("vectors.npy", synth::npy("<f4", &[1, 192]))]);
+    // The only member starts at offset 0: zero its checksum in both headers.
+    let cd = data.windows(4).rposition(|w| w == b"PK\x01\x02").unwrap();
+    data[cd + 16..cd + 20].fill(0);
+    data[14..18].fill(0);
+    fs::write(&f, data).unwrap();
+    let r = scanner().scan_paths(&[f]);
+    let t = only(&r);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&biometric()], 0.0);
+}
+
+#[test]
 fn npz_over_text_limit_bank_before_large_member() {
     let d = tempfile::tempdir().unwrap();
     let f = d.path().join("largebank.npz");
