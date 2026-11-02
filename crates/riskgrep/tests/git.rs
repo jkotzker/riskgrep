@@ -802,9 +802,99 @@ fn an_unreadable_npz_member_follows_on_partial() {
 }
 
 #[test]
-fn a_sampled_text_file_does_not_follow_on_partial() {
+fn a_file_read_in_part_follows_on_partial() {
+    for p in synth::partly_read_files(false) {
+        let r = Repo::new();
+        r.write(".riskgrep.toml", synth::PART_LIMITS);
+        r.write(p.name, &p.bytes);
+        r.stage(p.name);
+        let line = format!("riskgrep: {}: read only in part ({})", p.name, p.not_read);
+        r.pre_commit()
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains(line))
+            .stderr(predicate::str::contains("could not").not())
+            .stderr(predicate::str::contains(
+                "To accept every target read in part",
+            ));
+        r.write(
+            ".riskgrep.toml",
+            format!("{}[git]\non_partial = \"allow\"\n", synth::PART_LIMITS),
+        );
+        r.pre_commit().assert().code(0);
+    }
+}
+
+#[test]
+fn a_finding_in_the_part_read_still_blocks_with_on_partial_allow() {
+    for p in synth::partly_read_files(true) {
+        let r = Repo::new();
+        r.write(
+            ".riskgrep.toml",
+            format!("{}[git]\non_partial = \"allow\"\n", synth::PART_LIMITS),
+        );
+        r.write(p.name, &p.bytes);
+        r.stage(p.name);
+        r.pre_commit()
+            .assert()
+            .code(1)
+            .stderr(predicate::str::contains(format!(
+                "riskgrep: {}: secret ",
+                p.name
+            )))
+            .stderr(predicate::str::contains("read only in part").not())
+            .stderr(predicate::str::contains("To accept every target").not());
+    }
+}
+
+#[test]
+fn a_safetensors_file_past_its_cap_follows_on_partial() {
+    // 100 MiB takes an unoptimized build longer than the default budget.
+    let limits = "[limits]\ntime_budget_ms = 600000\n";
     let r = Repo::new();
-    r.write("big.txt", big_text());
-    r.stage("big.txt");
-    r.pre_commit().assert().code(0);
+    let name = "big.safetensors";
+    let s = synth::safetensors_past_cap(false);
+    r.write(".riskgrep.toml", limits);
+    s.write_to(&r.root.join(name)).unwrap();
+    r.stage(name);
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(format!(
+            "riskgrep: {name}: read only in part ({})",
+            s.not_read()
+        )));
+    r.write(
+        ".riskgrep.toml",
+        format!("{limits}[git]\non_partial = \"allow\"\n"),
+    );
+    synth::safetensors_past_cap(true)
+        .write_to(&r.root.join(name))
+        .unwrap();
+    r.stage(name);
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("read only in part").not());
+}
+
+#[test]
+fn a_file_read_whole_or_for_its_header_alone_does_not_block() {
+    let mut vault = b"kych\0\x01\0\0".to_vec();
+    vault.resize(4096, 0);
+    for (name, data) in [
+        ("small.txt", b"plain text\n".to_vec()),
+        ("data.npy", synth::npy("<f4", &[1024, 16])),
+        ("login.keychain-db", vault),
+    ] {
+        let r = Repo::new();
+        r.write(".riskgrep.toml", synth::PART_LIMITS);
+        r.write(name, data);
+        r.stage(name);
+        // A vault file has a finding of its own; only the wording is at issue.
+        r.pre_commit()
+            .assert()
+            .stderr(predicate::str::contains("read only in part").not())
+            .stderr(predicate::str::contains(": partial (").not());
+    }
 }

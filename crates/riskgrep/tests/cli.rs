@@ -894,15 +894,161 @@ fn an_unreadable_npz_member_follows_on_partial() {
     run(&["--fail-at", "secret=80", "--on-partial", "allow"]).code(0);
 }
 
-#[test]
-fn a_sampled_file_passes_but_the_same_file_in_an_archive_follows_on_partial() {
+/// A work directory with a repository configuration of [`synth::PART_LIMITS`].
+fn part_repo() -> tempfile::TempDir {
     let repo = tempfile::tempdir().unwrap();
     fs::create_dir_all(repo.path().join(".git")).unwrap();
+    fs::write(repo.path().join(".riskgrep.toml"), synth::PART_LIMITS).unwrap();
+    repo
+}
+
+#[test]
+fn a_file_read_in_part_follows_on_partial() {
+    let repo = part_repo();
+    for p in synth::partly_read_files(false) {
+        fs::write(repo.path().join(p.name), &p.bytes).unwrap();
+        let run = |args: &[&str]| {
+            riskgrep(repo.path())
+                .args(["scan", p.name])
+                .args(args)
+                .assert()
+        };
+        // Without a gate nothing blocks, as for a target that could not be scanned.
+        run(&[])
+            .code(0)
+            .stdout(predicate::str::contains(format!("partial: {}", p.not_read)));
+        run(&["--on-partial", "block"]).code(2);
+        run(&["--fail-at", "secret=80"]).code(2);
+        run(&["--fail-at", "secret=80", "--on-partial", "allow"]).code(0);
+        run(&["--fail-at", "secret=80", "--on-error", "allow"]).code(0);
+    }
+}
+
+#[test]
+fn a_finding_in_the_part_read_keeps_its_exit_status() {
+    let repo = part_repo();
+    for p in synth::partly_read_files(true) {
+        fs::write(repo.path().join(p.name), &p.bytes).unwrap();
+        for on_partial in ["error", "allow", "block"] {
+            riskgrep(repo.path())
+                .args(["scan", p.name, "--fail-at", "secret=80", "--on-partial"])
+                .arg(on_partial)
+                .assert()
+                .code(1);
+        }
+    }
+}
+
+#[test]
+fn a_safetensors_file_past_its_cap_follows_on_partial() {
+    let d = tempfile::tempdir().unwrap();
+    // 100 MiB takes an unoptimized build longer than the default budget.
+    fs::create_dir_all(d.path().join(".git")).unwrap();
     fs::write(
-        repo.path().join(".riskgrep.toml"),
-        "[limits]\ntext_max = 1024\nsample = 256\n",
+        d.path().join(".riskgrep.toml"),
+        "[limits]\ntime_budget_ms = 600000\n",
     )
     .unwrap();
+    let name = "big.safetensors";
+    let run = |args: &[&str]| riskgrep(d.path()).args(["scan", name]).args(args).assert();
+    let s = synth::safetensors_past_cap(false);
+    s.write_to(&d.path().join(name)).unwrap();
+    run(&["--fail-at", "secret=80"])
+        .code(2)
+        .stdout(predicate::str::contains(s.not_read()));
+    synth::safetensors_past_cap(true)
+        .write_to(&d.path().join(name))
+        .unwrap();
+    run(&["--fail-at", "secret=80", "--on-partial", "allow"]).code(1);
+}
+
+#[test]
+fn a_file_read_whole_or_for_its_header_alone_ignores_on_partial() {
+    let repo = part_repo();
+    let mut vault = b"kych\0\x01\0\0".to_vec();
+    vault.resize(4096, 0);
+    for (name, data) in [
+        ("small.txt", b"plain text\n".to_vec()),
+        ("data.npy", synth::npy("<f4", &[1024, 16])),
+        ("login.keychain-db", vault),
+    ] {
+        fs::write(repo.path().join(name), data).unwrap();
+        riskgrep(repo.path())
+            .args(["scan", name, "--on-partial", "block"])
+            .assert()
+            .code(0);
+    }
+}
+
+/// Input for `riskgrep scan -`: plain text past the 64 MiB limit, between `prefix` and `suffix`.
+fn stdin_past_limit(prefix: &str, suffix: &str) -> Vec<u8> {
+    let line = "plain text line\n";
+    let mut body = prefix.to_string();
+    body.push_str(&line.repeat(((64 << 20) / line.len()) + 1));
+    body.push_str(suffix);
+    body.into_bytes()
+}
+
+#[test]
+fn standard_input_past_its_limit_says_so_and_follows_on_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let key = format!("key = \"{}\"\n", synth::fake_secret("aws_access_key", 23));
+    let run = |input: &[u8], args: &[&str]| {
+        riskgrep(d.path())
+            .args(["scan", "-"])
+            .args(args)
+            .write_stdin(input.to_vec())
+            .assert()
+    };
+    // The credential is past the limit, so only on_partial stands in for it.
+    let unread = stdin_past_limit("", &key);
+    run(&unread, &["--fail-at", "secret=80"])
+        .code(2)
+        .stdout(predicate::str::contains(
+            "standard input beyond 67108864 bytes",
+        ));
+    run(
+        &unread,
+        &["--fail-at", "secret=80", "--on-partial", "allow"],
+    )
+    .code(0);
+    run(&unread, &["--on-partial", "block"]).code(2);
+    run(&unread, &[]).code(0);
+    // A finding in what was read keeps its status.
+    let read = stdin_past_limit(&key, "");
+    run(&read, &["--fail-at", "secret=80", "--on-partial", "allow"]).code(1);
+}
+
+#[test]
+fn standard_input_sampled_under_its_limit_follows_on_partial() {
+    let repo = part_repo();
+    let run = |input: String, args: &[&str]| {
+        riskgrep(repo.path())
+            .args(["scan", "-"])
+            .args(args)
+            .write_stdin(input)
+            .assert()
+    };
+    let filler = "plain text line\n".repeat(256);
+    let key = format!("key = \"{}\"\n", synth::fake_secret("aws_access_key", 23));
+    run(filler.clone(), &["--fail-at", "secret=80"])
+        .code(2)
+        .stdout(predicate::str::contains("standard input").not());
+    run(
+        filler.clone(),
+        &["--fail-at", "secret=80", "--on-partial", "allow"],
+    )
+    .code(0);
+    run(
+        format!("{key}{filler}"),
+        &["--fail-at", "secret=80", "--on-partial", "allow"],
+    )
+    .code(1);
+}
+
+#[test]
+fn a_sampled_file_and_the_same_file_in_an_archive_follow_on_partial() {
+    let repo = part_repo();
     let body = vec![b'c'; 4096];
     fs::write(repo.path().join("big.txt"), &body).unwrap();
     fs::write(
@@ -911,12 +1057,13 @@ fn a_sampled_file_passes_but_the_same_file_in_an_archive_follows_on_partial() {
     )
     .unwrap();
     let run = |target: &str| {
-        let mut c = riskgrep(repo.path());
-        c.env("GIT_CEILING_DIRECTORIES", repo.path().parent().unwrap())
-            .args(["scan", target, "--fail-at", "secret=80"]);
-        c.assert()
+        riskgrep(repo.path())
+            .args(["scan", target, "--fail-at", "secret=80"])
+            .assert()
     };
-    run("big.txt").code(0);
+    run("big.txt")
+        .code(2)
+        .stdout(predicate::str::contains("bytes 256..3840 not read"));
     run("big.zip").code(2).stdout(predicate::str::contains(
         "member 1 sampled (bytes 256..3840 not read)",
     ));

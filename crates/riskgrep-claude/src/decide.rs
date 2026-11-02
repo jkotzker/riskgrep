@@ -256,6 +256,7 @@ fn decide_targets(
                     .as_ref()
                     .map(|c| (c.not_read, c.read_in_part, c))
                 {
+                    None if !t.read_failed => format!("read only part of {target}"),
                     Some((0, 0, _)) | None => format!("could not scan part of {target}"),
                     Some((n, 0, c)) => {
                         format!("could not scan {n} of {} members of {target}", c.members)
@@ -400,7 +401,7 @@ mod tests {
             suppressed: 0,
             text: true,
             container: None,
-            unseen: false,
+            read_failed: false,
         }
     }
 
@@ -446,7 +447,7 @@ mod tests {
             suppressed: 0,
             text: true,
             container: None,
-            unseen: false,
+            read_failed: false,
         }
     }
 
@@ -963,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_containers_follow_on_partial() {
+    fn partial_targets_follow_on_partial() {
         let p = TargetStatus::Partial {
             not_read: "members 11..12 encrypted".into(),
         };
@@ -993,7 +994,7 @@ mod tests {
         gap.status = TargetStatus::Partial {
             not_read: "npz member 0 could not be read".into(),
         };
-        gap.unseen = true;
+        gap.read_failed = true;
         assert_eq!(
             decide(
                 &report(vec![gap.clone()]),
@@ -1011,17 +1012,45 @@ mod tests {
             decide(&report(vec![gap]), false, &allow, None),
             Decision::NoOpinion
         );
-        // A sampled text file is partial by design: no item.
+        // So is a file read in part, in words of its own.
         let mut sampled = target("/big.txt", "secret", 0.0);
-        sampled.status = p;
+        sampled.status = TargetStatus::Partial {
+            not_read: "bytes 1048576..8388608 not read".into(),
+        };
         assert_eq!(
             decide(
-                &report(vec![sampled]),
+                &report(vec![sampled.clone()]),
                 false,
                 &Config::default().claude_code,
                 None
             ),
+            Decision::Ask(
+                "RiskGrep: read only part of /big.txt (bytes 1048576..8388608 not read)".into()
+            )
+        );
+        // A partial `Read` gets no allowance for it.
+        let lines = Some(Lines {
+            first: 1,
+            last: Some(2),
+        });
+        assert!(matches!(
+            decide(
+                &report(vec![sampled.clone()]),
+                false,
+                &Config::default().claude_code,
+                lines
+            ),
+            Decision::Ask(_)
+        ));
+        assert_eq!(
+            decide(&report(vec![sampled.clone()]), false, &allow, None),
             Decision::NoOpinion
         );
+        // A score at a threshold keeps its decision with on_partial allow.
+        sampled.scores = BTreeMap::from([(Category("secret".into()), 95.0)]);
+        assert!(matches!(
+            decide(&report(vec![sampled]), false, &allow, None),
+            Decision::Deny(_)
+        ));
     }
 }

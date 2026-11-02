@@ -1306,3 +1306,95 @@ fn an_unreadable_npz_member_follows_on_partial() {
     e.user_config("[claude_code]\ntime_budget_ms = 600000\non_partial = \"allow\"\n");
     e.run("Read", json!({ "file_path": f })).silent();
 }
+
+/// A hook configuration of [`synth::PART_LIMITS`] plus `claude_code` keys.
+fn part_config(extra: &str) -> String {
+    format!(
+        "{}[claude_code]\ntime_budget_ms = 600000\n{extra}",
+        synth::PART_LIMITS
+    )
+}
+
+#[test]
+fn a_file_read_in_part_follows_on_partial() {
+    let e = Env::new();
+    for p in synth::partly_read_files(false) {
+        let f = e.write(p.name, &p.bytes);
+        e.user_config(&part_config(""));
+        let (d, reason) = read_decision(&e, &f, None, None);
+        assert_eq!(d, "ask", "{}: {reason}", p.kind);
+        assert!(
+            reason.contains("read only part of ") && reason.contains(&p.not_read),
+            "{}: {reason}",
+            p.kind
+        );
+        assert!(!reason.contains("could not"), "{}: {reason}", p.kind);
+        // A partial `Read` gets no allowance: its lines may be in the part not read.
+        assert_eq!(
+            read_decision(&e, &f, Some(1), Some(2)).0,
+            "ask",
+            "{}",
+            p.kind
+        );
+        e.user_config(&part_config("on_partial = \"deny\"\n"));
+        assert_eq!(read_decision(&e, &f, None, None).0, "deny", "{}", p.kind);
+        e.user_config(&part_config("on_partial = \"allow\"\n"));
+        assert_eq!(read_decision(&e, &f, None, None).0, "none", "{}", p.kind);
+        e.user_config(&part_config("on_error = \"allow\"\n"));
+        assert_eq!(read_decision(&e, &f, None, None).0, "none", "{}", p.kind);
+    }
+}
+
+#[test]
+fn a_finding_in_the_part_read_keeps_its_decision() {
+    let e = Env::new();
+    for p in synth::partly_read_files(true) {
+        let f = e.write(p.name, &p.bytes);
+        e.user_config(&part_config("on_partial = \"allow\"\n"));
+        let (allowed, reason) = read_decision(&e, &f, None, None);
+        assert_ne!(allowed, "none", "{}: {reason}", p.kind);
+        assert!(reason.contains(" scored secret "), "{}: {reason}", p.kind);
+        // on_partial may raise the decision and never lowers it.
+        e.user_config(&part_config(""));
+        assert_eq!(read_decision(&e, &f, None, None).0, allowed, "{}", p.kind);
+        e.user_config(&part_config("on_partial = \"deny\"\n"));
+        assert_eq!(read_decision(&e, &f, None, None).0, "deny", "{}", p.kind);
+    }
+}
+
+#[test]
+fn a_safetensors_file_past_its_cap_follows_on_partial() {
+    let e = Env::new();
+    e.user_config("[claude_code]\ntime_budget_ms = 600000\n");
+    let s = synth::safetensors_past_cap(false);
+    let f = e.work.path().join("big.safetensors");
+    s.write_to(&f).unwrap();
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "ask", "{reason}");
+    assert!(
+        reason.contains("read only part of ") && reason.contains(&s.not_read()),
+        "{reason}"
+    );
+    e.user_config("[claude_code]\ntime_budget_ms = 600000\non_partial = \"allow\"\n");
+    synth::safetensors_past_cap(true).write_to(&f).unwrap();
+    assert_ne!(read_decision(&e, &f, None, None).0, "none");
+}
+
+#[test]
+fn a_file_read_whole_or_for_its_header_alone_gets_no_partial_decision() {
+    let e = Env::new();
+    e.user_config(&part_config(""));
+    let mut vault = b"kych\0\x01\0\0".to_vec();
+    vault.resize(4096, 0);
+    for (name, data) in [
+        ("small.txt", b"plain text\n".to_vec()),
+        ("data.npy", synth::npy("<f4", &[1024, 16])),
+        ("login.keychain-db", vault),
+    ] {
+        let f = e.write(name, &data);
+        // A vault file has a finding of its own; only the wording is at issue.
+        let (_, reason) = read_decision(&e, &f, None, None);
+        assert!(!reason.contains("read only part"), "{name}: {reason}");
+        assert!(!reason.contains("could not scan"), "{name}: {reason}");
+    }
+}

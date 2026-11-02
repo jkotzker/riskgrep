@@ -385,7 +385,7 @@ fn scan(
             suppressed: 0,
             text: false,
             container: None,
-            unseen: false,
+            read_failed: false,
         });
         report = Report::from_targets(&report.riskgrep_version, &report.rules_bundle, targets);
     }

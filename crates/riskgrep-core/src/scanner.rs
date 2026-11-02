@@ -102,8 +102,8 @@ struct Raw {
     text: bool,
     /// Set for a container whose members were read.
     container: Option<ContainerInfo>,
-    /// See [`TargetReport::unseen`].
-    unseen: bool,
+    /// See [`TargetReport::read_failed`].
+    read_failed: bool,
 }
 
 /// What a container's walk and scan found besides evidence.
@@ -127,7 +127,7 @@ impl Raw {
             content: false,
             text: false,
             container: None,
-            unseen: false,
+            read_failed: false,
         }
     }
 
@@ -152,7 +152,7 @@ impl Raw {
             content: true,
             text: text && container.is_none(),
             container,
-            unseen: false,
+            read_failed: false,
         }
     }
 
@@ -171,7 +171,7 @@ impl Raw {
             content: true,
             text,
             container: None,
-            unseen: false,
+            read_failed: false,
         }
     }
 }
@@ -913,13 +913,13 @@ impl RiskGrep {
                 c.put_stat(k, h, *examined);
             }
         }
-        let unseen = p.content.unseen || engine_not_read.is_some();
+        let read_failed = p.content.read_failed || engine_not_read.is_some();
         let status = match p.content.partial.or(engine_not_read) {
             Some(not_read) => TargetStatus::Partial { not_read },
             None => TargetStatus::Scanned,
         };
         let mut raw = Raw::scanned(p.target, p.rel, status, ev, p.text);
-        raw.unseen = unseen;
+        raw.read_failed = read_failed;
         raw
     }
 
@@ -1122,7 +1122,7 @@ impl RiskGrep {
             suppressed: 0,
             text: raw.text,
             container: None,
-            unseen: raw.unseen,
+            read_failed: raw.read_failed,
         };
         let info = raw.container;
         if !raw.content {

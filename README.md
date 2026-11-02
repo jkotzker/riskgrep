@@ -52,7 +52,7 @@ riskgrep rules test                             # run the rulesets' own test cas
 riskgrep cache prune --dry-run                  # what pruning the cache would remove
 ```
 
-`--fail-at CATEGORY=N[,CATEGORY=N…]` makes the exit status 1 when a target's score for that category is at or above `N`. A target meets a threshold when its score rounded to one decimal, the number every output shows, is at least the threshold; `--fail-at`, the git hook's `block_at`, and the Claude Code hook's `ask` and `deny` thresholds all use that one rule (`cargo test -p riskgrep --test cli fail_at_is_inclusive`). Exit status 2 means a target could not be scanned and `--on-error block` applies, or part of a target's content was not read (a zip archive's member not read whole, a sampled member included, or an `.npz` member that cannot be read) and `--on-partial` blocks (`--on-partial error`, the default, follows `--on-error`; a file outside an archive read in part by design, such as a sampled large text file, is not affected); 3 is a usage or configuration error. When standard output is closed early (`riskgrep scan … | head -1`), the command stops writing without a message and keeps the exit status the scan computed, so a gate in a pipeline with `set -o pipefail` still fails on 1 or 2; a scan that passed exits 0 (`cargo test -p riskgrep --test epipe`). `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
+`--fail-at CATEGORY=N[,CATEGORY=N…]` makes the exit status 1 when a target's score for that category is at or above `N`. A target meets a threshold when its score rounded to one decimal, the number every output shows, is at least the threshold; `--fail-at`, the git hook's `block_at`, and the Claude Code hook's `ask` and `deny` thresholds all use that one rule (`cargo test -p riskgrep --test cli fail_at_is_inclusive`). Exit status 2 means a target could not be scanned and `--on-error block` applies, or part of a target's content was not read (text sampled at its ends; a key store, a tensor header, or standard input past its limit; a zip archive's member not read whole, a sampled member included; or an `.npz` member that cannot be read) and `--on-partial` blocks (`--on-partial error`, the default, follows `--on-error`; a score at its threshold exits 1 either way); 3 is a usage or configuration error. When standard output is closed early (`riskgrep scan … | head -1`), the command stops writing without a message and keeps the exit status the scan computed, so a gate in a pipeline with `set -o pipefail` still fails on 1 or 2; a scan that passed exits 0 (`cargo test -p riskgrep --test epipe`). `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
 
 ## Git hook
 
@@ -61,7 +61,7 @@ riskgrep git install-hook          # writes the pre-commit hook (honours core.ho
 riskgrep git pre-commit            # what the hook runs; also usable by hand
 ```
 
-The hook scores the lines added by the staged changes (`--full-files` or `git.full_files = true` scores whole files; renamed and copied files, binary files such as key stores and tensor files, and partly read files are always scored whole) and exits 1 when a category reaches its `git.block_at` threshold: 80 for `secret` and 75 for `biometric` by default. It prints the path, rule identifiers, score, and line numbers, never the matched text.
+The hook scores the lines added by the staged changes (`--full-files` or `git.full_files = true` scores whole files; renamed and copied files, binary files such as key stores and tensor files, and partly read files are always scored whole) and exits 1 when a category reaches its `git.block_at` threshold: 80 for `secret` and 75 for `biometric` by default. It also exits 1 by default for a staged file it could not scan or read only in part, such as a text file over 8 MiB (`git.on_error`, `git.on_partial`). It prints the path, rule identifiers, score, and line numbers, never the matched text.
 
 ## Claude Code hook
 
@@ -105,13 +105,13 @@ container_depth = 3          # nesting depth; the archive itself is depth 1
 container_ratio = 100        # uncompressed-to-compressed ratio, per member and overall, checked past 1 MiB
 
 [claude_code]
-on_partial = "error"         # content that was not read: "error" follows on_error, or allow, ask, deny, block
+on_partial = "error"         # a target read in part: "error" follows on_error, or allow, ask, deny, block
 
 [git]
 on_partial = "error"
 ```
 
-An archive with a member not read whole (a limit reached, an encrypted member, or a member sampled because it is over the text limit) is reported `partial` and never passes silently: `on_partial` applies, and by default it follows `on_error`. The same holds for an `.npz` with a member named `.npy` that cannot be read or is not an npy file; an `.npz` with any other member is read as a zip archive. See [Known limitations](docs/known-limitations.md#zip-members-are-read-within-shared-limits).
+A target with content that was not read is reported `partial` and never passes silently: `on_partial` applies, and by default it follows `on_error`, so the Claude Code hook asks and the git hook blocks. That covers text over `limits.text_max` (8 MiB), which is sampled at its ends; a key store or `.npy` header over the text limit; a safetensors header over 100 MiB; standard input over 64 MiB; an archive with a member not read whole (a limit reached, an encrypted member, or a member sampled because it is over the text limit); and an `.npz` with a member named `.npy` that cannot be read or is not an npy file (an `.npz` with any other member is read as a zip archive). A finding in the part read keeps its result, and `on_partial` never lowers a decision. `[ignore]` and baselines suppress findings, not this status. See [Files read in part](docs/known-limitations.md#files-read-in-part) and [Zip members are read within shared limits](docs/known-limitations.md#zip-members-are-read-within-shared-limits).
 
 Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weights (`weight_overrides`), and list paths and rules to ignore (`[ignore]`).
 

@@ -36,12 +36,13 @@ pub enum Action {
     Block,
 }
 
-/// What a target does when part of its content was not read, as with a
-/// container's members not read whole, sampled ones included, or an `.npz`'s
-/// unreadable member (`on_partial`; a file outside a container read in part by
-/// design is not affected): `error` applies the integration's `on_error`
-/// action, as for a target that could not be scanned; the other values are
-/// actions of their own.
+/// What a target does when part of its content was not read, as with text
+/// sampled at its ends, a key store or tensor header past its limit, a
+/// container's members not read whole, or an `.npz`'s unreadable member
+/// (`on_partial`; a file read for its header alone by design is `scanned` and
+/// not affected): `error` applies the integration's `on_error` action, as for
+/// a target that could not be scanned; the other values are actions of their
+/// own. It adds to what the part read scores and never lowers that decision.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OnPartial {
@@ -54,7 +55,7 @@ pub enum OnPartial {
 }
 
 impl OnPartial {
-    /// The action for a target with content that could not be read, given
+    /// The action for a target with content that was not read, given
     /// `on_error`.
     pub fn action(self, on_error: Action) -> Action {
         match self {
@@ -79,7 +80,7 @@ pub struct ClaudeCodeConfig {
     pub thresholds: BTreeMap<Category, Threshold>,
     pub on_error: Action,
     pub on_skipped: Action,
-    /// A target with content that could not be read (see [`OnPartial`]).
+    /// A target with content that was not read (see [`OnPartial`]).
     pub on_partial: OnPartial,
     pub on_unresolved: Action,
     pub time_budget_ms: u64,
@@ -93,7 +94,7 @@ pub struct GitConfig {
     pub block_at: BTreeMap<Category, f64>,
     pub on_error: Action,
     pub on_skipped: Action,
-    /// A target with content that could not be read (see [`OnPartial`]).
+    /// A target with content that was not read (see [`OnPartial`]).
     pub on_partial: OnPartial,
     pub full_files: bool,
 }

@@ -109,23 +109,24 @@ pub struct TargetReport {
     /// Set for a container whose members were read (an archive).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerReport>,
-    /// A `partial` status means content that could not be read, not a file
-    /// read in part by design (see [`TargetReport::unseen_part`]).
+    /// The `partial` status is content that could not be read (an `.npz`
+    /// member that does not read), not a part left unread by a read limit.
+    /// Only the wording of the hooks' messages depends on it: `on_partial`
+    /// applies to both (see [`TargetReport::unseen_part`]).
     #[serde(skip)]
-    pub unseen: bool,
+    pub read_failed: bool,
 }
 
 impl TargetReport {
     /// What was not read, when `on_partial` applies: part of the content was
-    /// never seen, as with any `partial` container, a sampled member included,
-    /// or an `.npz`'s unreadable member. `None` for a file outside a container
-    /// read in part by design, such as a sampled large text file, which is
-    /// `partial` too.
+    /// never seen, as with every `partial` target: a container with a member
+    /// not read whole, text sampled at its ends, a key store, a tensor header,
+    /// or standard input past its limit, or an `.npz`'s unreadable member.
+    /// `None` for a file read whole, and for one whose format is read for its
+    /// header alone (`.npy` and vault files), which is `scanned`.
     pub fn unseen_part(&self) -> Option<&str> {
         match &self.status {
-            TargetStatus::Partial { not_read } if self.unseen || self.container.is_some() => {
-                Some(not_read)
-            }
+            TargetStatus::Partial { not_read } => Some(not_read),
             _ => None,
         }
     }

@@ -93,8 +93,9 @@ impl Default for Limits {
 pub struct Content {
     pub bytes: Vec<u8>,
     pub partial: Option<String>,
-    /// `partial` is content that could not be read, not a sample by design.
-    pub unseen: bool,
+    /// `partial` is content that could not be read, not a part left unread
+    /// by a read limit.
+    pub read_failed: bool,
     /// Set for a sampled text file: where its last bytes sit in `bytes`.
     pub tail: Option<Tail>,
     /// Set when the file could not be read well enough to scan; `bytes` is
@@ -119,7 +120,7 @@ impl Content {
         Content {
             bytes,
             partial,
-            unseen: false,
+            read_failed: false,
             tail: None,
             unscanned: None,
             decoded: None,
@@ -130,7 +131,7 @@ impl Content {
         Content {
             bytes: Vec::new(),
             partial: None,
-            unseen: false,
+            read_failed: false,
             tail: None,
             unscanned: Some(reason),
             decoded: None,
@@ -144,7 +145,8 @@ impl Content {
     }
 }
 
-const SAFETENSORS_CAP: u64 = 104_857_600;
+/// Bytes of a safetensors header read: past this the file is read in part.
+pub(crate) const SAFETENSORS_CAP: u64 = 104_857_600;
 /// Bytes an `.npz` over the text limit may read to find and parse its
 /// central directory (the end record is searched for backwards from the end).
 const NPZ_DIRECTORY_MAX: u64 = 8_388_608;
@@ -477,7 +479,7 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
     }
     match out.finish() {
         Ok(c) => Content {
-            unseen: unread.is_some(),
+            read_failed: unread.is_some(),
             ..Content::whole(
                 c.into_inner(),
                 unread.map(|i| format!("npz member {i} could not be read")),
@@ -523,7 +525,7 @@ pub fn settle_npz<S: Source + ?Sized>(
 }
 
 /// Length of an npy header section (magic, version, length field, header text).
-fn npy_header_end<S: Source + ?Sized>(src: &S, size: u64, cap: u64) -> io::Result<u64> {
+fn npy_header_end<S: Source + ?Sized>(src: &S, size: u64) -> io::Result<u64> {
     let prefix = src.range(0, size.min(12))?;
     let end = match prefix.get(6) {
         Some(1) if prefix.len() >= 10 => 10 + u64::from(u16::from_le_bytes([prefix[8], prefix[9]])),
@@ -534,7 +536,7 @@ fn npy_header_end<S: Source + ?Sized>(src: &S, size: u64, cap: u64) -> io::Resul
         }
         _ => prefix.len() as u64,
     };
-    Ok(end.min(cap))
+    Ok(end)
 }
 
 /// Read the bytes of `file` that the scan engine should see for `class`.
@@ -571,7 +573,7 @@ fn read_from<S: Source + ?Sized>(
             Ok(Content {
                 bytes,
                 partial: Some(format!("bytes {s}..{} not read", size - s)),
-                unseen: false,
+                read_failed: false,
                 tail: Some(Tail {
                     at: s + 1,
                     file_offset: size - s,
@@ -596,15 +598,15 @@ fn read_from<S: Source + ?Sized>(
             Ok(Content {
                 bytes,
                 partial,
-                unseen: false,
+                read_failed: false,
                 tail: None,
                 unscanned: None,
                 decoded: Some(decoded),
             })
         }
         FileClass::KnownBinary(Known::Npy) => {
-            let end = npy_header_end(src, size, limits.text_max)?;
-            read_prefix(src, size, end, false)
+            let end = npy_header_end(src, size)?;
+            read_prefix(src, size.min(end), limits.text_max, true)
         }
         FileClass::KnownBinary(Known::Safetensors) => {
             let head = src.range(0, size.min(8))?;
