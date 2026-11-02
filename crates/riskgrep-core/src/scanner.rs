@@ -613,8 +613,9 @@ impl RiskGrep {
         }
         if let Some(ext) = ext {
             let start = Instant::now();
-            let x = container::extract(
+            let x = container::extract_named(
                 ext,
+                name,
                 &bytes,
                 size,
                 &self.cfg.limits,
@@ -820,8 +821,17 @@ impl RiskGrep {
             }
             let deadline = start + self.cfg.limits.time_budget;
             let x = match &whole {
-                Some(b) => container::extract(ext, &b.as_slice(), size, &self.cfg.limits, deadline),
-                None => container::extract(ext, &file, size, &self.cfg.limits, deadline),
+                Some(b) => container::extract_named(
+                    ext,
+                    &name,
+                    &b.as_slice(),
+                    size,
+                    &self.cfg.limits,
+                    deadline,
+                ),
+                None => {
+                    container::extract_named(ext, &name, &file, size, &self.cfg.limits, deadline)
+                }
             };
             drop(whole);
             if let Some(hook) = AFTER_READ.get() {
