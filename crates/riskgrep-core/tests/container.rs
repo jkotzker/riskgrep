@@ -461,6 +461,75 @@ fn bytes_outside_the_members_make_it_partial() {
     assert_eq!(t.scores[&secret()], 0.0, "the unlisted entry is not read");
 }
 
+/// `zip` behind a local entry its directory does not list. With `absolute`,
+/// the directory's offsets count from the start of the file (as `zip -A`
+/// leaves them); without, from the start of `zip`.
+fn behind_unlisted_entry(hidden: &[u8], zip: &[u8], absolute: bool) -> Vec<u8> {
+    let mut z = synth::npz(&[("hidden.bin", hidden.to_vec())]);
+    z.truncate(headers(&z, b"PK\x01\x02")[0]);
+    let by = z.len() as u32;
+    let mut zip = zip.to_vec();
+    if absolute {
+        let shift = |b: &mut [u8], at: usize| {
+            let v = u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+            b[at..at + 4].copy_from_slice(&(v + by).to_le_bytes());
+        };
+        for c in headers(&zip, b"PK\x01\x02") {
+            shift(&mut zip, c + 42);
+        }
+        let end = headers(&zip, b"PK\x05\x06")[0];
+        shift(&mut zip, end + 16);
+    }
+    z.extend(zip);
+    z
+}
+
+#[test]
+fn an_archive_with_absolute_offsets_behind_other_bytes_is_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let inner = synth::zip(&[("config.ini", aws_file(30))]);
+    // More than the directory budget: opened at the offsets the end record
+    // gives, without searching the bytes ahead of it.
+    let z = behind_unlisted_entry(&vec![0u8; 9 << 20], &inner, true);
+    let p = write(d.path(), "shifted.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert!(partial(&t).contains("bytes outside"), "{:?}", t.status);
+    assert_eq!(t.scores[&secret()], 95.0, "the listed member is read");
+}
+
+#[test]
+fn a_large_prefix_is_not_searched_past_the_directory_budget() {
+    let d = tempfile::tempdir().unwrap();
+    let inner = synth::zip(&[("config.ini", aws_file(31))]);
+    let z = behind_unlisted_entry(&vec![0u8; 9 << 20], &inner, false);
+    let p = write(d.path(), "padded.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(
+        t.status,
+        TargetStatus::Unscanned {
+            reason: "zip central directory not read within 8388608 bytes".into()
+        }
+    );
+}
+
+#[test]
+fn a_zip_behind_a_stub_is_skipped_as_an_unknown_binary() {
+    let d = tempfile::tempdir().unwrap();
+    let inner = synth::zip(&[("config.ini", aws_file(32))]);
+    for stub in [&b"#!/bin/sh\nexit 0\n"[..], b"MZ\x90\0\0\0\0\0"] {
+        let mut z = stub.to_vec();
+        z.extend(&inner);
+        let p = write(d.path(), "installer.zip", &z);
+        let t = only(&scan(&mut scanner(), &p)).clone();
+        assert!(
+            matches!(t.status, TargetStatus::Skipped { .. }),
+            "{:?}",
+            t.status
+        );
+        assert!(t.evidence.is_empty());
+    }
+}
+
 #[test]
 fn data_descriptors_are_accounted_for() {
     use std::io::Write as _;

@@ -103,17 +103,32 @@ impl Extractor for Zip {
     ) -> Result<(), ContainerError> {
         let left = Cell::new(DIRECTORY_MAX);
         let over = Cell::new(false);
-        let reader = BufReader::with_capacity(
-            8192,
-            Budgeted {
-                src,
-                size,
-                pos: 0,
-                left: &left,
-                over: &over,
-            },
-        );
-        let mut zip = match zip::ZipArchive::new(reader) {
+        let open = |offset| {
+            let reader = BufReader::with_capacity(
+                8192,
+                Budgeted {
+                    src,
+                    size,
+                    pos: 0,
+                    left: &left,
+                    over: &over,
+                },
+            );
+            zip::ZipArchive::with_config(
+                zip::read::Config {
+                    archive_offset: offset,
+                },
+                reader,
+            )
+        };
+        // Detecting the offset reads every byte before the end record, so
+        // it is tried only when the directory is not where the end record
+        // says, and then within what is left of the same budget. Bytes
+        // ahead of the archive are covered by no member, so such an archive
+        // is never `scanned`.
+        let opened = open(zip::read::ArchiveOffset::Known(0))
+            .or_else(|_| open(zip::read::ArchiveOffset::Detect));
+        let mut zip = match opened {
             Ok(z) if !over.get() => z,
             _ if over.get() => {
                 return Err(ContainerError(format!(
