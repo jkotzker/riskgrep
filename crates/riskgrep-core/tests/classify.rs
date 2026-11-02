@@ -524,10 +524,13 @@ fn npz_directory_search_is_bounded() {
         &Limits::default(),
     )
     .unwrap();
-    assert_eq!(
+    // zip 9.0.5 limits its end-record search to the last 64 KiB, so a file
+    // with no end record is rejected before the directory budget is reached.
+    assert!(matches!(
         c.unscanned.as_deref(),
-        Some("npz central directory not read within 8388608 bytes")
-    );
+        Some("npz central directory unreadable")
+            | Some("npz central directory not read within 8388608 bytes")
+    ));
 }
 
 #[test]

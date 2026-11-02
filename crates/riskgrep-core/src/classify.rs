@@ -366,7 +366,13 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
             over: &over,
         },
     );
-    let mut zip = match zip::ZipArchive::new(reader) {
+    // zip 9.0.5 scans every byte before the end record for a central directory
+    // header when it detects the archive offset, which reads the whole file.
+    // A fixed offset of 0 keeps the directory lookup at the end of the file.
+    let config = zip::read::Config {
+        archive_offset: zip::read::ArchiveOffset::Known(0),
+    };
+    let mut zip = match zip::ZipArchive::with_config(config, reader) {
         Ok(z) if !over.get() => z,
         _ if over.get() => {
             return Content::unscanned(format!(
