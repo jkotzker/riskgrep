@@ -5,11 +5,11 @@
 
 use riskgrep_core::config::Config;
 use riskgrep_core::model::{Category, Report, TargetReport, TargetStatus};
-use riskgrep_core::scanner::RiskGrep;
+use riskgrep_core::scanner::{RiskGrep, AFTER_READ};
 use riskgrep_core::synth;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 
@@ -787,4 +787,242 @@ fn zip64_extensible_data_makes_it_partial() {
     let p = write(d.path(), "extensible.zip", &z);
     let t = only(&scan(&mut scanner(), &p)).clone();
     assert!(partial(&t).contains("bytes outside"), "{:?}", t.status);
+}
+
+/// An archive of `n` small text members, under a time budget a slow build
+/// cannot spend, so only the member limits decide what is read.
+fn scan_many(n: usize) -> TargetReport {
+    let d = tempfile::tempdir().unwrap();
+    let names: Vec<String> = (0..n).map(|i| format!("dir/file_{i:05}.txt")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names.iter().map(|n| (n.as_str(), text("x\n"))).collect();
+    let p = write(d.path(), "many.zip", &synth::zip(&members));
+    let mut cfg = Config::default();
+    cfg.limits.time_budget = Duration::from_secs(120);
+    only(&scan(&mut scanner_with(cfg), &p)).clone()
+}
+
+#[test]
+fn hundreds_of_members_fit_the_directory_budget() {
+    let t = scan_many(999);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    let c = t.container.unwrap();
+    assert_eq!((c.members, c.scanned, c.not_read), (999, 999, 0));
+}
+
+#[test]
+fn members_past_the_default_count_limit_are_partial() {
+    let t = scan_many(1001);
+    assert_eq!(
+        partial(&t),
+        "member 1001 not read (limits.container_members)"
+    );
+    let c = t.container.unwrap();
+    assert_eq!((c.members, c.scanned, c.not_read), (1001, 1000, 1));
+}
+
+/// The local entry (with a data descriptor when `descriptor` is set) and
+/// central header of an entry built by hand, its local header at offset 0.
+fn raw_entry(name: &str, method: u16, data: &[u8], descriptor: bool) -> (Vec<u8>, Vec<u8>) {
+    let le16 = |v: u16| v.to_le_bytes();
+    let le32 = |v: u32| v.to_le_bytes();
+    let flags: u16 = if descriptor { 0x0808 } else { 0x0800 };
+    let compressed = data.len() as u32;
+    let mut local = Vec::new();
+    local.extend_from_slice(b"PK\x03\x04");
+    local.extend_from_slice(&le16(20));
+    local.extend_from_slice(&le16(flags));
+    local.extend_from_slice(&le16(method));
+    local.extend_from_slice(&[0; 4]); // time and date
+    local.extend_from_slice(&le32(0)); // CRC-32 of nothing
+    local.extend_from_slice(&le32(if descriptor { 0 } else { compressed }));
+    local.extend_from_slice(&le32(0));
+    local.extend_from_slice(&le16(name.len() as u16));
+    local.extend_from_slice(&le16(0));
+    local.extend_from_slice(name.as_bytes());
+    local.extend_from_slice(data);
+    if descriptor {
+        local.extend_from_slice(b"PK\x07\x08");
+        local.extend_from_slice(&le32(0));
+        local.extend_from_slice(&le32(compressed));
+        local.extend_from_slice(&le32(0));
+    }
+    let mut central = Vec::new();
+    central.extend_from_slice(b"PK\x01\x02");
+    central.extend_from_slice(&le16(20));
+    central.extend_from_slice(&le16(20));
+    central.extend_from_slice(&le16(flags));
+    central.extend_from_slice(&le16(method));
+    central.extend_from_slice(&[0; 4]);
+    central.extend_from_slice(&le32(0));
+    central.extend_from_slice(&le32(compressed));
+    central.extend_from_slice(&le32(0));
+    central.extend_from_slice(&le16(name.len() as u16));
+    central.extend_from_slice(&[0; 8]); // extra, comment, disk, internal attributes
+    central.extend_from_slice(&le32(0)); // external attributes
+    central.extend_from_slice(&le32(0)); // local header offset
+    central.extend_from_slice(name.as_bytes());
+    (local, central)
+}
+
+/// An end record for `entries` entries.
+fn end_record(entries: u16, directory_size: usize, directory_at: usize) -> Vec<u8> {
+    let mut r = b"PK\x05\x06\0\0\0\0".to_vec();
+    r.extend_from_slice(&entries.to_le_bytes());
+    r.extend_from_slice(&entries.to_le_bytes());
+    r.extend_from_slice(&(directory_size as u32).to_le_bytes());
+    r.extend_from_slice(&(directory_at as u32).to_le_bytes());
+    r.extend_from_slice(&[0; 2]);
+    r
+}
+
+/// An entry built by hand ([`raw_entry`]) followed by `a.txt`'s from a writer.
+fn with_entry(name: &str, method: u16, data: &[u8], descriptor: bool) -> Vec<u8> {
+    let (local, central) = raw_entry(name, method, data, descriptor);
+    let base = synth::zip(&[("a.txt", text("a\n"))]);
+    let cd = headers(&base, b"PK\x01\x02")[0];
+    let end = headers(&base, b"PK\x05\x06")[0];
+    let mut second = base[cd..end].to_vec();
+    second[42..46].copy_from_slice(&(local.len() as u32).to_le_bytes());
+    let size = central.len() + second.len();
+    let record = end_record(2, size, local.len() + cd);
+    [&local[..], &base[..cd], &central, &second, &record].concat()
+}
+
+/// A deflate stream that inflates to `content`.
+fn deflated(content: &str) -> Vec<u8> {
+    let z = synth::zip(&[("b.txt", text(content))]);
+    let start = 30 + "b.txt".len();
+    let compressed = u32::from_le_bytes(z[18..22].try_into().unwrap()) as usize;
+    z[start..start + compressed].to_vec()
+}
+
+#[test]
+fn directory_entries_holding_nothing_stay_scanned() {
+    let d = tempfile::tempdir().unwrap();
+    let fixed = [0x03, 0x00];
+    let empty_stored = [0x01, 0x00, 0x00, 0xff, 0xff];
+    for (name, z) in [
+        // `jar cf`: stored, no bytes at all.
+        ("stored.jar", with_entry("pkg/", 0, &[], false)),
+        // `JarOutputStream`: an empty deflate stream and a data descriptor.
+        ("deflated.jar", with_entry("pkg/", 8, &fixed, true)),
+        ("no_descriptor.jar", with_entry("pkg/", 8, &fixed, false)),
+        (
+            "empty_block.jar",
+            with_entry("pkg/", 8, &empty_stored, false),
+        ),
+    ] {
+        let p = write(d.path(), name, &z);
+        let t = only(&scan(&mut scanner(), &p)).clone();
+        assert_eq!(t.status, TargetStatus::Scanned, "{name}");
+        let c = t.container.unwrap();
+        assert_eq!((c.members, c.scanned), (1, 1), "{name}");
+    }
+}
+
+#[test]
+fn bytes_in_a_directory_entry_make_it_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let body = unlisted_entry();
+    let trailing = [&[0x03, 0x00][..], &body].concat();
+    for (name, z, bytes) in [
+        (
+            "stored.zip",
+            with_entry("docs/", 0, &body, false),
+            body.len(),
+        ),
+        (
+            "trailing.zip",
+            with_entry("docs/", 8, &trailing, false),
+            trailing.len(),
+        ),
+        (
+            "described.zip",
+            with_entry("docs/", 8, &trailing, true),
+            trailing.len(),
+        ),
+        (
+            "not_empty.zip",
+            with_entry("docs/", 8, &deflated("bb\n"), false),
+            deflated("bb\n").len(),
+        ),
+        // A single byte fits the output the check inflates into.
+        (
+            "one_byte.zip",
+            with_entry("docs/", 8, &deflated("b"), false),
+            deflated("b").len(),
+        ),
+        // Under the longest stream that is inflated at all.
+        (
+            "short_trailing.zip",
+            with_entry("docs/", 8, &[0x03, 0x00, 0x41, 0x41], false),
+            4,
+        ),
+        ("cut_short.zip", with_entry("docs/", 8, &[0x03], false), 1),
+    ] {
+        let p = write(d.path(), name, &z);
+        let t = only(&scan(&mut scanner(), &p)).clone();
+        assert_eq!(
+            partial(&t),
+            format!("{bytes} bytes outside the listed members not read"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn an_archive_of_only_a_directory_entry_with_bytes_is_not_scanned() {
+    let d = tempfile::tempdir().unwrap();
+    let (local, central) = raw_entry("docs/", 0, &[0x41; 77], false);
+    let z = [
+        &local[..],
+        &central,
+        &end_record(1, central.len(), local.len()),
+    ]
+    .concat();
+    let p = write(d.path(), "only_dir.zip", &z);
+    assert_eq!(
+        only(&scan(&mut scanner(), &p)).status,
+        TargetStatus::Unscanned {
+            reason: "77 bytes outside the listed members not read".into()
+        }
+    );
+}
+
+/// The path whose read [`slow_read_hook`] delays, and for how long.
+static SLOW_READ: Mutex<Option<(PathBuf, Duration)>> = Mutex::new(None);
+
+/// The one `AFTER_READ` hook of this test binary.
+fn slow_read_hook(p: &Path) {
+    let delay = SLOW_READ
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(target, _)| target == p)
+        .map(|(_, delay)| *delay);
+    if let Some(delay) = delay {
+        std::thread::sleep(delay);
+    }
+}
+
+#[test]
+fn a_member_reached_after_the_deadline_is_not_scanned() {
+    let d = tempfile::tempdir().unwrap();
+    let z = synth::zip(&[("config.ini", aws_file(41))]);
+    let p = write(d.path(), "late.zip", &z);
+    let budget = Duration::from_millis(500);
+    *SLOW_READ.lock().unwrap() = Some((
+        fs::canonicalize(&p).unwrap(),
+        budget + Duration::from_millis(100),
+    ));
+    let _ = AFTER_READ.set(slow_read_hook);
+    let mut cfg = Config::default();
+    cfg.limits.time_budget = budget;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert_eq!(
+        t.status,
+        TargetStatus::Unscanned {
+            reason: "member 1 not read (limits.time_budget_ms)".into()
+        }
+    );
 }

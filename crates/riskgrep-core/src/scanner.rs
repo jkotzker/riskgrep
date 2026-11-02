@@ -1232,3 +1232,37 @@ fn walk(dir: &Path, jobs: &mut Vec<Job>, budget: &mut usize) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Versioned(u32);
+
+    impl Extractor for Versioned {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+
+        fn version(&self) -> u32 {
+            self.0
+        }
+
+        fn extract(
+            &self,
+            _: &dyn Source,
+            _: u64,
+            _: &mut dyn container::Walk,
+        ) -> Result<(), container::ContainerError> {
+            Ok(())
+        }
+    }
+
+    /// Evidence cached from an older extractor's output must not be used.
+    #[test]
+    fn evidence_key_changes_with_the_extractor_version() {
+        let key = |v| evidence_key("bundle", Some(&Versioned(v)), "a.zip");
+        assert_ne!(key(1), key(2));
+        assert_ne!(key(1), evidence_key("bundle", None, "a.zip"));
+    }
+}

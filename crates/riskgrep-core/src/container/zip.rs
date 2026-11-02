@@ -10,6 +10,10 @@ use std::io::BufReader;
 /// is searched for backwards from the end of the file).
 const DIRECTORY_MAX: u64 = 8_388_608;
 
+/// Longest deflate stream a directory entry may hold and still count as
+/// empty. Encoders write 2 bytes (a fixed block) or 5 (an empty stored block).
+const EMPTY_DEFLATE_MAX: u64 = 64;
+
 pub struct Zip;
 
 /// Entry `i`'s stored name; empty when it is missing or cannot be decoded.
@@ -31,6 +35,29 @@ struct Entry {
     size: u64,
     compressed: u64,
     encrypted: bool,
+    /// Bytes a directory entry holds that are not an empty stream: no member
+    /// is offered for it, so they are not read.
+    stray: u64,
+}
+
+/// Whether the `compressed` bytes at `start` hold nothing: there are none, or
+/// they are one deflate stream that inflates to nothing and ends with them.
+/// Some encoders deflate directory entries too (`JarOutputStream`).
+fn holds_nothing(src: &dyn Source, deflated: bool, start: u64, compressed: u64) -> bool {
+    if compressed == 0 {
+        return true;
+    }
+    if !deflated || compressed > EMPTY_DEFLATE_MAX {
+        return false;
+    }
+    let Ok(data) = src.range(start, compressed) else {
+        return false;
+    };
+    let mut inflate = flate2::Decompress::new(false);
+    let ended = inflate.decompress(&data, &mut [0u8; 1], flate2::FlushDecompress::Finish);
+    matches!(ended, Ok(flate2::Status::StreamEnd))
+        && inflate.total_out() == 0
+        && inflate.total_in() == compressed
 }
 
 /// Whether `gap`, the bytes right after `e`'s data, is `e`'s data
@@ -50,12 +77,12 @@ fn is_descriptor(gap: &[u8], e: &Entry) -> bool {
 
 /// Bytes before the central directory that no entry covers (data ahead of
 /// the first entry, an entry the central directory does not list, such as
-/// one hidden by a later entry of the same name, or anything between
-/// entries other than a data descriptor).
+/// one hidden by a later entry of the same name, anything between entries
+/// other than a data descriptor, or bytes held by a directory entry).
 fn unaccounted(src: &dyn Source, entries: &[Option<Entry>], directory: u64) -> u64 {
     let mut spans: Vec<&Entry> = entries.iter().flatten().collect();
     spans.sort_by_key(|e| e.start);
-    let mut missing = 0;
+    let mut missing = spans.iter().fold(0u64, |n, e| n.saturating_add(e.stray));
     let mut cursor = 0u64;
     let mut prev: Option<&Entry> = None;
     let gap = |from: u64, to: u64, prev: Option<&Entry>| {
@@ -187,15 +214,26 @@ impl Extractor for Zip {
                 }
                 let name = entry_name(&zip, i);
                 let f = zip.by_index_raw(i).ok()?;
+                let data_start = f.data_start()?;
+                let compressed = f.compressed_size();
+                let is_dir = name.ends_with('/') && f.size() == 0;
+                let deflated =
+                    f.compression() == zip::CompressionMethod::Deflated && !f.encrypted();
+                let stray = if is_dir && !holds_nothing(src, deflated, data_start, compressed) {
+                    compressed.min(size.saturating_sub(data_start))
+                } else {
+                    0
+                };
                 Some(Entry {
-                    is_dir: name.ends_with('/') && f.size() == 0,
+                    is_dir,
                     name,
                     start: f.header_start(),
-                    data_end: f.data_start()?.checked_add(f.compressed_size())?,
+                    data_end: data_start.checked_add(compressed)?,
                     crc: f.crc32(),
                     size: f.size(),
-                    compressed: f.compressed_size(),
+                    compressed,
                     encrypted: f.encrypted(),
+                    stray,
                 })
             })
             .collect();
