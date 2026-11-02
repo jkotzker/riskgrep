@@ -1220,12 +1220,23 @@ fn comments_of_directory_nested_and_encrypted_entries_are_scanned() {
 #[test]
 fn an_entry_comment_is_read_as_the_bytes_stored() {
     let d = tempfile::tempdir().unwrap();
-    // UTF-16 with a byte-order mark, which the zip library's text decoding
-    // of a comment would turn into something else.
+    // Bytes the zip library would decode to longer text, ahead of a key: the
+    // evidence's offsets are into the comment as stored.
+    let key = synth::fake_secret("aws_access_key", 50);
+    let comment = [&b"\xe9\xe9\xe9\xe9\n"[..], key.as_bytes(), b"\n"].concat();
+    let z = with_entry_comments(&synth::zip(&[("a.txt", text("a\n"))]), &[&comment]);
+    let p = write(d.path(), "encoded.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert_eq!(members_with_evidence(&t), ["a.txt!comment!"]);
+    let at = &t.evidence[0].locations[0];
+    assert_eq!(at.start, 5, "offset of the key in the stored comment");
+    assert_eq!(at.end, 5 + key.len() as u64);
+    // UTF-16 with a byte-order mark is found like any other member.
     let utf16: Vec<u8> = [0xff, 0xfe]
         .into_iter()
         .chain(
-            String::from_utf8(aws_file(50))
+            String::from_utf8(aws_file(51))
                 .unwrap()
                 .encode_utf16()
                 .flat_map(u16::to_le_bytes),
