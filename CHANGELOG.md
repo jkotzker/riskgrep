@@ -1,8 +1,17 @@
 # Changelog
 
-All notable changes to RiskGrep are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to RiskGrep are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Versioning covers the command line, the configuration file, and JSON output. The `riskgrep-core` Rust API is not covered yet: it can change in a minor release, and each change is listed here.
 
 ## [Unreleased]
+
+### Upgrading
+
+These defaults can change what a gate does after upgrading from 1.1.0. Each has a setting that keeps the earlier result, except where noted.
+
+- A file over `limits.text_max` (8 MiB) is read in part, and that now follows `on_partial`. The git hook blocks when such a file is added, and when a tracked one is edited, even if the added lines are clean, because the unread middle may hold them. The Claude Code hook asks, and `riskgrep scan --fail-at` exits 2. Set `on_partial = "allow"` under `[git]` or `[claude_code]`, or pass `--on-partial allow`.
+- Files compressed with bzip2, xz, zstd, lzip, lz4, lzop, or snappy follow `on_error` rather than `on_skipped`, so by default the git hook blocks them and the Claude Code hook asks. Set `on_error`, or ignore the paths.
+- zip, tar, gzip, and SQLite files are read instead of following `on_error`. A file that used to block or ask for being unread now passes when its contents are clean, and is flagged by what it holds. An archive with nothing but images or unknown binaries is `skipped`, so `on_skipped` applies: allow by default. There is no setting for the earlier result.
+- File names such as `.env`, `.netrc`, and private-key names score 80 (`secrets-core/paths.yar`), which meets the default `ask` threshold and the git hook's `secret` threshold. Add deliberate files to `[ignore]`.
 
 ### Added
 
@@ -30,6 +39,7 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 - The Claude Code hook offers partial reads for files whose findings come from `generic_api_key` and the provider-context rules. With both separators on one line, 100 of the 101 rewritten rules are marked `line_complete`: 211 of the 222 converted rules, up from 111 (`grep -c 'line_complete = true' crates/riskgrep-core/rulesets/secrets-core/gitleaks.yar`). `atlassian_api_token` stays unmarked, because its regex is an alternation whose secret is the first non-empty group and its trailing delimiter can match a line feed. Each marked rule is checked by `cargo test -p riskgrep-core --test ruleset_secrets every_line_complete_rule_locates_every_secret`.
 - The evidence database's schema version is 4: rows can describe an archive's members. The first run after upgrading discards the existing rows and the cache refills as files are scanned; upgrade `riskgrep` and `riskgrep-claude` together, as for 1.1.0.
 - 7z and PDF files are still reported unscanned; inside an archive they make it `partial`.
+- `riskgrep-core`: public enums are `#[non_exhaustive]`. `FileClass::Archive` is replaced by `FileClass::Container(ContainerKind)`, and report and configuration structs gain fields, so struct literals outside the crate need updating.
 - Files compressed with bzip2, xz, zstd, lzip, lz4, lzop, or snappy are recognised by their first bytes and reported `unscanned` (`xz not scanned in v1`) instead of `skipped` as unknown binaries, since they hold content that was not read. `on_error` now applies to them, so by default the Claude Code hook asks and the git hook blocks, where `on_skipped` allowed them before; inside an archive they make it `partial`. Nothing is decompressed. Raw LZMA, brotli, and Unix compress have no distinctive magic and stay `skipped` (`cargo test -p riskgrep-core --test tar_gzip compressed_streams`).
 - Upgraded the `zip` dependency from 8.6 to 9.0.5. Version 9.0.5 scans every byte before the end record when it detects where an archive starts, which would read a whole large `.npz`, so an `.npz` over the text limit is now opened with a fixed start offset of 0. An over-limit `.npz` with bytes prepended before its first entry is reported unscanned (`npz central directory unreadable`) instead of being read (`cargo test -p riskgrep-core --test classify npz_over_limit_with_prepended_bytes_is_unscanned`).
 - An `.npz` with a `.npy` member that cannot be read, because of a wrong checksum on a member read whole (only the first 4,096 uncompressed bytes of a member are read, so a larger member's checksum is not checked), a declared size smaller than the data, or an unreadable header, is reported partial (`npz member N could not be read`, N being the member's position in the archive) instead of scanned, whether it is read whole or over the text limit. The scores of the members that could be read are kept, the result is not cached, so a later run scans it again, and `on_partial` applies. An `.npz` inside a zip makes the zip partial the same way (`cargo test -p riskgrep-core --test scanner npz_unreadable`).
