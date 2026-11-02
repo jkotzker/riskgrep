@@ -108,7 +108,11 @@ struct Raw {
 
 /// What a container's walk and scan found besides evidence.
 struct ContainerInfo {
+    /// `scanned` counts members read whole and scanned.
     counts: ContainerRow,
+    read_in_part: u64,
+    not_read: u64,
+    opened: u64,
     /// Members not read whole (empty for a cached container).
     unread: Vec<Unread>,
 }
@@ -129,7 +133,14 @@ impl Raw {
 
     /// A target answered from the cache.
     fn cached(target: String, rel: String, entry: Entry, text: bool) -> Raw {
+        // Only a container read whole is cached, and the row does not count
+        // the nested containers: they are the members left over.
         let container = entry.container.map(|counts| ContainerInfo {
+            read_in_part: 0,
+            not_read: 0,
+            opened: counts
+                .members
+                .saturating_sub(counts.scanned + counts.skipped),
             counts,
             unread: Vec::new(),
         });
@@ -574,7 +585,7 @@ impl RiskGrep {
     fn prepare_blob(&mut self, name: &str, blob_id: &[u8], bytes: &[u8]) -> Raw {
         let size = bytes.len() as u64;
         let head = &bytes[..bytes.len().min(self.cfg.limits.sniff)];
-        let class = classify(name, head, size);
+        let class = classify::settle_npz(classify(name, head, size), bytes, size, &self.cfg.limits);
         if let Some(s) = not_scanned(&class) {
             return Raw::status(name.to_string(), s);
         }
@@ -746,7 +757,8 @@ impl RiskGrep {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let class = classify(&name, &head, size);
+        let class =
+            classify::settle_npz(classify(&name, &head, size), &file, size, &self.cfg.limits);
         if let Some(s) = not_scanned(&class) {
             return done(s);
         }
@@ -927,7 +939,7 @@ impl RiskGrep {
         let deadline = Instant::now() + self.cfg.limits.time_budget.saturating_sub(spent);
         let mut unread = x.unread;
         let mut ev_all: Vec<Evidence> = Vec::new();
-        let mut scanned = 0u64;
+        let mut scanned: Vec<u64> = Vec::new();
         for m in x.members {
             let left = deadline.saturating_duration_since(Instant::now());
             let cause = if left.is_zero() {
@@ -956,7 +968,7 @@ impl RiskGrep {
                             e.member = Some(m.path.clone());
                         }
                         ev_all.extend(ev);
-                        scanned += 1;
+                        scanned.push(m.seq);
                         None
                     }
                     Err(ScanError::Timeout) => Some(Cause::Scan("timeout".into())),
@@ -974,14 +986,16 @@ impl RiskGrep {
             }
         }
         scanner.set_timeout(self.cfg.limits.time_budget);
-        let status = container::status(scanned > 0, &unread, x.uncovered, x.error.as_deref());
+        let any = !scanned.is_empty();
+        let status = container::status(any, &unread, x.uncovered, x.error.as_deref());
         if let TargetStatus::Unscanned { reason } = status {
             return Raw::status(p.target, TargetStatus::Unscanned { reason });
         }
+        let (not_read, in_part) = container::unread_counts(&unread);
         let counts = ContainerRow {
             format: x.format.to_string(),
             members: x.total,
-            scanned,
+            scanned: scanned.iter().filter(|s| !in_part.contains(s)).count() as u64,
             skipped: x.skipped,
         };
         if status == TargetStatus::Scanned {
@@ -993,7 +1007,13 @@ impl RiskGrep {
             }
         }
         let mut raw = Raw::scanned(p.target, p.rel, status, ev_all, false);
-        raw.container = Some(ContainerInfo { counts, unread });
+        raw.container = Some(ContainerInfo {
+            counts,
+            read_in_part: in_part.len() as u64,
+            not_read,
+            opened: x.opened,
+            unread,
+        });
         raw
     }
 
@@ -1199,8 +1219,10 @@ impl RiskGrep {
             format: info.counts.format,
             members: info.counts.members,
             scanned: info.counts.scanned,
+            read_in_part: info.read_in_part,
             skipped: info.counts.skipped,
-            not_read: container::unread_count(&info.unread),
+            not_read: info.not_read,
+            opened: info.opened,
             listed,
         }
     }

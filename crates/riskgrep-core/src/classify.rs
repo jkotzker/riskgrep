@@ -487,6 +487,41 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
     }
 }
 
+/// `class`, unless it is an `.npz` that the tensor path would not read in
+/// full: one with a member not named `.npy`, or one whose directory does not
+/// parse from offset 0, is a zip like any other. A directory over its budget
+/// stays as it is, as does an unparseable one over the text limit, which is
+/// reported unscanned.
+pub fn settle_npz<S: Source + ?Sized>(
+    class: FileClass,
+    src: &S,
+    size: u64,
+    limits: &Limits,
+) -> FileClass {
+    if class != FileClass::KnownBinary(Known::Npz) {
+        return class;
+    }
+    let left = Cell::new(NPZ_DIRECTORY_MAX);
+    let over = Cell::new(false);
+    let reader = BufReader::with_capacity(8192, Budgeted::new(src, size, &left, &over));
+    let config = zip::read::Config {
+        archive_offset: zip::read::ArchiveOffset::Known(0),
+    };
+    let tensors = match zip::ZipArchive::with_config(config, reader) {
+        Ok(zip) if !over.get() => (0..zip.len()).all(|i| {
+            zip.name_for_index(i)
+                .and_then(Result::ok)
+                .is_some_and(|n| n.ends_with(".npy"))
+        }),
+        _ => over.get() || size > limits.text_max,
+    };
+    if tensors {
+        class
+    } else {
+        FileClass::Container(ContainerKind::Zip)
+    }
+}
+
 /// Length of an npy header section (magic, version, length field, header text).
 fn npy_header_end<S: Source + ?Sized>(src: &S, size: u64, cap: u64) -> io::Result<u64> {
     let prefix = src.range(0, size.min(12))?;

@@ -52,7 +52,7 @@ riskgrep rules test                             # run the rulesets' own test cas
 riskgrep cache prune --dry-run                  # what pruning the cache would remove
 ```
 
-`--fail-at CATEGORY=N[,CATEGORY=N…]` makes the exit status 1 when a target's score for that category is at or above `N`. A target meets a threshold when its score rounded to one decimal, the number every output shows, is at least the threshold; `--fail-at`, the git hook's `block_at`, and the Claude Code hook's `ask` and `deny` thresholds all use that one rule (`cargo test -p riskgrep --test cli fail_at_is_inclusive`). Exit status 2 means a target could not be scanned and `--on-error block` applies, or part of a target's content could not be read (a zip archive's unread members, an `.npz` member that cannot be read) and `--on-partial` blocks (`--on-partial error`, the default, follows `--on-error`; a file read in part by design, such as a sampled large text file, is not affected); 3 is a usage or configuration error. When standard output is closed early (`riskgrep scan … | head -1`), the command stops writing without a message and keeps the exit status the scan computed, so a gate in a pipeline with `set -o pipefail` still fails on 1 or 2; a scan that passed exits 0 (`cargo test -p riskgrep --test epipe`). `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
+`--fail-at CATEGORY=N[,CATEGORY=N…]` makes the exit status 1 when a target's score for that category is at or above `N`. A target meets a threshold when its score rounded to one decimal, the number every output shows, is at least the threshold; `--fail-at`, the git hook's `block_at`, and the Claude Code hook's `ask` and `deny` thresholds all use that one rule (`cargo test -p riskgrep --test cli fail_at_is_inclusive`). Exit status 2 means a target could not be scanned and `--on-error block` applies, or part of a target's content was not read (a zip archive's member not read whole, a sampled member included, or an `.npz` member that cannot be read) and `--on-partial` blocks (`--on-partial error`, the default, follows `--on-error`; a file outside an archive read in part by design, such as a sampled large text file, is not affected); 3 is a usage or configuration error. When standard output is closed early (`riskgrep scan … | head -1`), the command stops writing without a message and keeps the exit status the scan computed, so a gate in a pipeline with `set -o pipefail` still fails on 1 or 2; a scan that passed exits 0 (`cargo test -p riskgrep --test epipe`). `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
 
 ## Git hook
 
@@ -105,13 +105,13 @@ container_depth = 3          # nesting depth; the archive itself is depth 1
 container_ratio = 100        # uncompressed-to-compressed ratio, per member and overall, checked past 1 MiB
 
 [claude_code]
-on_partial = "error"         # content that could not be read: "error" follows on_error, or allow, ask, deny, block
+on_partial = "error"         # content that was not read: "error" follows on_error, or allow, ask, deny, block
 
 [git]
 on_partial = "error"
 ```
 
-An archive with members that were not read (a limit reached, an encrypted member) is reported `partial` and never passes silently: `on_partial` applies, and by default it follows `on_error`. The same holds for an `.npz` with a `.npy` member that cannot be read. See [Known limitations](docs/known-limitations.md#zip-members-are-read-within-shared-limits).
+An archive with a member not read whole (a limit reached, an encrypted member, or a member sampled because it is over the text limit) is reported `partial` and never passes silently: `on_partial` applies, and by default it follows `on_error`. The same holds for an `.npz` with a member named `.npy` that cannot be read or is not an npy file; an `.npz` with any other member is read as a zip archive. See [Known limitations](docs/known-limitations.md#zip-members-are-read-within-shared-limits).
 
 Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weights (`weight_overrides`), and list paths and rules to ignore (`[ignore]`).
 

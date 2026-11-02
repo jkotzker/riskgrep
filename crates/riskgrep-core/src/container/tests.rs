@@ -200,7 +200,7 @@ fn members_past_the_count_limit_make_it_partial() {
         partial(&x),
         "members 4..6 not read (limits.container_members)"
     );
-    assert_eq!(unread_count(&x.unread), 3);
+    assert_eq!(unread_counts(&x.unread), (3, Default::default()));
     assert!(x.unread.iter().all(|u| u.path.is_none()));
 }
 
@@ -480,6 +480,10 @@ struct Expiring {
 }
 
 impl Walk for Expiring {
+    fn read_to_end(&self) -> bool {
+        false
+    }
+    fn hidden(&mut self, _: Hidden) {}
     fn member(&mut self, _: MemberMeta, _: &mut dyn Read) -> Flow {
         panic!("offered a member past the deadline");
     }
@@ -537,4 +541,54 @@ fn comments_found_before_the_deadline_are_counted_as_not_read() {
     out[end + 12..end + 16].copy_from_slice(&(size + 4).to_le_bytes());
     // The headers are checked for the deadline at entries 0 and 256.
     assert_eq!(left_at_deadline(&out, 1), 257 + 1);
+}
+
+/// A source that cannot be read.
+struct NoBytes;
+
+impl Source for NoBytes {
+    fn range(&self, _: u64, _: u64) -> std::io::Result<Vec<u8>> {
+        Err(std::io::ErrorKind::UnexpectedEof.into())
+    }
+}
+
+#[test]
+fn bytes_that_could_not_be_checked_count_as_not_read() {
+    assert_eq!(zip::past_stream(&NoBytes, 0, 40, 10), 40);
+    assert_eq!(zip::differing_local_name(&NoBytes, 0, b"a.txt"), Some(0));
+    // A stream that makes more than the declared size is not followed further.
+    let mut data = {
+        let mut encode = flate2::Compress::new(flate2::Compression::none(), false);
+        let mut out = Vec::with_capacity(300_000);
+        encode
+            .compress_vec(&vec![7u8; 200_000], &mut out, flate2::FlushCompress::Finish)
+            .unwrap();
+        out
+    };
+    data.extend_from_slice(b"tail");
+    let n = data.len() as u64;
+    let past = zip::past_stream(&&data[..], 0, n, 10);
+    assert!(past > 4 && past < n, "{past} of {n}");
+    assert_eq!(zip::past_stream(&&data[..], 0, n, 200_000), 4);
+}
+
+#[test]
+fn a_member_read_in_part_whose_scan_failed_counts_as_not_read() {
+    let u = |seq, last, partly| Unread {
+        seq,
+        last,
+        path: None,
+        cause: Cause::Corrupt,
+        partly,
+    };
+    // 2 was read in part, then not scanned; 3 twice in part; 5..7 never read.
+    let (none, in_part) = unread_counts(&[
+        u(2, 2, true),
+        u(2, 2, false),
+        u(3, 3, true),
+        u(3, 3, true),
+        u(5, 7, false),
+    ]);
+    assert_eq!(none, 4);
+    assert_eq!(in_part.into_iter().collect::<Vec<_>>(), vec![3]);
 }
