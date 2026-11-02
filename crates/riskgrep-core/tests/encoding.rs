@@ -502,3 +502,61 @@ fn byte_order_mark_without_nul_bytes_is_encoded_text() {
         })
     );
 }
+
+#[test]
+fn standard_input_scores_encoded_text_like_the_same_file() {
+    let d = tempfile::tempdir().unwrap();
+    let text = mixed_text(5);
+    let mut g = scanner();
+    for (i, (utf, bom)) in VARIANTS.into_iter().enumerate() {
+        let bytes = encode(&text, utf, bom);
+        let file = g.scan_paths(&[write(d.path(), &format!("s{i}.txt"), &bytes)]);
+        let stdin = g.scan_bytes("<stdin>", &bytes);
+        let (f, s) = (only(&file), only(&stdin));
+        let why = format!("{utf:?} bom={bom}");
+        assert_eq!(s.status, TargetStatus::Scanned, "{why}");
+        assert_eq!(s.text, f.text, "{why}");
+        assert_eq!(s.scores, f.scores, "{why}");
+        assert!(s.scores[&secret()] >= 95.0, "{why}");
+        let (fl, sl) = (aws_locations(f), aws_locations(s));
+        assert_eq!(fl.len(), 1, "{why}");
+        assert_eq!(sl, fl, "{why}");
+    }
+}
+
+#[test]
+fn standard_input_that_is_not_encoded_text_is_scanned_as_before() {
+    // Unlike a file, which is skipped as binary of unknown format, standard
+    // input with a NUL byte is still scanned as bytes, so a key inside
+    // piped binary data is found.
+    let mut bytes = b"\0\x01\x02 ".to_vec();
+    bytes.extend_from_slice(aws(6).as_bytes());
+    bytes.extend_from_slice(b" \0\x03\x04");
+    let mut g = scanner();
+    let r = g.scan_bytes("<stdin>", &bytes);
+    let t = only(&r);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert!(t.scores[&secret()] >= 95.0);
+    assert_eq!(aws_locations(t).len(), 1);
+}
+
+#[test]
+fn standard_input_larger_than_the_text_limit_maps_a_sampled_tail() {
+    let mut cfg = Config::default();
+    cfg.limits.text_max = 4096;
+    cfg.limits.sample = 1024;
+    let filler = "x".repeat(300) + "\r\n";
+    let text = format!("{}id = \"{}\"\r\n", filler.repeat(40), aws(7));
+    let d = tempfile::tempdir().unwrap();
+    for (utf, bom) in [(Utf::Utf16Le, true), (Utf::Utf32Be, false)] {
+        let bytes = encode(&text, utf, bom);
+        let mut g = scanner_with(cfg.clone(), &shared_cache());
+        let file = g.scan_paths(&[write(d.path(), "big.txt", &bytes)]);
+        let stdin = g.scan_bytes("<stdin>", &bytes);
+        let (f, s) = (only(&file), only(&stdin));
+        assert!(matches!(f.status, TargetStatus::Partial { .. }));
+        assert_eq!(s.status, f.status, "{utf:?}");
+        assert_eq!(aws_locations(s), aws_locations(f), "{utf:?}");
+        assert_eq!(aws_locations(s).len(), 1, "{utf:?}");
+    }
+}
