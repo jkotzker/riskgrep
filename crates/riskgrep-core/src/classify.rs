@@ -205,13 +205,38 @@ const VAULT_HEADER_BYTES: u64 = 64;
 /// Magic bytes of an encrypted password vault: KeePass (`03 D9 A2 9A`, then
 /// `65 FB 4B B5` for KDB 1.x or `67 FB 4B B5` for KDBX), a macOS keychain
 /// file (`kych`, version 1.0), or a Password Safe v3 database (`PWS3`, with
-/// the `.psafe3` extension: four letters alone are too common).
-fn is_vault(name: &str, head: &[u8]) -> bool {
+/// the `.psafe3` extension or the layout of the specification: four letters
+/// alone are too common).
+fn is_vault(name: &str, head: &[u8], size: u64) -> bool {
     matches!(
         head,
         [0x03, 0xD9, 0xA2, 0x9A, 0x65 | 0x67, 0xFB, 0x4B, 0xB5, ..]
     ) || head.starts_with(b"kych\0\x01\0\0")
-        || (head.starts_with(b"PWS3") && ends_with_ignore_case(name, ".psafe3"))
+        || (head.starts_with(b"PWS3")
+            && (ends_with_ignore_case(name, ".psafe3") || is_password_safe_layout(head, size)))
+}
+
+/// Whether a file that starts with `PWS3` has the size and iteration count of
+/// a Password Safe v3 database: the fixed fields (tag, salt, iteration
+/// count, key check, four key blocks, and IV: 152 bytes), whole 16-byte
+/// blocks of encrypted header and records, the EOF block, and the 32-byte
+/// HMAC make 200 bytes plus a multiple of 16, and the iteration count (a
+/// 32-bit little-endian integer after the 32-byte salt) is at least the
+/// original minimum of 2,048 and below 2^28 (four printable characters read
+/// as an integer above that). The random salt must also hold a byte that is
+/// not printable text (below 0x09 or from 0x80), so a text file with a line
+/// feed at offset 39 is not mistaken for a database.
+fn is_password_safe_layout(head: &[u8], size: u64) -> bool {
+    let salt_is_binary = head
+        .get(4..36)
+        .is_some_and(|salt| salt.iter().any(|&b| !(0x09..0x80).contains(&b)));
+    let iterations = head
+        .get(36..40)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    salt_is_binary
+        && size >= 200
+        && (size - 200).is_multiple_of(16)
+        && iterations.is_some_and(|n| (2048..1 << 28).contains(&n))
 }
 
 /// The largest `.der` or `.key` file read as a key store (1 MiB). Larger
@@ -240,7 +265,7 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
     if is_safetensors(head) {
         return FileClass::KnownBinary(Known::Safetensors);
     }
-    if is_vault(name, head) {
+    if is_vault(name, head, size) {
         return FileClass::KnownBinary(Known::Vault);
     }
     let has_ext = |exts: &[&str]| exts.iter().any(|ext| ends_with_ignore_case(name, ext));

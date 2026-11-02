@@ -752,6 +752,60 @@ fn password_vaults_are_recognised_by_magic() {
     assert_eq!(classify("notes.txt", b"kych is a word\n"), FileClass::Text);
 }
 
+/// A Password Safe v3 header: the tag, a 32-byte salt, and the iteration
+/// count, then filler up to 64 bytes.
+fn pws3_header(iterations: u32) -> Vec<u8> {
+    let mut head = b"PWS3".to_vec();
+    head.extend([0x90; 32]);
+    head.extend(iterations.to_le_bytes());
+    pad(head, 64)
+}
+
+#[test]
+fn password_safe_layout_is_recognised_without_the_extension() {
+    let vault = Known::Vault;
+    // 200 bytes plus whole 16-byte blocks, and an iteration count of at least
+    // the original minimum of 2,048.
+    for (size, iterations) in [(200, 2048), (216, 262_144), (100_008, 5_000_000)] {
+        assert_eq!(
+            classify_sized("backup", &pws3_header(iterations), size),
+            FileClass::KnownBinary(vault),
+            "{size} bytes, {iterations} iterations"
+        );
+    }
+    for (size, iterations) in [
+        (199, 262_144),
+        (208, 262_144),
+        (216, 2047),
+        (216, 0),
+        // At or above 2^28: a larger value is not a plausible iteration count.
+        (216, 1 << 28),
+    ] {
+        assert_eq!(
+            classify_sized("backup", &pws3_header(iterations), size),
+            FileClass::UnknownBinary,
+            "{size} bytes, {iterations} iterations"
+        );
+    }
+    // Text whose bytes 36 to 40 read as a plausible iteration count (a line
+    // feed at offset 39) is still text: the salt must hold a byte that is not
+    // printable text.
+    let mut text = b"PWS3".to_vec();
+    text.extend([b'x'; 35]);
+    text.push(b'\n');
+    text.extend(b"more notes, a text file\n");
+    assert_eq!(classify_sized("notes.txt", &text, 216), FileClass::Text);
+    // A text file that starts with the letters is text.
+    assert_eq!(
+        classify_sized(
+            "notes.txt",
+            b"PWS3 build notes, a text file that only starts with them\n",
+            216
+        ),
+        FileClass::Text
+    );
+}
+
 #[test]
 fn password_vaults_read_the_header_only() {
     let data = pad(

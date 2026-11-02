@@ -657,7 +657,8 @@ fn grep_searches_hidden_files() {
         .run("Grep", json!({ "pattern": "x", "path": e.dir().join("h") }))
         .decision();
     assert_eq!(d, "deny");
-    assert!(reason.contains("h/.env scored secret 95.0"), "{reason}");
+    // 95 for the key, combined with 80 for the name (`dotenv_file_name`).
+    assert!(reason.contains("h/.env scored secret 99.0"), "{reason}");
 
     e.write("k/.aws/credentials", aws_file().as_bytes());
     let (d, reason) = e
@@ -665,7 +666,7 @@ fn grep_searches_hidden_files() {
         .decision();
     assert_eq!(d, "deny");
     assert!(
-        reason.contains("k/.aws/credentials scored secret 95.0"),
+        reason.contains("k/.aws/credentials scored secret 99.0"),
         "{reason}"
     );
 }
@@ -1157,6 +1158,38 @@ fn glob_revealing_a_flagged_name_asks() {
     assert_eq!(d, "ask");
     e.run("Glob", json!({ "pattern": "*", "path": "src" }))
         .silent();
+}
+
+/// The path-only rules for well-known key-file and credential-file names
+/// (`secrets-core/paths.yar`): names that exist to hold a secret reach the
+/// ask threshold, the public half and template names do not, and a name that
+/// is a certificate as often as a key stays below it.
+#[test]
+fn glob_revealing_a_key_or_credential_file_name_asks() {
+    for (name, rule) in [
+        (".ssh/id_ed25519", "ssh_private_key_name"),
+        ("app/.env", "dotenv_file_name"),
+        (".aws/credentials", "aws_credentials_file_name"),
+        ("home/.netrc", "credential_store_file_name"),
+        ("release.jks", "java_keystore_name"),
+    ] {
+        let e = Env::new();
+        e.write(name, b"x");
+        let (d, reason) = e.run("Glob", json!({ "pattern": "**/*" })).decision();
+        assert_eq!(d, "ask", "{name}");
+        assert!(reason.contains(rule), "{name}: {reason}");
+        assert!(reason.contains(name), "{name}: {reason}");
+    }
+    for name in [
+        ".ssh/id_ed25519.pub",
+        "app/.env.example",
+        "certs/server.pem",
+        "config/credentials",
+    ] {
+        let e = Env::new();
+        e.write(name, b"x");
+        e.run("Glob", json!({ "pattern": "**/*" })).silent();
+    }
 }
 
 #[test]
