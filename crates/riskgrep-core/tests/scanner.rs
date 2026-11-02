@@ -1175,7 +1175,7 @@ fn stopword_change_invalidates_cached_evidence() {
 }
 
 #[test]
-fn an_unreadable_npz_member_is_unseen_content_and_a_sample_is_not() {
+fn an_unreadable_npz_member_is_a_read_failure_and_a_sample_is_not() {
     let note = Some("npz member 0 could not be read");
     let d = tempfile::tempdir().unwrap();
     for (large, data) in [
@@ -1188,13 +1188,75 @@ fn an_unreadable_npz_member_is_unseen_content_and_a_sample_is_not() {
         let mut g = if large { small_limits() } else { scanner() };
         let r = g.scan_paths(&[f]);
         assert_eq!(only(&r).unseen_part(), note, "file, large {large}");
+        assert!(only(&r).read_failed, "file, large {large}");
         let t = g.scan_blob("m.npz", b"blob", &data, None);
         assert_eq!(t.unseen_part(), note, "blob, large {large}");
+        assert!(t.read_failed, "blob, large {large}");
     }
-    let f = d.path().join("big.txt");
-    fs::write(&f, "plain text\n".repeat(1000)).unwrap();
-    age(&f);
-    let r = small_limits().scan_paths(&[f]);
-    assert!(matches!(only(&r).status, TargetStatus::Partial { .. }));
-    assert_eq!(only(&r).unseen_part(), None);
+}
+
+#[test]
+fn every_file_read_in_part_has_an_unseen_part() {
+    let d = tempfile::tempdir().unwrap();
+    for secret_read in [false, true] {
+        for p in synth::partly_read_files(secret_read) {
+            let f = d.path().join(p.name);
+            fs::write(&f, &p.bytes).unwrap();
+            age(&f);
+            let mut g = small_limits();
+            let want = TargetStatus::Partial {
+                not_read: p.not_read.clone(),
+            };
+            let r = g.scan_paths(std::slice::from_ref(&f));
+            let t = only(&r);
+            assert_eq!(t.status, want, "{}", p.kind);
+            assert_eq!(t.unseen_part(), Some(p.not_read.as_str()), "{}", p.kind);
+            assert!(!t.read_failed, "{}", p.kind);
+            let found = t.scores.get(&secret()).copied().unwrap_or(0.0) >= 80.0;
+            assert_eq!(found, secret_read, "{}: score", p.kind);
+            let t = g.scan_blob(p.name, p.name.as_bytes(), &p.bytes, None);
+            assert_eq!(t.unseen_part(), Some(p.not_read.as_str()), "{}", p.kind);
+            assert!(!t.read_failed, "{}", p.kind);
+        }
+    }
+}
+
+#[test]
+fn a_safetensors_file_past_its_cap_has_an_unseen_part() {
+    let d = tempfile::tempdir().unwrap();
+    for secret_read in [false, true] {
+        let s = synth::safetensors_past_cap(secret_read);
+        let f = d.path().join("big.safetensors");
+        s.write_to(&f).unwrap();
+        age(&f);
+        // 100 MiB takes an unoptimized build longer than the default budget.
+        let mut cfg = Config::default();
+        cfg.limits.time_budget = Duration::from_secs(600);
+        let mut g = RiskGrep::with_cache_dir(cfg, None, Some(shared_cache())).unwrap();
+        let r = g.scan_paths(&[f]);
+        let t = only(&r);
+        assert_eq!(t.unseen_part(), Some(s.not_read().as_str()));
+        assert!(!t.read_failed);
+        let found = t.scores.get(&secret()).copied().unwrap_or(0.0) >= 80.0;
+        assert_eq!(found, secret_read);
+    }
+}
+
+#[test]
+fn a_file_read_whole_or_for_its_header_alone_has_no_unseen_part() {
+    let d = tempfile::tempdir().unwrap();
+    let mut vault = b"kych\0\x01\0\0".to_vec();
+    vault.resize(4096, 0);
+    for (name, data) in [
+        ("small.txt", b"plain text\n".to_vec()),
+        ("data.npy", synth::npy("<f4", &[1024, 16])),
+        ("login.keychain-db", vault),
+    ] {
+        let f = d.path().join(name);
+        fs::write(&f, &data).unwrap();
+        age(&f);
+        let r = small_limits().scan_paths(&[f]);
+        assert_eq!(only(&r).status, TargetStatus::Scanned, "{name}");
+        assert_eq!(only(&r).unseen_part(), None, "{name}");
+    }
 }

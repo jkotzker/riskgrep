@@ -94,11 +94,12 @@ pub struct ScanArgs {
     /// Default: block when --fail-at is given, otherwise allow
     #[arg(long, value_enum)]
     pub on_error: Option<OnError>,
-    /// What a target with content that was not read (status partial: an
-    /// archive with a member not read whole, a sampled member included, or an
-    /// `.npz` member that cannot be read; not a file outside an archive read in
-    /// part by design, such as a sampled large text file) does to the exit
-    /// status: `block` exits 2; `error` follows --on-error
+    /// What a target with content that was not read (status partial: text
+    /// sampled at its ends, a key store or tensor header past its limit,
+    /// standard input past 64 MiB, an archive with a member not read whole,
+    /// or an `.npz` member that cannot be read) does to the exit status,
+    /// unless a score already met --fail-at: `block` exits 2; `error` follows
+    /// --on-error
     #[arg(long, value_enum, default_value = "error")]
     pub on_partial: OnPartial,
     /// Do not read or write the evidence cache

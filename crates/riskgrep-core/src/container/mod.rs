@@ -897,7 +897,7 @@ impl Walker<'_> {
         if let Some(t) = &truncated {
             self.unread(seq, Some(path.clone()), t.clone(), true);
         } else if let Some(p) = &content.partial {
-            let cause = if content.unseen {
+            let cause = if content.read_failed {
                 Cause::Scan(p.clone())
             } else {
                 Cause::Sampled(p.clone())

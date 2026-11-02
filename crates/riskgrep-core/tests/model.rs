@@ -16,7 +16,7 @@ fn target(name: &str, score: f64, status: TargetStatus) -> TargetReport {
         suppressed: 0,
         text: true,
         container: None,
-        unseen: false,
+        read_failed: false,
     }
 }
 
@@ -234,9 +234,9 @@ fn non_container_target_json_is_unchanged() {
             not_read: "bytes 1..2 not read".into(),
         },
     );
-    // Whether a gap was seen is for the gates; a report reads the same.
+    // Why a part was not read is for the gates' wording; a report reads the same.
     let mut gap = p.clone();
-    gap.unseen = true;
+    gap.read_failed = true;
     assert_eq!(
         serde_json::to_string(&gap).unwrap(),
         serde_json::to_string(&p).unwrap()

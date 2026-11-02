@@ -398,6 +398,7 @@ fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
     let mut batch = Batch::spawn(&root)?;
     let mut messages: Vec<String> = Vec::new();
     let mut offended = false;
+    let mut read_in_part = false;
 
     let result = (|| -> Result<(), CliError> {
         for (f, only) in staged.iter().zip(&ranges) {
@@ -447,10 +448,16 @@ fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
                 }
                 _ => {}
             }
-            // Unlike a sampled text file, part of its content was never seen.
             if let Some(not_read) = t.unseen_part() {
                 if blocks(git_cfg.on_partial.action(git_cfg.on_error)) {
-                    messages.push(unscanned_line(&shown, "partial", not_read));
+                    // A read limit left the part unread; nothing failed.
+                    let status = if t.read_failed || t.container.is_some() {
+                        "partial"
+                    } else {
+                        "read only in part"
+                    };
+                    messages.push(unscanned_line(&shown, status, not_read));
+                    read_in_part = true;
                 }
             }
             let lines = offences(&shown, &t, &git_cfg);
@@ -477,6 +484,12 @@ fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
         writeln!(
             err,
             "To ignore a path: add it to [ignore] in .riskgrep.toml"
+        )?;
+    }
+    if read_in_part {
+        writeln!(
+            err,
+            "To accept every target read in part: set on_partial = \"allow\" under [git] in .riskgrep.toml"
         )?;
     }
     Ok(EXIT_THRESHOLD)
@@ -583,7 +596,7 @@ mod tests {
             suppressed: 0,
             text: true,
             container: None,
-            unseen: false,
+            read_failed: false,
         };
         assert_eq!(offences("x", &t(79.96), &cfg).len(), 1);
         assert!(offences("x", &t(79.94), &cfg).is_empty());
@@ -622,7 +635,7 @@ mod tests {
             suppressed: 0,
             text: false,
             container: None,
-            unseen: false,
+            read_failed: false,
         };
         assert_eq!(
             offences("backup.zip", &t, &cfg),

@@ -1160,3 +1160,146 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
     }
     out.into_bytes()
 }
+
+/// `[limits]` configuration under which [`partly_read_files`] are read in part.
+pub const PART_LIMITS: &str = "[limits]\ntext_max = 1024\nsample = 256\n";
+
+/// A file of one kind that is read only in part under [`PART_LIMITS`].
+pub struct PartlyRead {
+    pub kind: &'static str,
+    pub name: &'static str,
+    pub bytes: Vec<u8>,
+    /// The `not_read` note its report carries.
+    pub not_read: String,
+}
+
+fn encoded(text: &str, bom: &[u8], unit: impl Fn(u32) -> Vec<u8>) -> Vec<u8> {
+    let mut out = bom.to_vec();
+    out.extend(text.chars().flat_map(|c| unit(c as u32)));
+    out
+}
+
+/// One file of each kind a scan reads in part, holding a fake credential in
+/// the part read when `secret_read`, else in the part not read.
+pub fn partly_read_files(secret_read: bool) -> Vec<PartlyRead> {
+    let key = format!("key = \"{}\"\n", fake_secret("aws_access_key", 21));
+    let filler = "plain text line\n".repeat(128);
+    let text = if secret_read {
+        format!("{key}{filler}{filler}")
+    } else {
+        format!("{filler}{key}{filler}")
+    };
+    let ends = |n: usize| format!("bytes 256..{} not read", n - 256);
+
+    let utf16 = encoded(&text, &[0xFF, 0xFE], |c| (c as u16).to_le_bytes().to_vec());
+    let utf32 = encoded(&text, &[0xFF, 0xFE, 0, 0], |c| c.to_le_bytes().to_vec());
+
+    // A DER private key when the credential is read, a DER header no key
+    // rule matches otherwise; either way the file runs past the text limit.
+    let mut der = if secret_read {
+        let mut body = vec![0u8; 0x40];
+        Rng::new(21).fill(&mut body);
+        let mut b = vec![0x30, 0x46, 0x02, 0x01, 0x00, 0x02];
+        b.extend(body);
+        b.extend(std::iter::repeat_n(b' ', 2048));
+        b
+    } else {
+        let mut b = vec![0x30, 0x81, 0xFF, 0x06, 0x03, 0x55, 0x04, 0x03];
+        b.extend(std::iter::repeat_n(b' ', 2048));
+        b.extend_from_slice(key.as_bytes());
+        b
+    };
+    der.push(b'\n');
+
+    // A version 2.0 `.npy` header longer than the text limit.
+    let pad = " ".repeat(2048);
+    let dict = if secret_read {
+        format!("{{'descr': '<f4', 'note': '{key}', 'shape': (4,), }}{pad}\n")
+    } else {
+        format!("{{'descr': '<f4', 'shape': (4,), }}{pad}{key}\n")
+    };
+    let mut npy = b"\x93NUMPY\x02\x00".to_vec();
+    npy.extend_from_slice(&(dict.len() as u32).to_le_bytes());
+    npy.extend_from_slice(dict.as_bytes());
+
+    vec![
+        PartlyRead {
+            kind: "text",
+            name: "big.txt",
+            not_read: ends(text.len()),
+            bytes: text.into_bytes(),
+        },
+        PartlyRead {
+            kind: "utf-16 text",
+            name: "big16.txt",
+            not_read: ends(utf16.len()),
+            bytes: utf16,
+        },
+        PartlyRead {
+            kind: "utf-32 text",
+            name: "big32.txt",
+            not_read: ends(utf32.len()),
+            bytes: utf32,
+        },
+        PartlyRead {
+            kind: "key store",
+            name: "big.der",
+            not_read: format!("bytes 1024..{} not read", der.len()),
+            bytes: der,
+        },
+        PartlyRead {
+            kind: "npy header",
+            name: "big.npy",
+            not_read: format!("bytes 1024..{} not read", npy.len()),
+            bytes: npy,
+        },
+    ]
+}
+
+/// A safetensors file whose header runs past the fixed read cap, written
+/// sparsely: its first bytes, its last bytes, and its size.
+pub struct SafetensorsPastCap {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    size: u64,
+}
+
+/// A [`SafetensorsPastCap`] holding a fake credential in the part read when
+/// `secret_read`, else in the part not read.
+pub fn safetensors_past_cap(secret_read: bool) -> SafetensorsPastCap {
+    let size = crate::classify::SAFETENSORS_CAP + 4096;
+    let key = fake_secret("aws_access_key", 22);
+    let mut head = (size - 8).to_le_bytes().to_vec();
+    head.extend_from_slice(b"{\"__metadata__\":{\"note\":\"");
+    if secret_read {
+        head.extend_from_slice(key.as_bytes());
+    }
+    head.extend_from_slice(b"\"}");
+    let tail = if secret_read {
+        b"\n".to_vec()
+    } else {
+        format!("\nkey = \"{key}\"\n").into_bytes()
+    };
+    SafetensorsPastCap { head, tail, size }
+}
+
+impl SafetensorsPastCap {
+    /// The `not_read` note its report carries.
+    pub fn not_read(&self) -> String {
+        format!(
+            "bytes {}..{} not read",
+            crate::classify::SAFETENSORS_CAP,
+            self.size
+        )
+    }
+
+    /// Write the file; the bytes between head and tail are a hole.
+    pub fn write_to(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom};
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(&self.head)?;
+        f.set_len(self.size)?;
+        f.seek(SeekFrom::Start(self.size - self.tail.len() as u64))?;
+        f.write_all(&self.tail)
+    }
+}
