@@ -38,7 +38,6 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **Why:** only the formats whose headers state shape and type are parsed.
 - **How it shows up:** such files score at most 30 from the file-name rule (`voiceprint`, `embedding`, `speaker`, `enroll`, or `faceprint` in the path), or nothing.
 - **Large `.npz` with prepended bytes:** an `.npz` over the text limit whose first entry does not start at byte 0 is reported unscanned (`npz central directory unreadable`), because its central directory is located from a fixed start offset of 0.
-- **Unreadable `.npy` member in an `.npz` under the text limit:** the file is read whole and a member that cannot be read (wrong checksum, declared size smaller than the data) is skipped, so the file is reported scanned with that member unseen (`cargo test -p riskgrep-core --test scanner small_npz_with_unreadable_member_is_scanned_without_it`). Above the limit the same file is reported unscanned.
 
 ### How embeddings are recognised
 
