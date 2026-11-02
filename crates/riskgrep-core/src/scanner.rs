@@ -504,9 +504,18 @@ impl RiskGrep {
         self.report(targets)
     }
 
-    /// Scan raw text (stdin). Never cached; text limits apply.
+    /// Scan raw text (stdin). Never cached; text limits apply. UTF-16 and
+    /// UTF-32 text is recognised from the first bytes as for a file and
+    /// transcoded, with evidence offsets in the input's bytes. Any other
+    /// input is scanned as text, including bytes a file of that kind would
+    /// skip as binary of unknown format.
     pub fn scan_bytes(&mut self, name: &str, bytes: &[u8]) -> Report {
-        let raw = match classify::slice_for_scan(bytes, &FileClass::Text, &self.cfg.limits) {
+        let head = &bytes[..bytes.len().min(self.cfg.limits.sniff)];
+        let class = match classify(name, head, bytes.len() as u64) {
+            c @ FileClass::EncodedText(_) => c,
+            _ => FileClass::Text,
+        };
+        let raw = match classify::slice_for_scan(bytes, &class, &self.cfg.limits) {
             Err(e) => Raw::status(name.to_string(), unreadable(&e)),
             Ok(content) => self.scan_now(Pending {
                 target: name.to_string(),
@@ -514,7 +523,7 @@ impl RiskGrep {
                 path_ext: "<stdin>".into(),
                 ekey: String::new(),
                 content,
-                text: true,
+                text: class.is_text(),
                 hash: None,
                 stat: None,
                 container: None,

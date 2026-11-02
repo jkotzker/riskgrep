@@ -239,6 +239,31 @@ fn stdin_dash() {
 }
 
 #[test]
+fn stdin_decodes_utf16_and_utf32_like_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 13);
+    let text = format!("\u{feff}let id = \"{key}\";\n");
+    let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let utf32: Vec<u8> = text
+        .chars()
+        .flat_map(|c| (c as u32).to_be_bytes())
+        .collect();
+    for bytes in [utf16, utf32] {
+        let out = riskgrep(dir.path())
+            .args(["scan", "-", "--format", "json"])
+            .write_stdin(bytes)
+            .assert()
+            .code(0)
+            .get_output()
+            .stdout
+            .clone();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["targets"][0]["scores"]["secret"], 95.0);
+        assert!(!String::from_utf8_lossy(&out).contains(&key));
+    }
+}
+
+#[test]
 fn stdin_and_paths_together() {
     let (dir, _, _) = key_dir();
     let key = synth::fake_secret("aws_access_key", 13);
