@@ -1154,3 +1154,28 @@ fn stopword_change_invalidates_cached_evidence() {
     assert_eq!(score("example\n"), 0.0, "stopword added");
     assert_eq!(score("unrelated\n"), 60.0, "stopword removed");
 }
+
+#[test]
+fn an_unreadable_npz_member_is_unseen_content_and_a_sample_is_not() {
+    let note = Some("npz member 0 could not be read");
+    let d = tempfile::tempdir().unwrap();
+    for (large, data) in [
+        (false, synth::npz_with_unreadable_member()),
+        (true, damaged_npz(&["bad.npy"], "bad.npy", wrong_crc, true)),
+    ] {
+        let f = d.path().join("m.npz");
+        fs::write(&f, &data).unwrap();
+        age(&f);
+        let mut g = if large { small_limits() } else { scanner() };
+        let r = g.scan_paths(&[f]);
+        assert_eq!(only(&r).unseen_part(), note, "file, large {large}");
+        let t = g.scan_blob("m.npz", b"blob", &data, None);
+        assert_eq!(t.unseen_part(), note, "blob, large {large}");
+    }
+    let f = d.path().join("big.txt");
+    fs::write(&f, "plain text\n".repeat(1000)).unwrap();
+    age(&f);
+    let r = small_limits().scan_paths(&[f]);
+    assert!(matches!(only(&r).status, TargetStatus::Partial { .. }));
+    assert_eq!(only(&r).unseen_part(), None);
+}

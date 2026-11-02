@@ -93,6 +93,8 @@ impl Default for Limits {
 pub struct Content {
     pub bytes: Vec<u8>,
     pub partial: Option<String>,
+    /// `partial` is content that could not be read, not a sample by design.
+    pub unseen: bool,
     /// Set for a sampled text file: where its last bytes sit in `bytes`.
     pub tail: Option<Tail>,
     /// Set when the file could not be read well enough to scan; `bytes` is
@@ -117,6 +119,7 @@ impl Content {
         Content {
             bytes,
             partial,
+            unseen: false,
             tail: None,
             unscanned: None,
             decoded: None,
@@ -127,6 +130,7 @@ impl Content {
         Content {
             bytes: Vec::new(),
             partial: None,
+            unseen: false,
             tail: None,
             unscanned: Some(reason),
             decoded: None,
@@ -472,10 +476,13 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
         }
     }
     match out.finish() {
-        Ok(c) => Content::whole(
-            c.into_inner(),
-            unread.map(|i| format!("npz member {i} could not be read")),
-        ),
+        Ok(c) => Content {
+            unseen: unread.is_some(),
+            ..Content::whole(
+                c.into_inner(),
+                unread.map(|i| format!("npz member {i} could not be read")),
+            )
+        },
         Err(_) => Content::unscanned("npz member headers could not be re-encoded".into()),
     }
 }
@@ -529,6 +536,7 @@ fn read_from<S: Source + ?Sized>(
             Ok(Content {
                 bytes,
                 partial: Some(format!("bytes {s}..{} not read", size - s)),
+                unseen: false,
                 tail: Some(Tail {
                     at: s + 1,
                     file_offset: size - s,
@@ -553,6 +561,7 @@ fn read_from<S: Source + ?Sized>(
             Ok(Content {
                 bytes,
                 partial,
+                unseen: false,
                 tail: None,
                 unscanned: None,
                 decoded: Some(decoded),

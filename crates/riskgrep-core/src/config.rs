@@ -36,7 +36,9 @@ pub enum Action {
     Block,
 }
 
-/// What a container that was only partly read does (`on_partial`): `error`
+/// What a target does when part of its content could not be read, as with a
+/// container's unread members or an `.npz`'s unreadable member (`on_partial`;
+/// a file sampled by design is not affected): `error`
 /// applies the integration's `on_error` action, as for a target that could
 /// not be scanned; the other values are actions of their own.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

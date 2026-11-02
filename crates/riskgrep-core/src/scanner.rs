@@ -102,6 +102,8 @@ struct Raw {
     text: bool,
     /// Set for a container whose members were read.
     container: Option<ContainerInfo>,
+    /// See [`TargetReport::unseen`].
+    unseen: bool,
 }
 
 /// What a container's walk and scan found besides evidence.
@@ -121,6 +123,7 @@ impl Raw {
             content: false,
             text: false,
             container: None,
+            unseen: false,
         }
     }
 
@@ -138,6 +141,7 @@ impl Raw {
             content: true,
             text: text && container.is_none(),
             container,
+            unseen: false,
         }
     }
 
@@ -156,6 +160,7 @@ impl Raw {
             content: true,
             text,
             container: None,
+            unseen: false,
         }
     }
 }
@@ -896,11 +901,14 @@ impl RiskGrep {
                 c.put_stat(k, h, *examined);
             }
         }
+        let unseen = p.content.unseen || engine_not_read.is_some();
         let status = match p.content.partial.or(engine_not_read) {
             Some(not_read) => TargetStatus::Partial { not_read },
             None => TargetStatus::Scanned,
         };
-        Raw::scanned(p.target, p.rel, status, ev, p.text)
+        let mut raw = Raw::scanned(p.target, p.rel, status, ev, p.text);
+        raw.unseen = unseen;
+        raw
     }
 
     /// Scan each member of a walked container under the time left before
@@ -927,8 +935,18 @@ impl RiskGrep {
             } else {
                 scanner.set_timeout(left);
                 let path = format!("{}!/{}", p.path_ext, m.path);
-                match engine.scan_content(scanner, &path, &m.content.bytes) {
-                    Ok(mut ev) => {
+                match engine.scan_content_checked(scanner, &path, &m.content.bytes) {
+                    Ok(scan) => {
+                        let mut ev = scan.evidence;
+                        if let Some(note) = scan.not_read {
+                            unread.push(Unread {
+                                seq: m.seq,
+                                last: m.seq,
+                                path: Some(m.path.clone()),
+                                cause: Cause::Scan(note),
+                                partly: true,
+                            });
+                        }
                         if let Some(d) = &m.content.decoded {
                             d.place(&mut ev);
                         } else if let Some(tail) = m.content.tail {
@@ -1078,6 +1096,7 @@ impl RiskGrep {
             suppressed: 0,
             text: raw.text,
             container: None,
+            unseen: raw.unseen,
         };
         let info = raw.container;
         if !raw.content {

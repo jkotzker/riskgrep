@@ -759,7 +759,11 @@ impl Walker<'_> {
         if let Some(t) = &truncated {
             self.unread(seq, Some(path.clone()), t.clone(), true);
         } else if let Some(p) = &content.partial {
-            let cause = Cause::Scan(format!("sampled: {p}"));
+            let cause = if content.unseen {
+                Cause::Scan(p.clone())
+            } else {
+                Cause::Scan(format!("sampled: {p}"))
+            };
             self.unread(seq, Some(path.clone()), cause, true);
         }
         let text = class.is_text();

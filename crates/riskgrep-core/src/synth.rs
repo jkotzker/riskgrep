@@ -104,6 +104,19 @@ pub fn npz(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
     w.finish().expect("zip finish").into_inner()
 }
 
+/// An `.npz` of one embedding-shaped `.npy` member whose checksum is wrong,
+/// so the member cannot be read.
+pub fn npz_with_unreadable_member() -> Vec<u8> {
+    let mut z = npz(&[("bad.npy", npy("<f4", &[1, 128]))]);
+    let central = z
+        .windows(4)
+        .rposition(|w| w == b"PK\x01\x02")
+        .expect("central header");
+    z[14..18].fill(0);
+    z[central + 16..central + 20].fill(0);
+    z
+}
+
 /// A zip archive of `(member name, bytes)` pairs, deflated.
 pub fn zip(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));

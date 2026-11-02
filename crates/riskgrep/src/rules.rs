@@ -337,6 +337,7 @@ mod tests {
             suppressed: 0,
             text: true,
             container: None,
+            unseen: false,
         }
     }
 

@@ -183,8 +183,8 @@ fn merge(mut parts: Vec<Report>) -> Report {
 }
 
 /// 1 when a score meets its threshold (`meets_threshold`), else 2 when a target is
-/// unscanned and `on_error` blocks or a container is partial and
-/// `on_partial` blocks, else 0.
+/// unscanned and `on_error` blocks or part of a target's content could not be
+/// read ([`TargetReport::unseen_part`]) and `on_partial` blocks, else 0.
 pub fn exit_code(
     report: &Report,
     thresholds: &BTreeMap<String, f64>,
@@ -204,11 +204,8 @@ pub fn exit_code(
     if on_error == OnError::Block && report.summary.unscanned > 0 {
         return EXIT_UNSCANNED;
     }
-    let partial_container = report
-        .targets
-        .iter()
-        .any(|t| t.container.is_some() && matches!(t.status, TargetStatus::Partial { .. }));
-    if on_partial == OnError::Block && partial_container {
+    let unseen = report.targets.iter().any(|t| t.unseen_part().is_some());
+    if on_partial == OnError::Block && unseen {
         return EXIT_UNSCANNED;
     }
     EXIT_OK
@@ -287,6 +284,7 @@ mod tests {
             suppressed: 0,
             text: true,
             container: None,
+            unseen: false,
         }
     }
 
@@ -326,6 +324,12 @@ mod tests {
             listed: vec![],
         });
         let r = Report::from_targets("0", "b", vec![c]);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Block), 2);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
+        // So is a file with content that could not be read, such as an `.npz`.
+        let mut gap = t(p.clone(), 0.0);
+        gap.unseen = true;
+        let r = Report::from_targets("0", "b", vec![gap]);
         assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Block), 2);
         assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
         // A sampled text file is partial by design, not an error.

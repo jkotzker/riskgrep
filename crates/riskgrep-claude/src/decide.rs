@@ -237,17 +237,17 @@ fn decide_targets(
                 finding: None,
             });
         }
-        // A container with members that were not read: part of what the
-        // call would read was never scanned.
-        if let (TargetStatus::Partial { not_read }, Some(c)) = (&t.status, &t.container) {
+        // Part of what the call would read was never scanned.
+        if let Some(not_read) = t.unseen_part() {
             if let Some(sev) = severity(cfg.on_partial.action(cfg.on_error)) {
+                let what = match &t.container {
+                    Some(c) => format!("{} of {} members of {}", c.not_read, c.members, t.target),
+                    None => format!("part of {}", t.target),
+                };
                 items.push(Item {
                     sev,
                     score: -1.0,
-                    text: format!(
-                        "RiskGrep: could not scan {} of {} members of {} ({not_read})",
-                        c.not_read, c.members, t.target
-                    ),
+                    text: format!("RiskGrep: could not scan {what} ({not_read})"),
                     finding: None,
                 });
             }
@@ -376,6 +376,7 @@ mod tests {
             suppressed: 0,
             text: true,
             container: None,
+            unseen: false,
         }
     }
 
@@ -421,6 +422,7 @@ mod tests {
             suppressed: 0,
             text: true,
             container: None,
+            unseen: false,
         }
     }
 
@@ -899,6 +901,29 @@ mod tests {
             decide(&report(vec![t]), false, &cfg, None),
             Decision::Deny(_)
         ));
+        // So is a file with content that could not be read.
+        let mut gap = target("/m.npz", "secret", 0.0);
+        gap.status = TargetStatus::Partial {
+            not_read: "npz member 0 could not be read".into(),
+        };
+        gap.unseen = true;
+        assert_eq!(
+            decide(
+                &report(vec![gap.clone()]),
+                false,
+                &Config::default().claude_code,
+                None
+            ),
+            Decision::Ask(
+                "RiskGrep: could not scan part of /m.npz (npz member 0 could not be read)".into()
+            )
+        );
+        let mut allow = Config::default().claude_code;
+        allow.on_partial = riskgrep_core::config::OnPartial::Allow;
+        assert_eq!(
+            decide(&report(vec![gap]), false, &allow, None),
+            Decision::NoOpinion
+        );
         // A sampled text file is partial by design: no item.
         let mut sampled = target("/big.txt", "secret", 0.0);
         sampled.status = p;

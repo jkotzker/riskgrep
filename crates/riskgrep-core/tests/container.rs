@@ -1026,3 +1026,47 @@ fn a_member_reached_after_the_deadline_is_not_scanned() {
         }
     );
 }
+
+#[test]
+fn an_unreadable_npy_in_an_npz_member_makes_it_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let z = synth::zip(&[
+        ("a.txt", text("a\n")),
+        ("m.npz", synth::npz_with_unreadable_member()),
+    ]);
+    let p = write(d.path(), "embeddings.zip", &z);
+    // Separate scanners over one cache: a run must not read a row of the last.
+    for run in 0..2 {
+        let t = only(&scan(&mut scanner(), &p)).clone();
+        assert_eq!(
+            partial(&t),
+            "member 2 not scanned (npz member 0 could not be read)",
+            "run {run}"
+        );
+        assert!(t.unseen_part().is_some());
+        let c = t.container.unwrap();
+        assert_eq!((c.members, c.scanned, c.not_read), (2, 2, 1));
+    }
+}
+
+#[test]
+fn an_npz_member_over_the_text_limit_keeps_its_reason() {
+    let d = tempfile::tempdir().unwrap();
+    let npz = synth::npz(&[
+        ("bad.npy", synth::npy("<f4", &[1, 128])),
+        ("zz_noise.npy", synth::npy("<i4", &[5000])),
+    ]);
+    let central = npz.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+    let mut npz = npz;
+    npz[14..18].fill(0);
+    npz[central + 16..central + 20].fill(0);
+    let p = write(d.path(), "big.zip", &synth::zip(&[("m.npz", npz)]));
+    let mut cfg = Config::default();
+    cfg.limits.text_max = 1024;
+    cfg.limits.sample = 256;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert_eq!(
+        partial(&t),
+        "member 1 not scanned (npz member 0 could not be read)"
+    );
+}

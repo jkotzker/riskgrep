@@ -445,15 +445,13 @@ fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
                 TargetStatus::Skipped { reason } if blocks(git_cfg.on_skipped) => {
                     messages.push(unscanned_line(&shown, "skipped", reason));
                 }
-                // A container with members that were not read: unlike a
-                // sampled text file, part of its content was never seen.
-                TargetStatus::Partial { not_read }
-                    if t.container.is_some()
-                        && blocks(git_cfg.on_partial.action(git_cfg.on_error)) =>
-                {
+                _ => {}
+            }
+            // Unlike a sampled text file, part of its content was never seen.
+            if let Some(not_read) = t.unseen_part() {
+                if blocks(git_cfg.on_partial.action(git_cfg.on_error)) {
                     messages.push(unscanned_line(&shown, "partial", not_read));
                 }
-                _ => {}
             }
             let lines = offences(&shown, &t, &git_cfg);
             offended |= !lines.is_empty();
@@ -585,6 +583,7 @@ mod tests {
             suppressed: 0,
             text: true,
             container: None,
+            unseen: false,
         };
         assert_eq!(offences("x", &t(79.96), &cfg).len(), 1);
         assert!(offences("x", &t(79.94), &cfg).is_empty());
@@ -623,6 +622,7 @@ mod tests {
             suppressed: 0,
             text: false,
             container: None,
+            unseen: false,
         };
         assert_eq!(
             offences("backup.zip", &t, &cfg),

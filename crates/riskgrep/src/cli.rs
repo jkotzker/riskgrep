@@ -14,8 +14,8 @@ pub const EXIT_USAGE: i32 = 3;
     about = "Score files 0-100 per sensitive-data category",
     long_about = "Score files 0-100 per sensitive-data category (secrets, biometric embeddings).\n\n\
 Exit codes: 0 no --fail-at threshold met; 1 a threshold was met; \
-2 a target could not be scanned and --on-error is block (or a container was only partly read \
-and --on-partial blocks); 3 usage or configuration error. \
+2 a target could not be scanned and --on-error is block (or part of a target's content could \
+not be read and --on-partial blocks); 3 usage or configuration error. \
 A closed standard output ends the output quietly and keeps the exit code the scan computed."
 )]
 pub struct Cli {
@@ -94,8 +94,9 @@ pub struct ScanArgs {
     /// Default: block when --fail-at is given, otherwise allow
     #[arg(long, value_enum)]
     pub on_error: Option<OnError>,
-    /// What a container with members that were not read (status partial)
-    /// does to the exit status: `block` exits 2; `error` follows --on-error
+    /// What a target with content that could not be read (status partial,
+    /// such as an archive's unread members; not a sampled large file) does to
+    /// the exit status: `block` exits 2; `error` follows --on-error
     #[arg(long, value_enum, default_value = "error")]
     pub on_partial: OnPartial,
     /// Do not read or write the evidence cache

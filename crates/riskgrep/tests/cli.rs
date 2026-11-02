@@ -875,3 +875,21 @@ mod pruning {
         assert!(all.iter().all(|p| p.exists()));
     }
 }
+
+#[test]
+fn an_unreadable_npz_member_follows_on_partial() {
+    let d = tempfile::tempdir().unwrap();
+    fs::write(d.path().join("m.npz"), synth::npz_with_unreadable_member()).unwrap();
+    let run = |args: &[&str]| {
+        riskgrep_in(shared_home(), d.path())
+            .args(["scan", "m.npz"])
+            .args(args)
+            .assert()
+    };
+    // Without a gate nothing blocks, as for a target that could not be scanned.
+    run(&[]).code(0);
+    run(&["--on-partial", "block"]).code(2);
+    // `--fail-at` makes on_error block, and on_partial follows it by default.
+    run(&["--fail-at", "secret=80"]).code(2);
+    run(&["--fail-at", "secret=80", "--on-partial", "allow"]).code(0);
+}
