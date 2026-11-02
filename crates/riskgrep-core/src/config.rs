@@ -38,8 +38,9 @@ pub enum Action {
 
 /// What a target does when part of its content could not be read, as with a
 /// container's unread members or an `.npz`'s unreadable member (`on_partial`;
-/// a file read in part by design is not affected): `error` applies the integration's `on_error` action, as for a target that could
-/// not be scanned; the other values are actions of their own.
+/// a file read in part by design is not affected): `error` applies the
+/// integration's `on_error` action, as for a target that could not be
+/// scanned; the other values are actions of their own.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OnPartial {

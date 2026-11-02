@@ -96,8 +96,8 @@ pub struct ScanArgs {
     pub on_error: Option<OnError>,
     /// What a target with content that could not be read (status partial,
     /// such as an archive's unread members; not a file read in part by design,
-    /// such as a sampled large text file) does to
-    /// the exit status: `block` exits 2; `error` follows --on-error
+    /// such as a sampled large text file) does to the exit status: `block`
+    /// exits 2; `error` follows --on-error
     #[arg(long, value_enum, default_value = "error")]
     pub on_partial: OnPartial,
     /// Do not read or write the evidence cache
