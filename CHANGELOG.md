@@ -7,6 +7,8 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 ### Changed
 
 - Upgraded the `zip` dependency from 8.6 to 9.0.5. Version 9.0.5 scans every byte before the end record when it detects where an archive starts, which would read a whole large `.npz`, so an `.npz` over the text limit is now opened with a fixed start offset of 0. An over-limit `.npz` with bytes prepended before its first entry is reported unscanned (`npz central directory unreadable`) instead of being read (`cargo test -p riskgrep-core --test classify npz_over_limit_with_prepended_bytes_is_unscanned`).
+- An `.npz` over the text limit with a `.npy` member that cannot be read, because of a wrong checksum, a declared size smaller than the data, or an unreadable header, is reported unscanned (`npz member N could not be read`) instead of being scanned with that member left out. Other members are not affected (`cargo test -p riskgrep-core --test classify npz_over_limit_unreadable`).
+- The central directory budget of an `.npz` over the text limit counts bytes fetched from the file instead of buffer refills, so an `.npz` with hundreds of members is read in full: with 600 or more members the directory read had exceeded 8 MiB of refills while the directory itself is under 100 KB (`cargo test -p riskgrep-core --test scanner npz_over_text_limit_with_a_thousand_members_scores_like_small`).
 
 ## [1.1.0] – 2026-10-25
 
