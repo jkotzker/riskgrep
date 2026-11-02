@@ -18,5 +18,5 @@ rule sqlite_credential_column {
   strings:
     $re = /[\w$]{0,40}(passw(or)?d|passphrase|pwd|secret|api_?key|private_?key|(access|auth|refresh|session)_?token|credential)[\w$]{0,40}/ nocase
   condition:
-    path matches /!\/sqlite_schema\/sql$/ and $re
+    path endswith "!/sqlite_schema/sql" and $re
 }
