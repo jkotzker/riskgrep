@@ -510,6 +510,24 @@ fn npz_over_limit_without_directory_is_unscanned() {
 }
 
 #[test]
+fn npz_over_limit_with_prepended_bytes_is_unscanned() {
+    let limits = Limits {
+        text_max: 4096,
+        ..Limits::default()
+    };
+    let members = [("alice.npy", synth::npy("<f4", &[192]))];
+    let mut data = b"prepended bytes".to_vec();
+    data.extend(big_npz(&members, 4096));
+    assert!(data.len() > 4096 * 4);
+    let c = slice_for_scan(&data, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
+    assert!(c.bytes.is_empty());
+    assert_eq!(
+        c.unscanned.as_deref(),
+        Some("npz central directory unreadable")
+    );
+}
+
+#[test]
 fn npz_directory_search_is_bounded() {
     // A large file with no end record: the backward search stops at the
     // directory budget instead of reading the whole file.

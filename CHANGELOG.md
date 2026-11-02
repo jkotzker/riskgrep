@@ -4,6 +4,10 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Changed
+
+- Upgraded the `zip` dependency from 8.6 to 9.0.5. Version 9.0.5 scans every byte before the end record when it detects where an archive starts, which would read a whole large `.npz`, so an `.npz` over the text limit is now opened with a fixed start offset of 0. An over-limit `.npz` with bytes prepended before its first entry is reported unscanned (`npz central directory unreadable`) instead of being read (`cargo test -p riskgrep-core --test classify npz_over_limit_with_prepended_bytes_is_unscanned`).
+
 ## [1.1.0] – 2026-10-25
 
 ### Changed
