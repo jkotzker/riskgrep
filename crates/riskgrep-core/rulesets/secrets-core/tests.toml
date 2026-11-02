@@ -503,3 +503,200 @@ rule = "recovery_codes_headed_file"
 synth = "file:recovery_digit_at_ends"
 path = "notes.txt"
 expect = 80
+
+# ---- credentials in configuration files (config.yar) -------------------------
+
+[[case]]
+# A hex credential in an XML element named like one (the *arr apps' layout).
+rule = "xml_credential_element"
+synth = "file:config_xml_credential"
+path = "config.xml"
+expect = 80
+
+[[case]]
+rule = "xml_credential_element"
+synth = "file:config_xml_credential:11"
+path = "config.xml"
+expect = 80
+
+[[case]]
+rule = "xml_credential_element"
+synth = "file:config_xml_credential:12"
+path = "config.xml"
+expect = 80
+
+[[case]]
+# Public keys, a bare `Key`, a primary key, and pagination tokens.
+rule = "xml_credential_element"
+synth = "file:config_xml_non_secret"
+path = "config.xml"
+expect = "none"
+
+[[case]]
+# Placeholders, templates, short values, sequential digits, and prose.
+rule = "xml_credential_element"
+synth = "text:<Config>\n  <ApiKey>changeme</ApiKey>\n  <Password>${DB_PASSWORD}</Password>\n  <Token>{{ api_token }}</Token>\n  <SecretKey>abc123</SecretKey>\n  <Password>correct horse battery staple</Password>\n  <ApiKey>0123456789abcdef0123456789abcdef</ApiKey>\n  <ApiKey>your-api-key-goes-here</ApiKey>\n  <ApiKey>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</ApiKey>\n  <ClientKey>/etc/ssl/private/client2.pem</ClientKey>\n  <ApiKey>12345678901234567890</ApiKey>\n</Config>\n"
+path = "config.xml"
+expect = "none"
+
+[[case]]
+# Members of a JSON object named like a credential store (Z-Wave JS UI keeps
+# a network's keys under `securityKeys`).
+rule = "json_credential_object_member"
+synth = "file:config_json_credential_object"
+path = "settings.json"
+expect = 80
+
+[[case]]
+rule = "json_credential_object_member"
+synth = "file:config_json_credential_object:11"
+path = "settings.json"
+expect = 80
+
+[[case]]
+rule = "json_credential_object_member"
+synth = "file:config_json_credential_object:12"
+path = "settings.json"
+expect = 80
+
+[[case]]
+# Public keys, a bare `keys` object, hotkeys, and design tokens.
+rule = "json_credential_object_member"
+synth = "file:config_json_non_secret"
+path = "settings.json"
+expect = "none"
+
+[[case]]
+rule = "json_credential_object_member"
+synth = "text:{\"secrets\": {\"db\": \"${DB_PASSWORD}\", \"api\": \"changeme\", \"chart\": \"{{ .Values.apiKey }}\", \"short\": \"abc123\", \"note\": \"set this before deploying\", \"seq\": \"0123456789abcdef0123456789abcdef\"}}\n"
+path = "settings.json"
+expect = "none"
+
+[[case]]
+# The same keys as a YAML mapping, top level and nested.
+rule = "yaml_credential_mapping_member"
+synth = "file:config_yaml_credential_mapping"
+path = "settings.yaml"
+expect = 80
+
+[[case]]
+rule = "yaml_credential_mapping_member"
+synth = "file:config_yaml_credential_mapping:11"
+path = "settings.yaml"
+expect = 80
+
+[[case]]
+rule = "yaml_credential_mapping_member"
+synth = "file:config_yaml_credential_mapping:12"
+path = "settings.yaml"
+expect = 80
+
+[[case]]
+# Public keys, a bare `keys` mapping, primary keys, a credentials mapping
+# with no secret, and a hex value outside every credential mapping.
+rule = "yaml_credential_mapping_member"
+synth = "file:config_yaml_non_secret"
+path = "settings.yaml"
+expect = "none"
+
+[[case]]
+rule = "yaml_credential_mapping_member"
+synth = "text:credentials:\n  db: ${DB_PASSWORD}\n  api: changeme\n  token: \"<your-token-here>\"\n  short: abc123\n  note: set this before deploying\n  seq: 0123456789abcdef0123456789abcdef\n"
+path = "settings.yaml"
+expect = "none"
+
+[[case]]
+# Resource and host names under credential names are identifiers, not secrets.
+rule = "yaml_credential_mapping_member"
+synth = "text:credentials:\n  existingSecret: app-db-credentials-v2\n  host: db1.internal.example.test\n  secretName: vault_secret_name_01\n"
+path = "values.yaml"
+expect = "none"
+
+[[case]]
+rule = "xml_credential_element"
+synth = "text:<Config>\n  <KeyVaultSecret>vault-secret-name-01</KeyVaultSecret>\n  <DbPassword>db1.internal.example.test</DbPassword>\n</Config>\n"
+path = "config.xml"
+expect = "none"
+
+[[case]]
+rule = "json_credential_object_member"
+synth = "text:{\"secrets\": {\"existingSecret\": \"app-db-credentials-v2\", \"host\": \"db1.internal.example.test\"}}\n"
+path = "settings.json"
+expect = "none"
+
+[[case]]
+rule = "xml_add_key_value"
+synth = "file:config_dotnet_app_settings"
+path = "web.config"
+expect = 80
+
+[[case]]
+rule = "xml_add_key_value"
+synth = "file:config_dotnet_app_settings:11"
+path = "web.config"
+expect = 80
+
+[[case]]
+rule = "xml_add_key_value"
+synth = "file:config_dotnet_app_settings:12"
+path = "web.config"
+expect = 80
+
+[[case]]
+rule = "xml_add_key_value"
+synth = "file:config_dotnet_app_settings:13"
+path = "web.config"
+expect = 80
+
+[[case]]
+# Public keys, a non-credential key, a placeholder, a template, and a UUID.
+rule = "xml_add_key_value"
+synth = "file:config_dotnet_non_secret"
+path = "web.config"
+expect = "none"
+
+[[case]]
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_low_entropy"
+path = "settings.conf"
+expect = 80
+
+[[case]]
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_low_entropy:11"
+path = "settings.conf"
+expect = 80
+
+[[case]]
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_low_entropy:12"
+path = "settings.conf"
+expect = 80
+
+[[case]]
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_low_entropy:13"
+path = "settings.conf"
+expect = 80
+
+[[case]]
+# Hex values under names that are not credential nouns.
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_non_secret"
+path = "settings.yaml"
+expect = "none"
+
+[[case]]
+# Found by `generic_api_key` and this rule; the shared family caps the pair at 80.
+rule = "yaml_credential_mapping_member"
+synth = "file:config_yaml_credential_named_member"
+path = "settings.yaml"
+expect = 80
+
+
+[[case]]
+# gitleaks' global path allowlist applies, as it does to `generic_api_key`.
+rule = "credential_key_hex_value"
+synth = "file:config_key_hex_low_entropy"
+path = "node_modules/pkg/settings.conf"
+expect = "none"

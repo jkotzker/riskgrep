@@ -449,6 +449,12 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "recovery_github",
     "recovery_google",
     "recovery_alnum",
+    "config_xml_credential",
+    "config_json_credential_object",
+    "config_yaml_credential_mapping",
+    "config_dotnet_app_settings",
+    "config_key_hex_low_entropy",
+    "config_yaml_credential_named_member",
     "otpauth_no_secret",
     "otpauth_short_secret",
     "otpauth_example_secret",
@@ -463,6 +469,11 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "recovery_source_like",
     "recovery_digit_at_ends",
     "otpauth_lowercase_secret",
+    "config_xml_non_secret",
+    "config_json_non_secret",
+    "config_yaml_non_secret",
+    "config_dotnet_non_secret",
+    "config_key_hex_non_secret",
     "lastpass_csv_bom_crlf",
     "chrome_csv_bom_crlf",
     "apple_csv_bom_crlf",
@@ -520,6 +531,77 @@ fn hex_pair_lines(r: &mut Rng, n: usize) -> String {
         .map(|_| format!("{}-{}\n", r.pick(LOWER_HEX, 5), r.pick(LOWER_HEX, 5)))
         .collect()
 }
+
+/// A random hex credential of `n` characters, upper case when `upper`.
+fn hex_value(r: &mut Rng, n: usize, upper: bool) -> String {
+    let h = r.pick(LOWER_HEX, n);
+    if upper {
+        h.to_uppercase()
+    } else {
+        h
+    }
+}
+
+/// Shannon entropy in bits per character.
+fn shannon(text: &str) -> f64 {
+    let mut counts = [0usize; 256];
+    for b in text.bytes() {
+        counts[b as usize] += 1;
+    }
+    let n = text.len() as f64;
+    counts
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// A random 32-character hex value whose entropy is at least 3.0 and below
+/// 3.5, the band `generic_api_key` (minimum 3.5) drops: about one random
+/// value in five falls in it.
+fn hex_value_low_entropy(r: &mut Rng) -> String {
+    loop {
+        let v = hex_value(r, 32, false);
+        let e = shannon(&v);
+        if (3.0..3.5).contains(&e) {
+            return v;
+        }
+    }
+}
+
+/// XML element names that hold a credential, as configuration files spell
+/// them (the *arr apps use `ApiKey`).
+const XML_CREDENTIAL_ELEMENTS: &[&str] = &[
+    "ApiKey",
+    "api_key",
+    "AccessToken",
+    "ClientSecret",
+    "Password",
+    "Psk",
+    "EncryptionKey",
+    "SecretKey",
+];
+
+/// Object and mapping names whose members are credentials (Z-Wave JS UI keeps
+/// a network's keys under `securityKeys`), with member names for each.
+const CREDENTIAL_OBJECTS: &[(&str, &[&str])] = &[
+    (
+        "securityKeys",
+        &[
+            "S2_Unauthenticated",
+            "S2_Authenticated",
+            "S2_AccessControl",
+            "S0_Legacy",
+        ],
+    ),
+    ("credentials", &["primary", "fallback"]),
+    ("secrets", &["webhook", "session"]),
+    ("apiKeys", &["billing", "search"]),
+    ("encryption_keys", &["current", "previous"]),
+];
 
 /// The text of a credential file (or a hard negative for its rule) of the
 /// given kind, derived from `seed`. Panics on an unknown kind.
@@ -705,6 +787,59 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
                 writeln!(out, "{}", r.pick(LOWER36, 10)).unwrap();
             }
         }
+        "config_xml_credential" => {
+            let name = XML_CREDENTIAL_ELEMENTS[r.below(XML_CREDENTIAL_ELEMENTS.len())];
+            let upper = r.below(2) == 1;
+            let value = hex_value(&mut r, 32, upper);
+            out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Config>\n");
+            out.push_str("  <LogLevel>info</LogLevel>\n  <Port>8989</Port>\n");
+            writeln!(out, "  <{name}>{value}</{name}>").unwrap();
+            out.push_str("  <AuthenticationMethod>Forms</AuthenticationMethod>\n</Config>\n");
+        }
+        "config_json_credential_object" => {
+            let (parent, members) = CREDENTIAL_OBJECTS[r.below(CREDENTIAL_OBJECTS.len())];
+            let compact = r.below(2) == 0;
+            // A leading member that the filters reject (no digit) must not
+            // hide the keys after it.
+            let mut pairs = vec!["\"comment\": \"rotate-every-ninety-days\"".to_string()];
+            pairs.extend(
+                members
+                    .iter()
+                    .map(|m| format!("\"{m}\": \"{}\"", hex_value(&mut r, 32, true))),
+            );
+            if compact {
+                writeln!(out, "{{\"{parent}\": {{{}}}}}", pairs.join(", ")).unwrap();
+            } else {
+                out.push_str("{\n  \"mqtt\": {\"host\": \"localhost\", \"port\": 1883},\n");
+                writeln!(
+                    out,
+                    "  \"{parent}\": {{\n    {}\n  }}\n}}",
+                    pairs.join(",\n    ")
+                )
+                .unwrap();
+            }
+        }
+        "config_yaml_credential_mapping" => {
+            let (parent, members) = CREDENTIAL_OBJECTS[r.below(CREDENTIAL_OBJECTS.len())];
+            let nested = r.below(2) == 0;
+            let indent = if nested { "  " } else { "" };
+            if nested {
+                out.push_str("zwave:\n  port: /dev/ttyUSB0\n");
+            }
+            writeln!(out, "{indent}{parent}: # rotated quarterly").unwrap();
+            writeln!(out, "{indent}  comment: rotate-every-ninety-days").unwrap();
+            for (i, m) in members.iter().enumerate() {
+                let v = hex_value(&mut r, 32, true);
+                if i % 2 == 0 {
+                    writeln!(out, "{indent}  {m}: {v}").unwrap();
+                } else {
+                    writeln!(out, "{indent}  {m}: \"{v}\"").unwrap();
+                }
+            }
+            // A file path as the last member, at the end of the file without a
+            // final line feed, must not hide the keys before it.
+            write!(out, "{indent}  ca_file: ./certs/client-ca2.pem").unwrap();
+        }
         "otpauth_no_secret" => {
             writeln!(
                 out,
@@ -820,6 +955,174 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
         "otpauth_lowercase_secret" => {
             let uri = otpauth_uri(&mut r, "totp", 1);
             writeln!(out, "{}", uri.to_lowercase()).unwrap();
+        }
+        // .NET `appSettings`: `<add key="…" value="…" />`, with the
+        // attributes in either order and `name` in place of `key`.
+        "config_dotnet_app_settings" => {
+            let name = XML_CREDENTIAL_ELEMENTS[r.below(XML_CREDENTIAL_ELEMENTS.len())];
+            let upper = r.below(2) == 1;
+            let value = hex_value(&mut r, 32, upper);
+            let attr = if r.below(2) == 0 { "key" } else { "name" };
+            let key = if r.below(2) == 0 {
+                name.to_string()
+            } else {
+                format!("Billing:{name}")
+            };
+            out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<configuration>\n");
+            out.push_str("  <appSettings>\n    <add key=\"Environment\" value=\"Production\" />\n");
+            if r.below(2) == 0 {
+                writeln!(out, "    <add {attr}=\"{key}\" value=\"{value}\" />").unwrap();
+            } else {
+                writeln!(out, "    <add value=\"{value}\" {attr}=\"{key}\"/>").unwrap();
+            }
+            out.push_str("  </appSettings>\n</configuration>\n");
+        }
+        // A credential-named key on one line with a hex value that
+        // `generic_api_key`'s entropy minimum drops.
+        "config_key_hex_low_entropy" => {
+            let v = hex_value_low_entropy(&mut r);
+            match r.below(4) {
+                0 => writeln!(out, "{{\n  \"user\": \"svc\",\n  \"apiKey\": \"{v}\"\n}}").unwrap(),
+                1 => writeln!(out, "service:\n  api_key: {v}").unwrap(),
+                2 => writeln!(out, "API_TOKEN={v}").unwrap(),
+                _ => writeln!(out, "[oauth]\nclient_secret = \"{v}\"").unwrap(),
+            }
+        }
+        // A member that is credential-named itself inside a credential
+        // mapping: `generic_api_key` and the mapping rule both find it.
+        "config_yaml_credential_named_member" => {
+            let mut v = hex_value(&mut r, 32, false);
+            while shannon(&v) < 3.5 {
+                v = hex_value(&mut r, 32, false);
+            }
+            writeln!(out, "credentials:\n  token: {v}").unwrap();
+        }
+        // Hex and token values under names that hold no credential: public
+        // keys, a bare `Key` (S3 listings, property lists), primary keys, and
+        // pagination tokens.
+        "config_xml_non_secret" => {
+            out.push_str("<Config>\n");
+            writeln!(
+                out,
+                "  <PublicKey>{}</PublicKey>",
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(out, "  <Key>{}</Key>", hex_value(&mut r, 32, false)).unwrap();
+            writeln!(
+                out,
+                "  <PublicSigningKey>{}</PublicSigningKey>",
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "  <PublicKeyToken>{}</PublicKeyToken>",
+                hex_value(&mut r, 16, false)
+            )
+            .unwrap();
+            writeln!(out, "  <NextToken>{}</NextToken>", r.pick(BASE62, 40)).unwrap();
+            writeln!(
+                out,
+                "  <PrimaryKey>{}</PrimaryKey>",
+                hex_value(&mut r, 32, false)
+            )
+            .unwrap();
+            out.push_str("</Config>\n");
+        }
+        "config_json_non_secret" => {
+            // One settings document: UUID key ids and subjects, public keys
+            // (also behind a qualifier), a bare `keys` object, hotkeys, and
+            // design tokens.
+            writeln!(
+                out,
+                "{{\"Credentials\": {{\"Kid\": \"{}\", \"Sub\": \"{}\"}},",
+                uuid_text(&mut r),
+                uuid_text(&mut r)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                " \"publicKeys\": {{\"main\": \"{}\"}}, \"publicSigningKeys\": {{\"main\": \"{}\"}},",
+                hex_value(&mut r, 64, false),
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                " \"keys\": {{\"id\": \"{}\"}}, \"hotkeys\": {{\"save\": \"{}\"}},",
+                hex_value(&mut r, 32, false),
+                hex_value(&mut r, 32, false)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                " \"tokens\": {{\"color\": \"{}\"}}}}",
+                hex_value(&mut r, 32, false)
+            )
+            .unwrap();
+        }
+        // `appSettings` entries that hold no credential: public keys, a
+        // non-credential key with a hex value, a placeholder, a template, and
+        // a UUID under a credential name.
+        "config_dotnet_non_secret" => {
+            out.push_str("<configuration>\n  <appSettings>\n");
+            writeln!(
+                out,
+                "    <add key=\"PublicKey\" value=\"{}\" />",
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    <add value=\"{}\" key=\"PublicSigningKey\" />",
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "    <add key=\"BuildId\" value=\"{}\" />",
+                hex_value(&mut r, 32, false)
+            )
+            .unwrap();
+            out.push_str("    <add key=\"ApiKey\" value=\"your-api-key-goes-here\" />\n");
+            out.push_str("    <add key=\"AuthToken\" value=\"${AUTH_TOKEN}\" />\n");
+            writeln!(
+                out,
+                "    <add key=\"ClientSecret\" value=\"{}\" />",
+                uuid_text(&mut r)
+            )
+            .unwrap();
+            out.push_str("  </appSettings>\n</configuration>\n");
+        }
+        // Hex values under names that are not credential nouns: no rule
+        // may flag them. (Short or sequential values under credential names
+        // are `generic_api_key`'s to judge, which flags some by design.)
+        "config_key_hex_non_secret" => {
+            writeln!(out, "key_sha256: {}", hex_value_low_entropy(&mut r)).unwrap();
+            writeln!(out, "commit_sha: {}", hex_value(&mut r, 40, false)).unwrap();
+            writeln!(out, "cache_key: {}", hex_value_low_entropy(&mut r)).unwrap();
+        }
+        "config_yaml_non_secret" => {
+            writeln!(out, "publicKeys:\n  main: {}", hex_value(&mut r, 64, false)).unwrap();
+            writeln!(
+                out,
+                "publicEncryptionKeys:\n  main: {}",
+                hex_value(&mut r, 64, false)
+            )
+            .unwrap();
+            writeln!(out, "keys:\n  id: {}", hex_value(&mut r, 32, false)).unwrap();
+            writeln!(
+                out,
+                "primaryKeys:\n  users: {}",
+                hex_value(&mut r, 32, false)
+            )
+            .unwrap();
+            writeln!(out, "credentials:\n  user: admin").unwrap();
+            writeln!(out, "other: {}", hex_value(&mut r, 32, false)).unwrap();
+            // A sibling of an indented credential mapping is outside it.
+            writeln!(out, "app:\n  secrets:\n    enabled: true").unwrap();
+            writeln!(out, "  build_id: {}", hex_value(&mut r, 32, false)).unwrap();
         }
         other => panic!("unknown credential file kind `{other}`"),
     }

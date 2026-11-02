@@ -27,11 +27,17 @@ const GLOBAL_STOPWORDS: &str = "secrets_core_global";
 /// A literal prefix at least this long makes a rule provider-specific.
 const MIN_PREFIX: usize = 3;
 
-/// Rules whose weight combines with a hand-written rule in `keystores.yar`:
-/// `(gitleaks id, family, family_cap)`. A `.p12` file with a DER header hits
-/// both `pkcs12-file` (name only) and `pkcs12_keystore`; the family keeps the
-/// pair at the key-store weight.
-const FAMILIES: &[(&str, &str, u32)] = &[("pkcs12-file", "pkcs12", 90)];
+/// Rules whose weight combines with hand-written rules: `(gitleaks id,
+/// family, family_cap)`. A `.p12` file with a DER header hits both
+/// `pkcs12-file` (name only) and `pkcs12_keystore` in `keystores.yar`; the
+/// family keeps the pair at the key-store weight. A credential-named key can
+/// be found by both `generic-api-key` and the rules in `config.yar` (a
+/// `token:` inside `credentials:`); the family keeps one value at 80 instead
+/// of stacking to 96.
+const FAMILIES: &[(&str, &str, u32)] = &[
+    ("pkcs12-file", "pkcs12", 90),
+    ("generic-api-key", "credential_assignment", 80),
+];
 
 /// A local change to one upstream rule: its regex has `find` replaced by
 /// `replace` (exactly once; an upstream regex without `find` is an error, so
@@ -1349,7 +1355,8 @@ fn upstream_md(
         s,
         "\nA rule is \"fixed provider prefix\" when every match of its secret starts with a literal of at least {MIN_PREFIX} bytes (for example `ghp_`). \
          `private-key` and `pkcs12-file` are private keys; ids starting `generic` are generic; the rest are \"provider context\" (a provider name near a value). \
-         `pkcs12-file` is in family `pkcs12` with cap 90, shared with `pkcs12_keystore` in `keystores.yar`.\n"
+         `pkcs12-file` is in family `pkcs12` with cap 90, shared with `pkcs12_keystore` in `keystores.yar`; \
+         `generic-api-key` is in family `credential_assignment` with cap 80, shared with the rules in `config.yar`.\n"
     )
     .unwrap();
 

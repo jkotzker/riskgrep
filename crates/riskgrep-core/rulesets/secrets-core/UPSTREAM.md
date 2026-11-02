@@ -43,7 +43,7 @@ cargo xtask convert-gitleaks --config xtask/upstream/gitleaks.toml --tag v8.30.1
 - provider context (80): 98 rules.
 - local change (see below): `generic-api-key` (80).
 
-A rule is "fixed provider prefix" when every match of its secret starts with a literal of at least 3 bytes (for example `ghp_`). `private-key` and `pkcs12-file` are private keys; ids starting `generic` are generic; the rest are "provider context" (a provider name near a value). `pkcs12-file` is in family `pkcs12` with cap 90, shared with `pkcs12_keystore` in `keystores.yar`.
+A rule is "fixed provider prefix" when every match of its secret starts with a literal of at least 3 bytes (for example `ghp_`). `private-key` and `pkcs12-file` are private keys; ids starting `generic` are generic; the rest are "provider context" (a provider name near a value). `pkcs12-file` is in family `pkcs12` with cap 90, shared with `pkcs12_keystore` in `keystores.yar`; `generic-api-key` is in family `credential_assignment` with cap 80, shared with the rules in `config.yar`.
 
 ## Local changes
 
