@@ -1815,6 +1815,44 @@ fn a_real_npz_stays_on_the_tensor_path() {
     assert_eq!(t.scores[&biometric], 70.0);
 }
 
+/// An `.npz` of one embedding with `comment` as its archive comment.
+fn npz_with_archive_comment(comment: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    w.start_file("emb.npy", stored).unwrap();
+    w.write_all(&synth::npy("<f4", &[4, 256])).unwrap();
+    w.set_raw_comment(comment.to_vec().into_boxed_slice())
+        .unwrap();
+    w.finish().unwrap().into_inner()
+}
+
+#[test]
+fn an_npz_with_a_comment_goes_through_the_framework() {
+    let d = tempfile::tempdir().unwrap();
+    let mut large = Config::default();
+    large.limits.text_max = 64;
+    large.limits.sample = 16;
+    let archive = npz_with_archive_comment(&aws_file(43));
+    let entry = with_entry_comments(
+        &synth::npz(&[("emb.npy", synth::npy("<f4", &[4, 256]))]),
+        &[&aws_file(44)],
+    );
+    for (name, bytes) in [("archive.npz", archive), ("entry.npz", entry)] {
+        for cfg in [Config::default(), large.clone()] {
+            let p = write(d.path(), name, &bytes);
+            let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+            assert_eq!(t.container.as_ref().unwrap().format, "zip", "{name}");
+            assert_eq!(t.scores[&secret()], 95.0, "{name}");
+        }
+    }
+    // No comment: the tensor path, as before.
+    let none = npz_with_archive_comment(b"");
+    let t = only(&scan(&mut scanner(), &write(d.path(), "none.npz", &none))).clone();
+    assert!(t.container.is_none());
+}
+
 #[test]
 fn an_npz_that_is_no_zip_is_not_reported_scanned() {
     let d = tempfile::tempdir().unwrap();
@@ -1855,6 +1893,122 @@ fn a_member_named_npy_without_the_magic_makes_it_partial() {
     let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
     assert_eq!(partial(&t), expect);
     assert_eq!(t.scores[&biometric], 70.0);
+}
+
+/// A version 1 `.npy` file whose header text is `header` (padded as numpy
+/// does), followed by `data`.
+fn npy_with_header(header: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut h = header.to_vec();
+    while !(10 + h.len() + 1).is_multiple_of(64) {
+        h.push(b' ');
+    }
+    h.push(b'\n');
+    let mut out = b"\x93NUMPY\x01\x00".to_vec();
+    out.extend_from_slice(&(h.len() as u16).to_le_bytes());
+    out.extend_from_slice(&h);
+    out.extend_from_slice(data);
+    out
+}
+
+/// What scanning an `.npz` of an embedding and `second` says, read whole and
+/// over the text limit.
+fn scan_npz_beside_an_embedding(second: Vec<u8>) -> Vec<TargetReport> {
+    let d = tempfile::tempdir().unwrap();
+    let z = synth::zip(&[
+        ("emb.npy", synth::npy("<f4", &[4, 256])),
+        ("second.npy", second),
+    ]);
+    let p = write(d.path(), "m.npz", &z);
+    let mut cfg = Config::default();
+    cfg.limits.text_max = 64;
+    cfg.limits.sample = 16;
+    vec![
+        only(&scan(&mut scanner(), &p)).clone(),
+        only(&scan(&mut scanner_with(cfg), &p)).clone(),
+    ]
+}
+
+#[test]
+fn a_member_with_the_magic_but_no_npy_header_makes_it_partial() {
+    let biometric = Category("biometric".into());
+    let mut unsupported = npy_with_header(b"{'descr': '<i4', 'shape': (1,), }", &[0; 4]);
+    unsupported[6] = 9;
+    let members = [
+        // Text after the magic.
+        [b"\x93NUMPY".to_vec(), aws_file(45)].concat(),
+        // Only the magic.
+        b"\x93NUMPY".to_vec(),
+        // A header that is not a dictionary of an array.
+        npy_with_header(b"not a dictionary", &[0; 16]),
+        // No shape, no descr, a shape that is not a tuple of integers.
+        npy_with_header(b"{'descr': '<i4', 'fortran_order': False, }", &[0; 16]),
+        npy_with_header(b"{'shape': (3,), 'fortran_order': False, }", &[0; 16]),
+        npy_with_header(b"{'descr': '<i4', 'shape': (a, b), }", &[0; 16]),
+        // A header longer than the member.
+        b"\x93NUMPY\x01\x00\xff\x00{'descr'".to_vec(),
+        // A version 2 header longer than the member.
+        b"\x93NUMPY\x02\x00\x00\x01\x00\x00{'descr'".to_vec(),
+        // A version that does not exist.
+        unsupported,
+    ];
+    for (i, second) in members.into_iter().enumerate() {
+        for t in scan_npz_beside_an_embedding(second) {
+            assert_eq!(partial(&t), "npz member 1 is not an npy file", "case {i}");
+            assert!(t.unseen_part().is_some(), "case {i}");
+            assert_eq!(t.scores[&biometric], 70.0, "case {i}");
+        }
+    }
+}
+
+#[test]
+fn valid_npy_members_that_are_not_float_arrays_stay_scanned() {
+    let latin1 = {
+        let mut h = b"{'descr': [('n".to_vec();
+        h.push(0xe9);
+        h.extend_from_slice(b"', '<i4')], 'fortran_order': False, 'shape': (2,), }");
+        h
+    };
+    let members = [
+        synth::npy("<i4", &[8]),
+        synth::npy("|b1", &[8]),
+        // Version 2, with a four-byte header length.
+        {
+            let v1 = npy_with_header(
+                b"{'descr': '<i4', 'fortran_order': False, 'shape': (2,), }",
+                &[0; 8],
+            );
+            let len = u16::from_le_bytes([v1[8], v1[9]]);
+            let mut v2 = b"\x93NUMPY\x02\x00".to_vec();
+            v2.extend_from_slice(&u32::from(len).to_le_bytes());
+            v2.extend_from_slice(&v1[10..]);
+            v2
+        },
+        // Structured, scalar shape, a header with a byte that is not UTF-8.
+        npy_with_header(
+            b"{'descr': [('a', '<i4'), ('b', '<f4')], 'fortran_order': False, 'shape': (3,), }",
+            &[0; 24],
+        ),
+        npy_with_header(
+            b"{'descr': '<f8', 'fortran_order': False, 'shape': (), }",
+            &[0; 8],
+        ),
+        npy_with_header(&latin1, &[0; 8]),
+        // A header longer than the 4,096 bytes read of the member.
+        npy_with_header(
+            &[
+                b"{'descr': '<i4', 'fortran_order': False, 'shape': (1,), 'pad': '".to_vec(),
+                vec![b'x'; 5000],
+                b"', }".to_vec(),
+            ]
+            .concat(),
+            &[0; 4],
+        ),
+    ];
+    for (i, second) in members.into_iter().enumerate() {
+        for t in scan_npz_beside_an_embedding(second) {
+            assert_eq!(t.status, TargetStatus::Scanned, "case {i}");
+        }
+    }
 }
 
 #[test]

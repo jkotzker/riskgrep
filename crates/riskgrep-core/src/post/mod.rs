@@ -17,8 +17,8 @@ pub use codes::{code_line_runs, CodeLines};
 pub use entropy::Entropy;
 pub use floats::{float_arrays, FloatArray, FloatRun};
 pub use span::{AllowRegex, Span};
+pub(crate) use tensor::{npz_past_the_cap, NPZ_MAX_MEMBERS, NPZ_MEMBER_BYTES};
 pub use tensor::{NpyHeader, NpzMembers, SafetensorsHeader};
-pub(crate) use tensor::{NPZ_MAX_MEMBERS, NPZ_MEMBER_BYTES};
 pub use words::Stopwords;
 
 #[derive(Debug, Clone, PartialEq)]
