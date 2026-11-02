@@ -113,7 +113,7 @@ fn findings_in_members_are_attributed_to_them() {
     let d = tempfile::tempdir().unwrap();
     let z = synth::zip(&[
         ("README.md", text("# Demo\n\nNothing to see.\n")),
-        ("config/.env", aws_file(1)),
+        ("config/app.env", aws_file(1)),
         ("logo.png", PNG.to_vec()),
     ]);
     let p = write(d.path(), "backup.zip", &z);
@@ -127,7 +127,7 @@ fn findings_in_members_are_attributed_to_them() {
         .iter()
         .find(|e| e.rule == "aws_access_token")
         .expect("aws evidence");
-    assert_eq!(e.member.as_deref(), Some("config/.env"));
+    assert_eq!(e.member.as_deref(), Some("config/app.env"));
     // Offsets and lines are the member's own.
     assert_eq!(e.locations[0].line_start, 3);
     assert!(e.locations[0].start < 60);
@@ -135,7 +135,7 @@ fn findings_in_members_are_attributed_to_them() {
     assert_eq!(c.format, "zip");
     assert_eq!((c.members, c.scanned, c.skipped, c.not_read), (3, 2, 1, 0));
     assert_eq!(c.listed.len(), 1);
-    assert_eq!(c.listed[0].path, "config/.env");
+    assert_eq!(c.listed[0].path, "config/app.env");
     assert_eq!(c.listed[0].scores[&secret()], 95.0);
     assert_eq!(r.summary.targets, 1);
 }
@@ -143,7 +143,7 @@ fn findings_in_members_are_attributed_to_them() {
 #[test]
 fn nested_archives_are_opened_and_named() {
     let d = tempfile::tempdir().unwrap();
-    let inner = synth::zip(&[("config/.env", aws_file(2))]);
+    let inner = synth::zip(&[("config/app.env", aws_file(2))]);
     let outer = synth::zip(&[("notes.txt", text("hi\n")), ("inner.zip", inner)]);
     let p = write(d.path(), "outer.zip", &outer);
     let t = only(&scan(&mut scanner(), &p)).clone();
@@ -152,7 +152,7 @@ fn nested_archives_are_opened_and_named() {
     assert!(t
         .evidence
         .iter()
-        .any(|e| e.member.as_deref() == Some("inner.zip!/config/.env")));
+        .any(|e| e.member.as_deref() == Some("inner.zip!/config/app.env")));
     assert_eq!(t.container.unwrap().members, 3);
 }
 
@@ -160,7 +160,7 @@ fn nested_archives_are_opened_and_named() {
 fn a_high_ratio_member_is_not_decompressed() {
     let d = tempfile::tempdir().unwrap();
     let bomb = vec![b'0'; 4 << 20];
-    let z = synth::zip(&[("zeros.txt", bomb), ("config/.env", aws_file(3))]);
+    let z = synth::zip(&[("zeros.txt", bomb), ("config/app.env", aws_file(3))]);
     assert!(
         z.len() < 64 << 10,
         "the member compresses far past the ratio"
@@ -205,7 +205,7 @@ fn a_member_lying_about_its_size_is_not_read_past_the_cap() {
 #[test]
 fn nesting_past_the_depth_limit_is_partial() {
     let d = tempfile::tempdir().unwrap();
-    let mut z = synth::zip(&[("deep/.env", aws_file(4))]);
+    let mut z = synth::zip(&[("deep/app.env", aws_file(4))]);
     for i in 0..3 {
         z = synth::zip(&[(&format!("level{i}.zip"), z)]);
     }
@@ -297,7 +297,7 @@ fn whole_archives_are_cached_and_partial_ones_are_not() {
     let p = write(
         d.path(),
         "c.zip",
-        &synth::zip(&[("config/.env", aws_file(5)), ("logo.png", PNG.to_vec())]),
+        &synth::zip(&[("config/app.env", aws_file(5)), ("logo.png", PNG.to_vec())]),
     );
     let first = scan(&mut mk().unwrap(), &p);
     let mut g = mk().unwrap();
@@ -320,7 +320,7 @@ fn whole_archives_are_cached_and_partial_ones_are_not() {
 
 #[test]
 fn staged_archives_are_scanned_whole() {
-    let z = synth::zip(&[("config/.env", aws_file(6))]);
+    let z = synth::zip(&[("config/app.env", aws_file(6))]);
     let mut g = scanner();
     let t = g.scan_blob(
         "fixtures/backup.zip",
@@ -330,7 +330,7 @@ fn staged_archives_are_scanned_whole() {
     );
     // Diff lines do not apply to a member.
     assert_eq!(t.scores[&secret()], 95.0);
-    assert_eq!(t.evidence[0].member.as_deref(), Some("config/.env"));
+    assert_eq!(t.evidence[0].member.as_deref(), Some("config/app.env"));
     let again = g.scan_blob("fixtures/backup.zip", b"zip-blob-1", &z, None);
     assert_eq!(again.container, t.container);
 }
@@ -339,7 +339,10 @@ fn staged_archives_are_scanned_whole() {
 fn ignore_globs_match_container_and_member_paths() {
     use riskgrep_core::suppress::{IgnoreRules, IgnoreSpec};
     let d = tempfile::tempdir().unwrap();
-    let z = synth::zip(&[("config/.env", aws_file(7)), ("other/.env", aws_file(8))]);
+    let z = synth::zip(&[
+        ("config/app.env", aws_file(7)),
+        ("other/app.env", aws_file(8)),
+    ]);
     let p = write(d.path(), "g.zip", &z);
     let with = |glob: &str| {
         let cfg = Config {
@@ -357,7 +360,7 @@ fn ignore_globs_match_container_and_member_paths() {
     assert!(t
         .evidence
         .iter()
-        .all(|e| e.member.as_deref() == Some("other/.env")));
+        .all(|e| e.member.as_deref() == Some("other/app.env")));
     assert_eq!(t.scores[&secret()], 95.0);
     let t = with("**/g.zip");
     assert!(t.evidence.is_empty());
@@ -368,16 +371,16 @@ fn ignore_globs_match_container_and_member_paths() {
 fn reports_hold_member_names_but_no_member_content() {
     let d = tempfile::tempdir().unwrap();
     let value = synth::fake_secret("aws_access_key", 9);
-    let z = synth::zip(&[("config/.env", aws_file(9))]);
+    let z = synth::zip(&[("config/app.env", aws_file(9))]);
     let p = write(d.path(), "leak.zip", &z);
     let r = scan(&mut scanner(), &p);
     let json = serde_json::to_string(&r).unwrap();
     assert!(!json.contains(&value), "a matched value reached the report");
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     let t = &v["targets"][0];
-    assert_eq!(t["evidence"][0]["member"], "config/.env");
+    assert_eq!(t["evidence"][0]["member"], "config/app.env");
     assert_eq!(t["container"]["format"], "zip");
-    assert_eq!(t["container"]["listed"][0]["path"], "config/.env");
+    assert_eq!(t["container"]["listed"][0]["path"], "config/app.env");
     assert_eq!(t["container"]["listed"][0]["status"], "scanned");
     assert_eq!(t["container"]["listed"][0]["kind"], "file");
 }

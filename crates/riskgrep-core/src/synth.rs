@@ -478,6 +478,20 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "chrome_csv",
     "apple_csv",
     "bitwarden_csv",
+    "onepassword_1pif",
+    "firefox_csv",
+    "keepass_xml",
+    "keepass_csv",
+    "keepassxc_csv",
+    "dashlane_csv",
+    "dashlane_json",
+    "keeper_json",
+    "protonpass_csv",
+    "protonpass_json",
+    "keepass_key_file_v1",
+    "keepass_key_file_v2",
+    "password_safe_structural",
+    "otpauth_encoded",
     "recovery_github",
     "recovery_google",
     "recovery_alnum",
@@ -510,6 +524,23 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "chrome_csv_bom_crlf",
     "apple_csv_bom_crlf",
     "bitwarden_csv_bom_crlf",
+    "onepassword_1pif_no_password",
+    "firefox_csv_header_only",
+    "keepass_xml_no_password",
+    "keepass_csv_header_only",
+    "dashlane_json_no_password",
+    "keeper_json_unrelated",
+    "protonpass_csv_header_only",
+    "protonpass_json_encrypted",
+    "keepass_key_file_lookalike",
+    "password_safe_wrong_size",
+    "password_safe_low_iterations",
+    "otpauth_encoded_example_secret",
+    "otpauth_encoded_no_secret",
+    "firefox_csv_bom_crlf",
+    "keepassxc_csv_bom_crlf",
+    "protonpass_csv_bom_crlf",
+    "dashlane_json_bom_crlf",
 ];
 
 const PASSWORD_CHARS: &[u8] =
@@ -635,6 +666,40 @@ const CREDENTIAL_OBJECTS: &[(&str, &[&str])] = &[
     ("encryption_keys", &["current", "previous"]),
 ];
 
+/// A Password Safe v3 database shaped by the format specification
+/// (`TAG|SALT|ITER|H(P')|B1|B2|B3|B4|IV|records|EOF|HMAC`), with random bytes
+/// for the encrypted parts. `shape` is `structural` (a valid layout),
+/// `wrong_size` (a length that is not 200 plus a whole number of 16-byte
+/// blocks), or `low_iterations` (an iteration count below the 2,048 minimum).
+fn password_safe_file(r: &mut Rng, shape: &str) -> Vec<u8> {
+    let mut out = b"PWS3".to_vec();
+    let mut salt = [0u8; 32];
+    r.fill(&mut salt);
+    out.extend_from_slice(&salt);
+    let iterations: u32 = if shape == "low_iterations" {
+        17
+    } else {
+        262_144
+    };
+    out.extend_from_slice(&iterations.to_le_bytes());
+    // H(P'), B1 to B4, IV, and the encrypted header and records.
+    let mut body = vec![0u8; 32 + 64 + 16 + 16 * 6];
+    r.fill(&mut body);
+    out.extend_from_slice(&body);
+    out.extend_from_slice(b"PWS3-EOFPWS3-EOF");
+    let mut hmac = [0u8; 32];
+    r.fill(&mut hmac);
+    out.extend_from_slice(&hmac);
+    if shape == "wrong_size" {
+        out.extend_from_slice(&[0u8; 5]);
+    }
+    assert!(matches!(
+        shape,
+        "structural" | "wrong_size" | "low_iterations"
+    ));
+    out
+}
+
 /// The text of a credential file (or a hard negative for its rule) of the
 /// given kind, derived from `seed`. Panics on an unknown kind.
 pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
@@ -642,7 +707,11 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
     if let Some(base) = kind.strip_suffix("_bom_crlf") {
         let text = String::from_utf8(credential_file(base, seed)).expect("text kind");
         let mut out = vec![0xEF, 0xBB, 0xBF];
-        out.extend(text.replace('\n', "\r\n").into_bytes());
+        out.extend(
+            text.replace("\r\n", "\n")
+                .replace('\n', "\r\n")
+                .into_bytes(),
+        );
         return out;
     }
     let mut h = blake3::Hasher::new();
@@ -650,6 +719,9 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
     h.update(kind.as_bytes());
     h.update(&seed.to_le_bytes());
     let mut r = Rng(h.finalize_xof());
+    if let Some(shape) = kind.strip_prefix("password_safe_") {
+        return password_safe_file(&mut r, shape);
+    }
     let mut out = String::new();
     match kind {
         "otpauth_totp" => {
@@ -1155,6 +1227,324 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
             // A sibling of an indented credential mapping is outside it.
             writeln!(out, "app:\n  secrets:\n    enabled: true").unwrap();
             writeln!(out, "  build_id: {}", hex_value(&mut r, 32, false)).unwrap();
+        }
+        // 1Password 1PIF: one JSON record per line, each followed by the
+        // fixed separator line.
+        "onepassword_1pif" | "onepassword_1pif_no_password" => {
+            let with_password = kind == "onepassword_1pif";
+            let sep = ["***", "5642bee8", "-a5ff-11dc-8314-0800200c9a66", "***"].concat();
+            for l in logins(&mut r, 3) {
+                let id = r.pick(LOWER36, 26);
+                let pw = if with_password {
+                    format!(
+                        ",{{\"value\":\"{}\",\"id\":\"\",\"name\":\"password\",\"type\":\"P\",\"designation\":\"password\"}}",
+                        l.password.replace('"', "")
+                    )
+                } else {
+                    String::new()
+                };
+                writeln!(
+                    out,
+                    "{{\"uuid\":\"{id}\",\"updatedAt\":1486071244,\"securityLevel\":\"SL5\",\"contentsHash\":\"aaaaaaaa\",\
+                     \"title\":\"{}\",\"location\":\"{}\",\"secureContents\":{{\"fields\":[\
+                     {{\"value\":\"{}\",\"id\":\"\",\"name\":\"username\",\"type\":\"T\",\"designation\":\"username\"}}{pw}],\
+                     \"URLs\":[{{\"label\":\"website\",\"url\":\"{}\"}}]}},\"typeName\":\"webforms.WebForm\"}}",
+                    l.name, l.url, l.user, l.url
+                )
+                .unwrap();
+                writeln!(out, "{sep}").unwrap();
+            }
+        }
+        // Firefox saved-logins export (`LoginExport.sys.mjs`): every field
+        // quoted, `origin` labelled `url`.
+        "firefox_csv" | "firefox_csv_header_only" => {
+            let head = [
+                "url",
+                "username",
+                "password",
+                "httpRealm",
+                "formActionOrigin",
+                "guid",
+                "timeCreated",
+                "timeLastUsed",
+                "timePasswordChanged",
+            ]
+            .map(|c| format!("\"{c}\""))
+            .join(",");
+            write!(out, "{head}\r\n").unwrap();
+            if kind == "firefox_csv" {
+                for l in logins(&mut r, 5) {
+                    let guid = uuid_text(&mut r);
+                    write!(
+                        out,
+                        "\"{}\",\"{}\",\"{}\",,\"{}\",\"{{{guid}}}\",\"1600000000000\",\"1600000000000\",\"1600000000000\"\r\n",
+                        l.url, l.user, l.password, l.url
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        // KeePass 2.x "KeePass XML (2.x)" export: values in plain text.
+        "keepass_xml" | "keepass_xml_no_password" => {
+            let with_password = kind == "keepass_xml";
+            out.push_str(
+                "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n<KeePassFile>\n\t<Meta>\n\t\t<Generator>KeePass</Generator>\n\t</Meta>\n\t<Root>\n\t\t<Group>\n\t\t\t<Name>Database</Name>\n",
+            );
+            for l in logins(&mut r, 3) {
+                let pw = if with_password {
+                    l.password.replace('&', "&amp;").replace('<', "&lt;")
+                } else {
+                    String::new()
+                };
+                writeln!(
+                    out,
+                    "\t\t\t<Entry>\n\t\t\t\t<String>\n\t\t\t\t\t<Key>Title</Key>\n\t\t\t\t\t<Value>{}</Value>\n\t\t\t\t</String>\n\t\t\t\t<String>\n\t\t\t\t\t<Key>UserName</Key>\n\t\t\t\t\t<Value>{}</Value>\n\t\t\t\t</String>\n\t\t\t\t<String>\n\t\t\t\t\t<Key>Password</Key>\n\t\t\t\t\t<Value ProtectInMemory=\"True\">{pw}</Value>\n\t\t\t\t</String>\n\t\t\t</Entry>",
+                    l.name, l.user
+                )
+                .unwrap();
+            }
+            out.push_str("\t\t</Group>\n\t</Root>\n</KeePassFile>\n");
+        }
+        // KeePass "CSV (1.x)" columns and the KeePassXC export columns.
+        "keepass_csv" | "keepass_csv_header_only" => {
+            let head = ["Account", "Login Name", "Password", "Web Site", "Comments"]
+                .map(|c| format!("\"{c}\""))
+                .join(",");
+            writeln!(out, "{head}").unwrap();
+            if kind == "keepass_csv" {
+                for l in logins(&mut r, 5) {
+                    writeln!(
+                        out,
+                        "\"{}\",\"{}\",\"{}\",\"{}\",\"\"",
+                        l.name, l.user, l.password, l.url
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        "keepassxc_csv" => {
+            let head = [
+                "Group",
+                "Title",
+                "Username",
+                "Password",
+                "URL",
+                "Notes",
+                "TOTP",
+                "Icon",
+                "Last Modified",
+                "Created",
+            ]
+            .map(|c| format!("\"{c}\""))
+            .join(",");
+            writeln!(out, "{head}").unwrap();
+            for l in logins(&mut r, 5) {
+                writeln!(
+                    out,
+                    "\"Root/General\",\"{}\",\"{}\",\"{}\",\"{}\",\"\",\"\",\"0\",\"2026-10-01T00:00:00Z\",\"2026-10-01T00:00:00Z\"",
+                    l.name, l.user, l.password, l.url
+                )
+                .unwrap();
+            }
+        }
+        // Dashlane credentials export (`credentials.csv`).
+        "dashlane_csv" => {
+            let head = csv_row(&[
+                "username",
+                "username2",
+                "username3",
+                "title",
+                "password",
+                "note",
+                "url",
+                "category",
+                "otpSecret",
+            ]);
+            writeln!(out, "{head}").unwrap();
+            for l in logins(&mut r, 5) {
+                writeln!(
+                    out,
+                    "{},,,{},\"{}\",,{},Shopping,",
+                    l.user, l.name, l.password, l.url
+                )
+                .unwrap();
+            }
+        }
+        // Dashlane JSON export: credentials under the `AUTHENTIFIANT` key.
+        "dashlane_json" | "dashlane_json_no_password" => {
+            let with_password = kind == "dashlane_json";
+            out.push_str("{\"AUTHENTIFIANT\":[");
+            for (i, l) in logins(&mut r, 3).iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let pw = if with_password {
+                    l.password.replace('"', "")
+                } else {
+                    String::new()
+                };
+                write!(
+                    out,
+                    "{{\"title\":\"{}\",\"login\":\"{}\",\"password\":\"{pw}\",\"domain\":\"{}\",\"note\":\"\"}}",
+                    l.name, l.user, l.url
+                )
+                .unwrap();
+            }
+            out.push_str("],\"EMAIL\":[]}\n");
+        }
+        // Keeper JSON export (documented import/export layout): shared
+        // folders and records with `login`, `password`, and `login_url`.
+        "keeper_json" => {
+            out.push_str("{\n  \"shared_folders\": [],\n  \"records\": [\n");
+            let list = logins(&mut r, 3);
+            for (i, l) in list.iter().enumerate() {
+                let sep = if i + 1 < list.len() { "," } else { "" };
+                writeln!(
+                    out,
+                    "    {{\n      \"title\": \"{}\",\n      \"login\": \"{}\",\n      \"password\": \"{}\",\n      \"login_url\": \"{}\",\n      \"notes\": \"\",\n      \"folders\": [{{\"folder\": \"Personal\"}}]\n    }}{sep}",
+                    l.name, l.user, l.password.replace('"', ""), l.url
+                )
+                .unwrap();
+            }
+            out.push_str("  ]\n}\n");
+        }
+        // A records list that is not a Keeper export.
+        "keeper_json_unrelated" => {
+            out.push_str("{\n  \"records\": [\n");
+            for i in 0..3 {
+                let sep = if i < 2 { "," } else { "" };
+                writeln!(
+                    out,
+                    "    {{\"id\": {i}, \"name\": \"item {i}\", \"password_policy\": \"strong\", \"hash\": \"{}\"}}{sep}",
+                    r.pick(LOWER_HEX, 40)
+                )
+                .unwrap();
+            }
+            out.push_str("  ]\n}\n");
+        }
+        // Proton Pass CSV export: the writer emits the object keys in order.
+        "protonpass_csv" | "protonpass_csv_header_only" => {
+            let head = csv_row(&[
+                "type",
+                "name",
+                "url",
+                "autofillUrls",
+                "email",
+                "username",
+                "password",
+                "note",
+                "totp",
+                "createTime",
+                "modifyTime",
+                "vault",
+            ]);
+            writeln!(out, "{head}").unwrap();
+            if kind == "protonpass_csv" {
+                for l in logins(&mut r, 5) {
+                    writeln!(
+                        out,
+                        "login,{},{},,{},{},\"{}\",,,1600000000,1600000000,Personal",
+                        l.name, l.url, l.user, l.user, l.password
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        // Proton Pass JSON export (unencrypted ZIP or the decrypted file).
+        "protonpass_json" | "protonpass_json_encrypted" => {
+            if kind == "protonpass_json_encrypted" {
+                let mut blob = vec![0u8; 96];
+                r.fill(&mut blob);
+                writeln!(
+                    out,
+                    "{{\"version\":\"1.21.2\",\"userId\":\"{}\",\"encrypted\":true,\"vaults\":\"{}\"}}",
+                    r.pick(BASE62, 44),
+                    base64(&blob)
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "{{\n  \"version\": \"1.21.2\",\n  \"userId\": \"{}\",\n  \"encrypted\": false,\n  \"vaults\": {{\n    \"{}\": {{\n      \"name\": \"Personal\",\n      \"description\": \"\",\n      \"items\": [",
+                    r.pick(BASE62, 44),
+                    r.pick(BASE62, 44)
+                )
+                .unwrap();
+                let list = logins(&mut r, 3);
+                for (i, l) in list.iter().enumerate() {
+                    let sep = if i + 1 < list.len() { "," } else { "" };
+                    writeln!(
+                        out,
+                        "        {{\"itemId\": \"{}\", \"data\": {{\"metadata\": {{\"name\": \"{}\", \"note\": \"\"}}, \"type\": \"login\", \"content\": {{\"itemUsername\": \"{}\", \"password\": \"{}\", \"urls\": [\"{}\"], \"totpUri\": \"\"}}}}}}{sep}",
+                        r.pick(BASE62, 24),
+                        l.name,
+                        l.user,
+                        l.password.replace('"', ""),
+                        l.url
+                    )
+                    .unwrap();
+                }
+                out.push_str("      ]\n    }\n  }\n}\n");
+            }
+        }
+        // KeePass XML key files, version 1.00 (base64 key) and 2.0 (hex key
+        // with a check hash).
+        "keepass_key_file_v1" => {
+            let mut key = [0u8; 32];
+            r.fill(&mut key);
+            writeln!(
+                out,
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<KeyFile>\n\t<Meta>\n\t\t<Version>1.00</Version>\n\t</Meta>\n\t<Key>\n\t\t<Data>{}</Data>\n\t</Key>\n</KeyFile>",
+                base64(&key)
+            )
+            .unwrap();
+        }
+        "keepass_key_file_v2" => {
+            let hex = r.pick(b"0123456789ABCDEF", 64);
+            let groups: Vec<&str> = (0..8).map(|i| &hex[i * 8..i * 8 + 8]).collect();
+            writeln!(
+                out,
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<KeyFile>\n\t<Meta>\n\t\t<Version>2.0</Version>\n\t</Meta>\n\t<Key>\n\t\t<Data Hash=\"{}\">\n\t\t\t{}\n\t\t\t{}\n\t\t</Data>\n\t</Key>\n</KeyFile>",
+                r.pick(b"0123456789ABCDEF", 8),
+                groups[..4].join(" "),
+                groups[4..].join(" ")
+            )
+            .unwrap();
+        }
+        // XML with `Key` and `Data` elements that is not a key file.
+        "keepass_key_file_lookalike" => {
+            out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Settings>\n\t<Meta>\n\t\t<Version>2.0</Version>\n\t</Meta>\n");
+            writeln!(
+                out,
+                "\t<Key>\n\t\t<Data>{}</Data>\n\t</Key>\n</Settings>",
+                r.pick(BASE62, 44)
+            )
+            .unwrap();
+        }
+        // A one-time-password URI inside a QR-code image link, percent-encoded.
+        "otpauth_encoded" => {
+            let secret = r.pick(BASE32, 32);
+            writeln!(
+                out,
+                "<img src=\"https://qr.example.test/chart?size=200x200&data=otpauth%3A%2F%2Ftotp%2FExample%3Auser%40example.test%3Fsecret%3D{secret}%26issuer%3DExample\">"
+            )
+            .unwrap();
+        }
+        "otpauth_encoded_example_secret" => {
+            for seed in ["JBSWY3DPEHPK3PXP", "GEZDGNBVGY3TQOJQ"] {
+                writeln!(
+                    out,
+                    "<img src=\"https://qr.example.test/chart?data=otpauth%3A%2F%2Ftotp%2FExample%3Aalice%40example.test%3Fsecret%3D{seed}%26issuer%3DExample\">"
+                )
+                .unwrap();
+            }
+        }
+        "otpauth_encoded_no_secret" => {
+            writeln!(
+                out,
+                "<img src=\"https://qr.example.test/chart?data=otpauth%3A%2F%2Ftotp%2FExample%3Auser%40example.test%3Fissuer%3DExample%26digits%3D6\">"
+            )
+            .unwrap();
         }
         other => panic!("unknown credential file kind `{other}`"),
     }

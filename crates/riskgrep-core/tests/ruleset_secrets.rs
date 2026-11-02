@@ -145,7 +145,7 @@ fn pem_private_key() {
     let at = content.len();
     content.extend_from_slice(s.as_bytes());
     content.extend_from_slice(b"\n");
-    let ev = scan("deploy/id_rsa", &content);
+    let ev = scan("deploy/server.txt", &content);
     assert_span(&ev, "private_key", at..at + s.len());
     assert_score(&ev, 95.0);
 }

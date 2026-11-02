@@ -18,14 +18,18 @@ rule otpauth_totp_seed {
     category = "secret"
     weight = 95
     post = "span,entropy,allow_regex"
-    span_regex = "(?i)[?&]secret=([A-Z2-7]{16,})"
+    span_regex = "(?i)(?:[?&]secret=|%3Fsecret%3D|%26secret%3D)([A-Z2-7]{16,})"
     secret_group = 1
     min_entropy = 2.5
     allow_regex = "^(?i:JBSWY3DPEHPK3PXP|(GEZDGNBVGY3TQOJQ)+|BASE32SECRET3232)$"
   strings:
     $re = /otpauth:\/\/(totp|hotp)\/[^ \t\r\n"'<>]{0,200}[?&]secret=[A-Za-z2-7]{16,}/ nocase
+    // The percent-encoded form, as in the data parameter of a QR-code image
+    // link: the scheme, the label separator, the `?`, and the `=` are
+    // encoded, so the `secret` parameter follows %3F or %26.
+    $re_encoded = /otpauth%3A%2F%2F(totp|hotp)%2F[^ \t\r\n"'<>]{0,300}(%3F|%26)secret%3D[A-Za-z2-7]{16,}/ nocase
   condition:
-    $re
+    $re or $re_encoded
 }
 
 // Google Authenticator "export accounts" QR payload: every account's seed in
@@ -126,6 +130,166 @@ rule onepassword_json_export {
     $pw = /"designation"[ \t\r\n]*:[ \t\r\n]*"password"/
   condition:
     $hdr in (0..64) and $vaults and $login and $pw
+}
+
+// ---- more plaintext password-manager exports -----------------------------------
+// The JSON-shaped rules require the file to start with `{` (a JSON object,
+// after an optional UTF-8 byte order mark), so
+// source files and documents that quote a layout are not exports.
+
+// source: 1Password 1PIF (`.1pif`). 1Password does not document the format;
+// the record separator line is fixed and read by independent parsers (for
+// example Strongbox and 1P2KeePass), and Proton Pass's importer ships a
+// sample export. The file is one JSON object per line, each followed by the
+// separator line. A record counts when it carries a password: a field with the
+// designation "password" (web forms and logins) or a `password` member of
+// `secureContents` (password items).
+rule onepassword_1pif_export {
+  meta:
+    category = "secret"
+    weight = 95
+  strings:
+    $hdr = /\*\*\*5642bee8-a5ff-11dc-8314-0800200c9a66\*\*\*/
+    $pw_field = /"designation"[ \t]*:[ \t]*"password"/
+    $pw_item = /"secureContents"[ \t]*:[ \t]*\{[ \t]*"password"[ \t]*:[ \t]*"[^"]/
+  condition:
+    (uint8(0) == 0x7B or (uint8(0) == 0xEF and uint8(1) == 0xBB and uint8(2) == 0xBF and uint8(3) == 0x7B)) and $hdr and ($pw_field or $pw_item)
+}
+
+// source: Firefox saved logins, "Export Logins" (`logins.csv`); the column
+// list is written by LoginExport.sys.mjs in the Firefox source:
+//   https://github.com/mozilla/gecko-dev/blob/master/toolkit/components/passwordmgr/LoginExport.sys.mjs
+// (url, username, password, httpRealm, formActionOrigin, guid, timeCreated,
+// timeLastUsed, timePasswordChanged; every name is quoted, and a spreadsheet
+// re-save may remove the quotes)
+rule firefox_csv_export {
+  meta:
+    category = "secret"
+    weight = 95
+  strings:
+    $hdr = /(\xEF\xBB\xBF)?"?url"?,"?username"?,"?password"?,"?httpRealm"?,"?formActionOrigin"?,"?guid"?,"?timeCreated"?,"?timeLastUsed"?,"?timePasswordChanged"?\r?\n[^\r\n]/
+  condition:
+    $hdr at 0
+}
+
+// source: KeePass 2.x "KeePass XML (2.x)" export. The root element is
+// KeePassFile (the layout KeePass writes and KeePassXC reads, KeePassFile >
+// Root > Group > Entry, each entry holding String elements with a Key and a
+// Value); the export keeps values in plain text. An entry counts when its
+// Password value is not empty. A KeePass database itself is encrypted
+// (`keepass_database`).
+rule keepass_xml_export {
+  meta:
+    category = "secret"
+    weight = 95
+  strings:
+    $hdr = /<KeePassFile[ \t\r\n>]/
+    $pw = /<Key>Password<\/Key>[ \t\r\n]*<Value[^>]*>[^<]/
+  condition:
+    $hdr in (0..512) and $pw
+}
+
+// source: KeePass "CSV (1.x)" export, whose column names are read by
+// independent importers (for example Padloc and Olares).
+rule keepass_csv_export {
+  meta:
+    category = "secret"
+    weight = 95
+  strings:
+    $hdr = /(\xEF\xBB\xBF)?"?Account"?,"?Login Name"?,"?Password"?,"?Web Site"?,"?Comments"?\r?\n[^\r\n]/
+  condition:
+    $hdr at 0
+}
+
+// source: KeePassXC "Export to CSV", columns written by CsvExporter.cpp in
+// the KeePassXC source:
+//   https://github.com/keepassxreboot/keepassxc/blob/develop/src/format/CsvExporter.cpp
+// (Group, Title, Username, Password, URL, Notes, TOTP, Icon, Last Modified,
+// Created; every name is quoted)
+rule keepassxc_csv_export {
+  meta:
+    category = "secret"
+    weight = 95
+  strings:
+    $hdr = /(\xEF\xBB\xBF)?"?Group"?,"?Title"?,"?Username"?,"?Password"?,"?URL"?,"?Notes"?,"?TOTP"?,"?Icon"?,"?Last Modified"?,"?Created"?\r?\n[^\r\n]/
+  condition:
+    $hdr at 0
+}
+
+// source: Dashlane credentials CSV (`credentials.csv`), observed: the
+// columns are those of Bitwarden's Dashlane importer and its sample file
+// (username, username2, username3, title, password, note, url, category, then
+// otpSecret or otpUrl). No Dashlane documentation of the columns was found.
+rule dashlane_csv_export {
+  meta:
+    category = "secret"
+    weight = 95
+  strings:
+    $hdr = /(\xEF\xBB\xBF)?username,username2,username3,title,password,note,url,category,otp(Secret|Url)\r?\n[^\r\n]/
+  condition:
+    $hdr at 0
+}
+
+// source: Dashlane JSON export, observed: credentials sit in a top-level
+// AUTHENTIFIANT array (as Bitwarden's Dashlane JSON importer reads it).
+rule dashlane_json_export {
+  meta:
+    category = "secret"
+    weight = 95
+  strings:
+    $hdr = /"AUTHENTIFIANT"[ \t\r\n]*:[ \t\r\n]*\[/
+    $pw = /"password"[ \t\r\n]*:[ \t\r\n]*"[^"]/
+  condition:
+    (uint8(0) == 0x7B or (uint8(0) == 0xEF and uint8(1) == 0xBB and uint8(2) == 0xBF and uint8(3) == 0x7B)) and $hdr and $pw
+}
+
+// source: Keeper JSON export, an array of shared folders and an array of
+// records, each record with title, login, password, and login_url:
+//   https://docs.keeper.io/user-guides/import-records-1/import-json
+// Keeper's CSV export is not covered: the documented column list is not a
+// header row in the files Keeper writes.
+rule keeper_json_export {
+  meta:
+    category = "secret"
+    weight = 95
+  strings:
+    $hdr = /"records"[ \t\r\n]*:[ \t\r\n]*\[/
+    $login = /"login"[ \t\r\n]*:[ \t\r\n]*"/
+    $url = /"login_url"[ \t\r\n]*:/
+    $pw = /"password"[ \t\r\n]*:[ \t\r\n]*"[^"]/
+  condition:
+    (uint8(0) == 0x7B or (uint8(0) == 0xEF and uint8(1) == 0xBB and uint8(2) == 0xBF and uint8(3) == 0x7B)) and $hdr and $login and $url and $pw
+}
+
+// source: Proton Pass CSV export. The writer emits the keys of each item in
+// a fixed order (type, name, url, autofillUrls, email, username, password,
+// note, totp, createTime, modifyTime, vault; earlier versions lack type and
+// autofillUrls):
+//   https://github.com/ProtonMail/WebClients/blob/main/packages/pass/lib/export/csv.ts
+rule protonpass_csv_export {
+  meta:
+    category = "secret"
+    weight = 95
+  strings:
+    $hdr = /(\xEF\xBB\xBF)?(type,)?name,url,(autofillUrls,)?email,username,password,note,totp,createTime,modifyTime,vault\r?\n[^\r\n]/
+  condition:
+    $hdr at 0
+}
+
+// source: Proton Pass JSON export (the unencrypted ZIP, or the decrypted
+// file), observed: version, userId, encrypted (false), and vaults, as
+// Bitwarden's Proton Pass importer reads it, with login items whose content
+// holds a password.
+rule protonpass_json_export {
+  meta:
+    category = "secret"
+    weight = 95
+  strings:
+    $hdr = /"encrypted"[ \t\r\n]*:[ \t\r\n]*false/
+    $vaults = /"vaults"[ \t\r\n]*:[ \t\r\n]*\{/
+    $pw = /"password"[ \t\r\n]*:[ \t\r\n]*"[^"]/
+  condition:
+    (uint8(0) == 0x7B or (uint8(0) == 0xEF and uint8(1) == 0xBB and uint8(2) == 0xBF and uint8(3) == 0x7B)) and $hdr in (0..400) and $vaults in (0..400) and $pw
 }
 
 // ---- two-factor recovery and backup codes --------------------------------------

@@ -11,7 +11,8 @@ expect = 95
 rule = "aws_access_token"
 synth = "zip:config/.env=secret:aws_access_key"
 path = "backup.zip"
-expect = 95
+# 95 for the key, combined with 80 for the member name `.env` (`dotenv_file_name`).
+expect = 99
 
 [[case]]
 rule = "github_pat"
@@ -29,7 +30,8 @@ expect = 95
 rule = "private_key"
 synth = "secret:pem_private_key"
 path = "deploy/id_rsa"
-expect = 95
+# 95 for the key, combined with 80 for the name `id_rsa` (`ssh_private_key_name`).
+expect = 99
 
 [[case]]
 rule = "generic_api_key"
@@ -706,4 +708,442 @@ expect = 80
 rule = "credential_key_hex_value"
 synth = "file:config_key_hex_low_entropy"
 path = "node_modules/pkg/settings.conf"
+expect = "none"
+
+# ---- more password-manager exports, encoded seeds, key files (#53, #54, #55) -------------
+
+[[case]]
+# 1Password 1PIF: JSON records, each followed by a fixed separator line.
+rule = "onepassword_1pif_export"
+synth = "file:onepassword_1pif"
+path = "export.1pif"
+expect = 95
+
+[[case]]
+# Records without a password field are not an export of credentials.
+rule = "onepassword_1pif_export"
+synth = "file:onepassword_1pif_no_password"
+path = "export.1pif"
+expect = "none"
+
+[[case]]
+rule = "onepassword_1pif_export"
+synth = "file:onepassword_json"
+path = "export.data"
+expect = "none"
+
+[[case]]
+rule = "firefox_csv_export"
+synth = "file:firefox_csv"
+path = "logins.csv"
+expect = 95
+
+[[case]]
+# Spreadsheet re-saves add a byte order mark and CRLF line endings.
+rule = "firefox_csv_export"
+synth = "file:firefox_csv_bom_crlf"
+path = "logins.csv"
+expect = 95
+
+[[case]]
+rule = "firefox_csv_export"
+synth = "file:firefox_csv_header_only"
+path = "logins.csv"
+expect = "none"
+
+[[case]]
+rule = "keepass_xml_export"
+synth = "file:keepass_xml"
+path = "Database.xml"
+expect = 95
+
+[[case]]
+rule = "keepass_xml_export"
+synth = "file:keepass_xml_no_password"
+path = "Database.xml"
+expect = "none"
+
+[[case]]
+rule = "keepass_csv_export"
+synth = "file:keepass_csv"
+path = "Database.csv"
+expect = 95
+
+[[case]]
+rule = "keepass_csv_export"
+synth = "file:keepass_csv_header_only"
+path = "Database.csv"
+expect = "none"
+
+[[case]]
+rule = "keepassxc_csv_export"
+synth = "file:keepassxc_csv"
+path = "Database.csv"
+expect = 95
+
+[[case]]
+rule = "keepassxc_csv_export"
+synth = "file:keepassxc_csv_bom_crlf"
+path = "Database.csv"
+expect = 95
+
+[[case]]
+rule = "dashlane_csv_export"
+synth = "file:dashlane_csv"
+path = "credentials.csv"
+expect = 95
+
+[[case]]
+rule = "dashlane_csv_export"
+synth = "file:users_csv"
+path = "users.csv"
+expect = "none"
+
+[[case]]
+rule = "dashlane_json_export"
+synth = "file:dashlane_json"
+path = "Dashlane Export.json"
+expect = 95
+
+[[case]]
+# A byte order mark before the opening brace.
+rule = "dashlane_json_export"
+synth = "file:dashlane_json_bom_crlf"
+path = "Dashlane Export.json"
+expect = 95
+
+[[case]]
+rule = "dashlane_json_export"
+synth = "file:dashlane_json_no_password"
+path = "Dashlane Export.json"
+expect = "none"
+
+[[case]]
+rule = "keeper_json_export"
+synth = "file:keeper_json"
+path = "keeper_export.json"
+expect = 95
+
+[[case]]
+# A records list with no login and password members.
+rule = "keeper_json_export"
+synth = "file:keeper_json_unrelated"
+path = "records.json"
+expect = "none"
+
+[[case]]
+rule = "keeper_json_export"
+synth = "file:bitwarden_json"
+path = "export.json"
+expect = "none"
+
+[[case]]
+rule = "protonpass_csv_export"
+synth = "file:protonpass_csv"
+path = "Proton Pass.csv"
+expect = 95
+
+[[case]]
+rule = "protonpass_csv_export"
+synth = "file:protonpass_csv_bom_crlf"
+path = "Proton Pass.csv"
+expect = 95
+
+[[case]]
+rule = "protonpass_csv_export"
+synth = "file:protonpass_csv_header_only"
+path = "Proton Pass.csv"
+expect = "none"
+
+[[case]]
+rule = "protonpass_json_export"
+synth = "file:protonpass_json"
+path = "data.json"
+expect = 95
+
+[[case]]
+rule = "protonpass_json_export"
+synth = "file:protonpass_json_encrypted"
+path = "data.json"
+expect = "none"
+
+[[case]]
+# Percent-encoded URI, as in a QR-code image link.
+rule = "otpauth_totp_seed"
+synth = "file:otpauth_encoded"
+path = "qr.html"
+expect = 95
+
+[[case]]
+# The public example seeds stay allowed in the encoded form.
+rule = "otpauth_totp_seed"
+synth = "file:otpauth_encoded_example_secret"
+path = "README.md"
+expect = "none"
+
+[[case]]
+rule = "otpauth_totp_seed"
+synth = "file:otpauth_encoded_no_secret"
+path = "qr.html"
+expect = "none"
+
+[[case]]
+# KeePass XML key file, version 1.00 (base64 key).
+rule = "keepass_xml_key_file"
+synth = "file:keepass_key_file_v1"
+path = "backup.dat"
+expect = 85
+
+[[case]]
+# Version 2.0 (hex key with a check hash).
+rule = "keepass_xml_key_file"
+synth = "file:keepass_key_file_v2"
+path = "Database.keyx"
+expect = 85
+
+[[case]]
+rule = "keepass_xml_key_file"
+synth = "file:keepass_key_file_lookalike"
+path = "settings.xml"
+expect = "none"
+
+[[case]]
+# A Password Safe v3 layout is recognised without the extension.
+rule = "password_safe_database"
+synth = "file:password_safe_structural"
+path = "backup"
+expect = 85
+
+[[case]]
+# PWS3, but not 200 bytes plus whole 16-byte blocks.
+rule = "password_safe_database"
+synth = "file:password_safe_wrong_size"
+path = "backup"
+expect = "none"
+
+[[case]]
+# PWS3 with an iteration count below the 2,048 minimum.
+rule = "password_safe_database"
+synth = "file:password_safe_low_iterations"
+path = "backup"
+expect = "none"
+
+[[case]]
+rule = "password_safe_database"
+synth = "text:PWS3 build notes, a text file that only starts with the letters\n"
+path = "notes.txt"
+expect = "none"
+
+[[case]]
+# A line feed at offset 39 makes the bytes after the salt look like a count.
+rule = "password_safe_database"
+synth = "text:PWS3xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nmore notes\n"
+path = "notes.txt"
+expect = "none"
+
+[[case]]
+# The extension still counts.
+rule = "password_safe_database"
+synth = "file:password_safe_wrong_size"
+path = "vault.psafe3"
+expect = 85
+
+# ---- path-only rules for well-known key-file and credential-file names (#51) --------------
+# Path rules need no content, so the sample is a placeholder line.
+
+[[case]]
+rule = "ssh_private_key_name"
+synth = "text:placeholder\n"
+path = "home/.ssh/id_rsa"
+expect = 80
+
+[[case]]
+rule = "ssh_private_key_name"
+synth = "text:placeholder\n"
+path = "home/.ssh/id_ed25519"
+expect = 80
+
+[[case]]
+rule = "ssh_private_key_name"
+synth = "text:placeholder\n"
+path = "keys/id_ecdsa_sk"
+expect = 80
+
+[[case]]
+# The public half is not a secret.
+rule = "ssh_private_key_name"
+synth = "text:placeholder\n"
+path = "home/.ssh/id_rsa.pub"
+expect = "none"
+
+[[case]]
+rule = "ssh_private_key_name"
+synth = "text:placeholder\n"
+path = "docs/id_rsa_guide.md"
+expect = "none"
+
+[[case]]
+# gitleaks' global path allowlist applies.
+rule = "ssh_private_key_name"
+synth = "text:placeholder\n"
+path = "node_modules/pkg/id_rsa"
+expect = "none"
+
+[[case]]
+rule = "dotenv_file_name"
+synth = "text:placeholder\n"
+path = ".env"
+expect = 80
+
+[[case]]
+rule = "dotenv_file_name"
+synth = "text:placeholder\n"
+path = "app/.env.local"
+expect = 80
+
+[[case]]
+rule = "dotenv_file_name"
+synth = "text:placeholder\n"
+path = "app/.env.production"
+expect = 80
+
+[[case]]
+rule = "dotenv_file_name"
+synth = "text:placeholder\n"
+path = "app/.env.stage.local"
+expect = 80
+
+[[case]]
+# Template files carry no values.
+rule = "dotenv_file_name"
+synth = "text:placeholder\n"
+path = "app/.env.example"
+expect = "none"
+
+[[case]]
+rule = "dotenv_file_name"
+synth = "text:placeholder\n"
+path = "app/.env.sample"
+expect = "none"
+
+[[case]]
+rule = "dotenv_file_name"
+synth = "text:placeholder\n"
+path = "app/.environment"
+expect = "none"
+
+[[case]]
+rule = "aws_credentials_file_name"
+synth = "text:placeholder\n"
+path = "home/.aws/credentials"
+expect = 80
+
+[[case]]
+rule = "aws_credentials_file_name"
+synth = "text:placeholder\n"
+path = "config/credentials"
+expect = "none"
+
+[[case]]
+# A bare `credentials` is weak evidence: Rails and Terraform use the name for other files.
+rule = "credentials_file_name"
+synth = "text:placeholder\n"
+path = "config/credentials"
+expect = 40
+
+[[case]]
+rule = "credentials_file_name"
+synth = "text:placeholder\n"
+path = "src/credentials.go"
+expect = "none"
+
+[[case]]
+rule = "credential_store_file_name"
+synth = "text:placeholder\n"
+path = "home/.netrc"
+expect = 80
+
+[[case]]
+rule = "credential_store_file_name"
+synth = "text:placeholder\n"
+path = "home/_netrc"
+expect = 80
+
+[[case]]
+rule = "credential_store_file_name"
+synth = "text:placeholder\n"
+path = "home/.pgpass"
+expect = 80
+
+[[case]]
+rule = "credential_store_file_name"
+synth = "text:placeholder\n"
+path = "repo/.git-credentials"
+expect = 80
+
+[[case]]
+rule = "credential_store_file_name"
+synth = "text:placeholder\n"
+path = "site/.htpasswd"
+expect = 80
+
+[[case]]
+rule = "credential_store_file_name"
+synth = "text:placeholder\n"
+path = "docs/netrc.md"
+expect = "none"
+
+[[case]]
+rule = "java_keystore_name"
+synth = "text:placeholder\n"
+path = "release.jks"
+expect = 80
+
+[[case]]
+rule = "java_keystore_name"
+synth = "text:placeholder\n"
+path = "app/debug.keystore"
+expect = 80
+
+[[case]]
+rule = "java_keystore_name"
+synth = "text:placeholder\n"
+path = "docs/keystore.md"
+expect = "none"
+
+[[case]]
+rule = "putty_private_key_name"
+synth = "text:placeholder\n"
+path = "keys/server.ppk"
+expect = 80
+
+[[case]]
+rule = "gpg_secret_key_name"
+synth = "text:placeholder\n"
+path = "home/.gnupg/secring.gpg"
+expect = 80
+
+[[case]]
+rule = "gpg_secret_key_name"
+synth = "text:placeholder\n"
+path = "home/.gnupg/private-keys-v1.d/0123abcd.key"
+expect = 80
+
+[[case]]
+rule = "gpg_secret_key_name"
+synth = "text:placeholder\n"
+path = "home/.gnupg/pubring.gpg"
+expect = "none"
+
+[[case]]
+# A .pem file is a certificate as often as a key, so the weight stays below the ask band.
+rule = "pem_file_name"
+synth = "text:placeholder\n"
+path = "certs/server.pem"
+expect = 40
+
+[[case]]
+rule = "pem_file_name"
+synth = "text:placeholder\n"
+path = "certs/server.crt"
 expect = "none"
