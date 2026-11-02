@@ -37,6 +37,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - **Not covered:** embeddings and voiceprints in other containers: PyTorch pickles (`.pt`, `.pth`), ONNX, HDF5, Parquet, SQLite and vector databases, and biometric data inside archives other than zip (gzip, tar, 7z). Raw audio and face images are not inspected (images are skipped).
 - **Why:** only the formats whose headers state shape and type are parsed.
 - **How it shows up:** such files score at most 30 from the file-name rule (`voiceprint`, `embedding`, `speaker`, `enroll`, or `faceprint` in the path), or nothing.
+- **Large `.npz` with prepended bytes:** an `.npz` over the text limit whose first entry does not start at byte 0 is reported unscanned (`npz central directory unreadable`), because its central directory is located from a fixed start offset of 0.
 
 ### How embeddings are recognised
 

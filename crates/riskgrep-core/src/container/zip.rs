@@ -147,16 +147,7 @@ impl Extractor for Zip {
         let left = Cell::new(DIRECTORY_MAX);
         let over = Cell::new(false);
         let open = |offset| {
-            let reader = BufReader::with_capacity(
-                8192,
-                Budgeted {
-                    src,
-                    size,
-                    pos: 0,
-                    left: &left,
-                    over: &over,
-                },
-            );
+            let reader = BufReader::with_capacity(8192, Budgeted::new(src, size, &left, &over));
             zip::ZipArchive::with_config(
                 zip::read::Config {
                     archive_offset: offset,

@@ -327,14 +327,34 @@ fn read_prefix<S: Source + ?Sized>(
     Ok(Content::whole(src.range(0, n)?, partial))
 }
 
-/// A seekable reader over a [`Source`] that reads at most `left` more bytes
-/// in total; past that every read fails and `over` is set.
+/// A seekable reader over a [`Source`] that fetches at most `left` more bytes
+/// in total; past that every read fails and `over` is set. The last fetch is
+/// kept, and reads inside it cost nothing: a [`BufReader`] drops its buffer
+/// on every seek, so a directory parser that seeks per entry would otherwise
+/// pay for the same bytes again each time.
 pub struct Budgeted<'a, S: ?Sized> {
-    pub src: &'a S,
-    pub size: u64,
-    pub pos: u64,
-    pub left: &'a Cell<u64>,
-    pub over: &'a Cell<bool>,
+    src: &'a S,
+    size: u64,
+    pos: u64,
+    left: &'a Cell<u64>,
+    over: &'a Cell<bool>,
+    /// The bytes last fetched from `src`, starting at file offset `window_at`.
+    window: Vec<u8>,
+    window_at: u64,
+}
+
+impl<'a, S: ?Sized> Budgeted<'a, S> {
+    pub fn new(src: &'a S, size: u64, left: &'a Cell<u64>, over: &'a Cell<bool>) -> Self {
+        Budgeted {
+            src,
+            size,
+            pos: 0,
+            left,
+            over,
+            window: Vec::new(),
+            window_at: 0,
+        }
+    }
 }
 
 impl<S: Source + ?Sized> Read for Budgeted<'_, S> {
@@ -343,6 +363,17 @@ impl<S: Source + ?Sized> Read for Budgeted<'_, S> {
         if want == 0 {
             return Ok(0);
         }
+        let held = self
+            .pos
+            .checked_sub(self.window_at)
+            .filter(|from| *from < self.window.len() as u64);
+        if let Some(from) = held {
+            let from = from as usize;
+            let n = (want as usize).min(self.window.len() - from);
+            buf[..n].copy_from_slice(&self.window[from..from + n]);
+            self.pos += n as u64;
+            return Ok(n);
+        }
         let n = want.min(self.left.get());
         if n == 0 {
             self.over.set(true);
@@ -350,9 +381,11 @@ impl<S: Source + ?Sized> Read for Budgeted<'_, S> {
         }
         let bytes = self.src.range(self.pos, n)?;
         buf[..bytes.len()].copy_from_slice(&bytes);
-        self.left.set(self.left.get() - n);
-        self.pos += n;
-        Ok(bytes.len())
+        self.left.set(self.left.get() - bytes.len() as u64);
+        self.window_at = self.pos;
+        self.pos += bytes.len() as u64;
+        self.window = bytes;
+        Ok(self.window.len())
     }
 }
 
@@ -373,23 +406,15 @@ impl<S: ?Sized> Seek for Budgeted<'_, S> {
 /// `*.npy` its first [`NPZ_MEMBER_BYTES`] uncompressed bytes, each read by
 /// offset under a byte budget. The result is a stored zip of those member
 /// prefixes in archive order: everything the `.npz` post-processor reads.
-/// Members whose data cannot be read are left out, as the post-processor
-/// skips them; a directory or member over its budget, or a directory that
-/// does not parse, makes the file unscanned. No member name is ever put in
-/// a reason (names may be personal data).
+/// A directory or member over its budget, or a directory that does not parse,
+/// makes the file unscanned. A `.npy` member whose data cannot be read is left
+/// out and the first such member is noted (partial), as the post-processor
+/// does for a file read whole. No member name is ever put in a reason (names
+/// may be personal data).
 fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
     let left = Cell::new(NPZ_DIRECTORY_MAX);
     let over = Cell::new(false);
-    let reader = BufReader::with_capacity(
-        8192,
-        Budgeted {
-            src,
-            size,
-            pos: 0,
-            left: &left,
-            over: &over,
-        },
-    );
+    let reader = BufReader::with_capacity(8192, Budgeted::new(src, size, &left, &over));
     // zip 9.0.5 scans every byte before the end record for a central directory
     // header when it detects the archive offset, which reads the whole file.
     // A fixed offset of 0 keeps the directory lookup at the end of the file.
@@ -405,6 +430,7 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
         }
         _ => return Content::unscanned("npz central directory unreadable".into()),
     };
+    let mut unread: Option<usize> = None;
     let mut out = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
     let stored =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -431,7 +457,12 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
                 "npz member {i} not read within {NPZ_MEMBER_READ_MAX} bytes"
             ));
         }
-        let Some(head) = head else { continue };
+        // A `.npy` member that cannot be read (a wrong checksum, a size the
+        // data runs past) is data the scan did not see: note the first one.
+        let Some(head) = head else {
+            unread.get_or_insert(i);
+            continue;
+        };
         let written = out
             .start_file(name, stored)
             .map_err(io::Error::other)
@@ -441,7 +472,10 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
         }
     }
     match out.finish() {
-        Ok(c) => Content::whole(c.into_inner(), None),
+        Ok(c) => Content::whole(
+            c.into_inner(),
+            unread.map(|i| format!("npz member {i} could not be read")),
+        ),
         Err(_) => Content::unscanned("npz member headers could not be re-encoded".into()),
     }
 }

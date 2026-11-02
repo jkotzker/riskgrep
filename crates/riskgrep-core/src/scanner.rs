@@ -877,23 +877,26 @@ impl RiskGrep {
         if p.container.is_some() {
             return self.finish_container(engine, scanner, p);
         }
-        let mut ev = match engine.scan_content(scanner, &p.path_ext, &p.content.bytes) {
-            Ok(ev) => ev,
+        let scan = match engine.scan_content_checked(scanner, &p.path_ext, &p.content.bytes) {
+            Ok(scan) => scan,
             Err(ScanError::Timeout) => return Raw::status(p.target, unscanned("timeout")),
             Err(ScanError::Yara(_)) => return Raw::status(p.target, unscanned("scan error")),
         };
+        let (mut ev, engine_not_read) = (scan.evidence, scan.not_read);
         if let Some(d) = &p.content.decoded {
             d.place(&mut ev);
         } else if let Some(tail) = p.content.tail {
             place_tail(&mut ev, tail);
         }
-        if let (Some(c), Some(h)) = (self.cache.as_ref(), p.hash) {
+        // Evidence from content a processor could not fully inspect is not
+        // cached: a hit means a full scan, as with partial reads.
+        if let (Some(c), Some(h), None) = (self.cache.as_ref(), p.hash, &engine_not_read) {
             c.put_evidence(h, &p.ekey, &ev);
             if let Some((k, examined)) = &p.stat {
                 c.put_stat(k, h, *examined);
             }
         }
-        let status = match p.content.partial {
+        let status = match p.content.partial.or(engine_not_read) {
             Some(not_read) => TargetStatus::Partial { not_read },
             None => TargetStatus::Scanned,
         };
