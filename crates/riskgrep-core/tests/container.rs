@@ -382,7 +382,6 @@ fn reports_hold_member_names_but_no_member_content() {
     assert_eq!(t["container"]["format"], "zip");
     assert_eq!(t["container"]["listed"][0]["path"], "config/app.env");
     assert_eq!(t["container"]["listed"][0]["status"], "scanned");
-    assert_eq!(t["container"]["listed"][0]["kind"], "file");
 }
 
 #[test]
@@ -2023,4 +2022,98 @@ fn an_integer_npy_member_is_not_mistaken_for_one_without_the_magic() {
         only(&scan(&mut scanner(), &p)).status,
         TargetStatus::Scanned
     );
+}
+
+const ALL_SKIPPED: &str = "every member is an image or a binary of unknown format";
+
+#[test]
+fn a_container_of_only_skipped_members_is_skipped_and_keeps_its_counts() {
+    let blob = vec![0u8, 1, 2, 3, 0xff, 0xfe];
+    let d = tempfile::tempdir().unwrap();
+    for (name, bytes, counts) in [
+        (
+            "image.zip",
+            synth::zip(&[("logo.png", PNG.to_vec())]),
+            (1, 0, 0, 1, 0, 0),
+        ),
+        (
+            "two.zip",
+            synth::zip(&[("logo.png", PNG.to_vec()), ("blob", blob.clone())]),
+            (2, 0, 0, 2, 0, 0),
+        ),
+        (
+            "blob.tar",
+            synth::tar(&[("blob", blob.clone())]),
+            (1, 0, 0, 1, 0, 0),
+        ),
+        ("blob.gz", synth::gzip(&blob), (1, 0, 0, 1, 0, 0)),
+        (
+            "nested.zip",
+            synth::zip(&[("in.zip", synth::zip(&[("blob", blob.clone())]))]),
+            (2, 0, 0, 1, 0, 1),
+        ),
+    ] {
+        let p = write(d.path(), name, &bytes);
+        let first = scan(&mut scanner(), &p);
+        let t = only(&first);
+        assert_eq!(
+            t.status,
+            TargetStatus::Skipped {
+                reason: ALL_SKIPPED.into()
+            },
+            "{name}"
+        );
+        assert!(t.scores.is_empty(), "{name}");
+        assert_eq!(buckets(t), counts, "{name}");
+        assert_eq!(first.summary.skipped, 1, "{name}");
+        assert_eq!(scan(&mut scanner(), &p), first, "{name}");
+    }
+}
+
+#[test]
+fn a_container_with_any_member_read_stays_scanned() {
+    let d = tempfile::tempdir().unwrap();
+    let z = synth::zip(&[("logo.png", PNG.to_vec()), ("a.txt", text("plain\n"))]);
+    let p = write(d.path(), "mixed.zip", &z);
+    let r = scan(&mut scanner(), &p);
+    assert_eq!(only(&r).status, TargetStatus::Scanned);
+    assert_eq!(buckets(only(&r)), (2, 1, 0, 1, 0, 0));
+}
+
+#[test]
+fn a_listed_member_has_only_its_path_status_and_scores() {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(
+        d.path(),
+        "k.zip",
+        &synth::zip(&[("config/app.env", aws_file(61))]),
+    );
+    let r = scan(&mut scanner(), &p);
+    let c = only(&r).container.as_ref().unwrap();
+    let v = serde_json::to_value(&c.listed[0]).unwrap();
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["path", "scores", "status"]);
+}
+
+#[test]
+fn a_container_of_only_skipped_members_is_cached() {
+    let d = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let mk = || RiskGrep::with_cache_dir(Config::default(), None, Some(cache.path().into()));
+    let p = write(
+        d.path(),
+        "n.zip",
+        &synth::zip(&[("in.zip", synth::zip(&[("logo.png", PNG.to_vec())]))]),
+    );
+    let first = scan(&mut mk().unwrap(), &p);
+    let mut g = mk().unwrap();
+    let second = scan(&mut g, &p);
+    assert_eq!(first, second);
+    assert!(
+        !g.bundle_loaded(),
+        "a cached archive must not load the bundle"
+    );
+    assert!(matches!(only(&second).status, TargetStatus::Skipped { .. }));
+    assert_eq!(buckets(only(&second)), (2, 0, 0, 1, 0, 1));
 }

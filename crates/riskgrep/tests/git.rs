@@ -898,3 +898,19 @@ fn a_file_read_whole_or_for_its_header_alone_does_not_block() {
             .stderr(predicate::str::contains(": partial (").not());
     }
 }
+
+#[test]
+fn an_archive_of_only_unknown_binaries_follows_on_skipped() {
+    let r = Repo::new();
+    r.write(
+        "b.zip",
+        synth::zip(&[("blob", vec![0u8, 1, 2, 3, 0xff, 0xfe])]),
+    );
+    r.stage("b.zip");
+    r.pre_commit().assert().code(0);
+    r.write(".riskgrep.toml", "[git]\non_skipped = \"block\"\n");
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("riskgrep: b.zip: skipped ("));
+}

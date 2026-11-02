@@ -751,6 +751,7 @@ fn biometric(out: &mut Vec<Sample>) {
                     format!("out_{i}.json"),
                     floats.replacen("{\n", &format!("{{\n  \"id\": {i},\n"), 1),
                 ),
+                _ => unreachable!("the styles are listed above"),
             };
             out.push(sample(Group::Biometric, kind, name, text));
         }

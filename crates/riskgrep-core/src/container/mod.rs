@@ -29,6 +29,7 @@ pub mod zip;
 
 /// A container format, as classification recognises it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContainerKind {
     Zip,
     Tar,
@@ -88,8 +89,8 @@ pub fn not_scanned_reason(kind: ContainerKind) -> String {
     format!("{} not scanned in v1", kind.name())
 }
 
-/// The extractor for `kind`, if that format is read. The only list a new
-/// format is added to.
+/// The extractor for `kind`, if that format is read. A new format also needs
+/// a `ContainerKind` and its detection in `classify`.
 pub fn extractor(kind: ContainerKind) -> Option<&'static dyn Extractor> {
     match kind {
         ContainerKind::Zip => Some(&zip::ZIP),
@@ -117,6 +118,7 @@ pub struct MemberMeta {
 
 /// Why an extractor could not hand over a member.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NotRead {
     Encrypted,
     /// Stored with a method the extractor cannot decode.
@@ -127,6 +129,7 @@ pub enum NotRead {
 
 /// Part of an entry's stored form that its member's stream does not show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Hidden {
     /// Bytes inside the declared compressed size, after the end of the data.
     PastData(u64),
@@ -174,6 +177,7 @@ pub struct StreamLimits {
 
 /// How a region that is not a stored file is named.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum Region<'a> {
     /// A name as stored; the framework escapes it.
     Stored(&'a str),
@@ -184,6 +188,7 @@ pub enum Region<'a> {
 /// What the scanner makes of a value stored inside a member's structure, such
 /// as a database's BLOB cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StoredValue {
     /// No format the scanner knows: its bytes belong with the text around it.
     Bytes,
@@ -196,6 +201,7 @@ pub enum StoredValue {
 
 /// Whether the extractor should go on offering members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Flow {
     Continue,
     Stop,
@@ -274,6 +280,7 @@ pub const LISTED_MAX: usize = 1000;
 
 /// Why a member was not read, or not read whole.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Cause {
     /// Over a limit, by its configuration key (`limits.container_members`).
     Limit(String),
@@ -396,6 +403,10 @@ impl Extracted {
         )
     }
 }
+
+/// Why a container is `skipped`: all of its members were, and nothing in it
+/// went unread for any other reason.
+pub const ALL_SKIPPED: &str = "every member is an image or a binary of unknown format";
 
 /// A container's status: `unscanned` when no member in scope was read, whole
 /// (`read_any`) or in part (listed in `unread` as such), but something was not,

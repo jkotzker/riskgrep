@@ -68,6 +68,7 @@ fn encode(text: &str, utf: Utf, bom: bool) -> Vec<u8> {
         Utf::Utf16Be => s.encode_utf16().flat_map(u16::to_be_bytes).collect(),
         Utf::Utf32Le => s.chars().flat_map(|c| (c as u32).to_le_bytes()).collect(),
         Utf::Utf32Be => s.chars().flat_map(|c| (c as u32).to_be_bytes()).collect(),
+        other => panic!("no encoder for {other:?}"),
     }
 }
 
