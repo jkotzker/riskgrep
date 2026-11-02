@@ -278,11 +278,11 @@ impl Extractor for Zip {
         let comment = zip.comment().to_vec();
         let is_member = |e: &Option<Entry>| !e.as_ref().is_some_and(|e| e.is_dir);
         // Members and comments not offered yet.
-        let mut left =
+        let mut to_offer =
             entries.iter().filter(|e| is_member(e)).count() as u64 + comments + archive_comment;
         for (i, entry) in entries.iter().enumerate() {
             if is_member(entry) {
-                left -= 1;
+                to_offer -= 1;
                 let flow = match entry {
                     None => walk.not_read(
                         MemberMeta {
@@ -317,14 +317,14 @@ impl Extractor for Zip {
                     }
                 };
                 if flow == Flow::Stop {
-                    walk.rest(left);
+                    walk.rest(to_offer);
                     return Ok(());
                 }
             }
             if let Some(e) = entry.as_ref().filter(|e| !e.comment.is_empty()) {
-                left -= 1;
+                to_offer -= 1;
                 if walk.comment(Some(&e.name), &mut &e.comment[..]) == Flow::Stop {
-                    walk.rest(left);
+                    walk.rest(to_offer);
                     return Ok(());
                 }
             }
