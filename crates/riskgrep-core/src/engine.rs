@@ -181,6 +181,20 @@ impl Engine {
         path_for_rules: &str,
         content: &[u8],
     ) -> Result<Vec<Evidence>, ScanError> {
+        self.scan_content_checked(scanner, path_for_rules, content)
+            .map(|scan| scan.evidence)
+    }
+
+    /// Like [`Engine::scan_content`], and also reports what a post-processor
+    /// could not inspect ([`PostResult::Incomplete`]): a result with a
+    /// `not_read` note is not a verdict on the whole content.
+    pub fn scan_content_checked(
+        &self,
+        scanner: &mut yara_x::Scanner,
+        path_for_rules: &str,
+        content: &[u8],
+    ) -> Result<Scan, ScanError> {
+        let mut not_read: Option<String> = None;
         scanner
             .set_global("path", path_for_rules)
             .map_err(|e| ScanError::Yara(e.to_string()))?;
@@ -283,9 +297,12 @@ impl Engine {
                             }
                             let result = if post.whole_content() {
                                 let verdict = whole[i].get_or_insert_with(|| {
-                                    match post.apply(content, 0..0) {
+                                    match settle(post.apply(content, 0..0), &mut not_read) {
                                         PostResult::KeepWithShape(_, s) => Some(s),
-                                        _ => None,
+                                        PostResult::Keep(_)
+                                        | PostResult::KeepAll(_)
+                                        | PostResult::Drop
+                                        | PostResult::Incomplete(..) => None,
                                     }
                                 });
                                 match verdict {
@@ -293,7 +310,7 @@ impl Engine {
                                     None => PostResult::Drop,
                                 }
                             } else {
-                                post.apply(content, range.clone())
+                                settle(post.apply(content, range.clone()), &mut not_read)
                             };
                             match result {
                                 PostResult::Keep(r) => range = r,
@@ -312,6 +329,12 @@ impl Engine {
                                     shapes.push(s);
                                 }
                                 PostResult::Drop => {
+                                    alive = false;
+                                    break;
+                                }
+                                // `settle` has unwrapped these; if one is left, its
+                                // verdict is unknown, so nothing is kept.
+                                PostResult::Incomplete(..) => {
                                     alive = false;
                                     break;
                                 }
@@ -369,6 +392,33 @@ impl Engine {
             found.push((key, ev));
         }
         found.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(found.into_iter().map(|(_, e)| e).collect())
+        Ok(Scan {
+            evidence: found.into_iter().map(|(_, e)| e).collect(),
+            not_read,
+        })
+    }
+}
+
+/// The result of scanning content with [`Engine::scan_content_checked`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scan {
+    pub evidence: Vec<Evidence>,
+    /// Set when a post-processor could not inspect part of the content: the
+    /// first note it gave. The evidence is then a verdict on the rest only.
+    pub not_read: Option<String>,
+}
+
+/// Strip [`PostResult::Incomplete`] wrappers from `result`, recording the
+/// first note in `not_read`, and return the verdict inside.
+fn settle(result: PostResult, not_read: &mut Option<String>) -> PostResult {
+    match result {
+        PostResult::Incomplete(inner, note) => {
+            not_read.get_or_insert(note);
+            settle(*inner, not_read)
+        }
+        verdict @ (PostResult::Keep(_)
+        | PostResult::KeepAll(_)
+        | PostResult::KeepWithShape(..)
+        | PostResult::Drop) => verdict,
     }
 }

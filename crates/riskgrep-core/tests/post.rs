@@ -5,6 +5,7 @@ use riskgrep_core::post::{
     compile_regex, float_arrays, AllowRegex, Entropy, FloatArray, NpyHeader, NpzMembers, Post,
     PostResult, SafetensorsHeader, Span, Stopwords,
 };
+use riskgrep_core::synth;
 use std::io::Write;
 
 fn re(s: &str) -> Regex {
@@ -165,6 +166,63 @@ fn npz(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
         w.write_all(data).unwrap();
     }
     w.finish().unwrap().into_inner()
+}
+
+/// Zero the checksum of member `name` in its central and local headers.
+fn break_crc(data: &mut [u8], name: &str) {
+    let mut at = 0;
+    while let Some(i) = data[at..].windows(4).position(|w| w == b"PK\x01\x02") {
+        let cd = at + i;
+        let len = u16::from_le_bytes([data[cd + 28], data[cd + 29]]) as usize;
+        if &data[cd + 46..cd + 46 + len] == name.as_bytes() {
+            let local = u32::from_le_bytes(data[cd + 42..cd + 46].try_into().unwrap()) as usize;
+            data[cd + 16..cd + 20].fill(0);
+            data[local + 14..local + 18].fill(0);
+            return;
+        }
+        at = cd + 4;
+    }
+    panic!("no member {name}");
+}
+
+#[test]
+fn npz_member_that_cannot_be_read_makes_the_verdict_incomplete() {
+    let p = NpzMembers {
+        min_dim: 64,
+        embedding_dims: Some(vec![192]),
+        exclude_name_regex: None,
+        min_bank: None,
+        min_bank_share: None,
+    };
+    let emb = || synth::npy("<f4", &[2, 192]);
+    let members = [
+        ("a.npy", emb()),
+        ("b.npy", emb()),
+        ("c.txt", b"xyz".to_vec()),
+    ];
+    let clean = synth::npz(&members);
+    assert!(matches!(
+        p.apply(&clean, 0..4),
+        PostResult::KeepWithShape(..)
+    ));
+    // An array that cannot be read: the verdict on the others is carried
+    // along with a note that names its index, not the member.
+    let mut data = clean.clone();
+    break_crc(&mut data, "b.npy");
+    match p.apply(&data, 0..4) {
+        PostResult::Incomplete(inner, note) => {
+            assert!(matches!(*inner, PostResult::KeepWithShape(..)));
+            assert_eq!(note, "npz member 1 could not be read");
+        }
+        other => panic!("{other:?}"),
+    }
+    // A member that is not an array is out of scope.
+    let mut data = clean;
+    break_crc(&mut data, "c.txt");
+    assert!(matches!(
+        p.apply(&data, 0..4),
+        PostResult::KeepWithShape(..)
+    ));
 }
 
 #[test]

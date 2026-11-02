@@ -595,13 +595,11 @@ fn npz_directory_over_budget_is_unscanned() {
         Some("npz central directory not read within 8388608 bytes")
     );
     // The same records with short comments fit the budget: the directory
-    // parses, and the first member (which has no data) is the failure.
+    // parses, and the first member (which has no data) is the first not read.
     let small = hostile_directory(200, 10);
     let c = slice_for_scan(&small, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
-    assert_eq!(
-        c.unscanned.as_deref(),
-        Some("npz member 0 could not be read")
-    );
+    assert_eq!(c.unscanned, None);
+    assert_eq!(c.partial.as_deref(), Some("npz member 0 could not be read"));
 }
 
 /// Offsets of the central and local headers of the member called `name`.
@@ -648,7 +646,7 @@ fn understated_size(data: &mut [u8], cd: usize, local: usize) {
 }
 
 #[test]
-fn npz_over_limit_unreadable_npy_member_is_unscanned() {
+fn npz_over_limit_unreadable_npy_member_is_partial() {
     let limits = Limits {
         text_max: 4096,
         ..Limits::default()
@@ -656,11 +654,13 @@ fn npz_over_limit_unreadable_npy_member_is_unscanned() {
     for damage in [wrong_crc as fn(&mut [u8], usize, usize), understated_size] {
         let data = damaged_npz("bad.npy", damage);
         let c = slice_for_scan(&data, &FileClass::KnownBinary(Known::Npz), &limits).unwrap();
-        assert!(c.bytes.is_empty());
-        let reason = c.unscanned.expect("an unreadable .npy member");
-        assert!(reason.starts_with("npz member"), "{reason}");
-        // The member's name is never put in a reason.
-        assert!(!reason.contains("bad"), "{reason}");
+        assert_eq!(c.unscanned, None);
+        // The member's name is never put in the note.
+        assert_eq!(c.partial.as_deref(), Some("npz member 0 could not be read"));
+        // The readable members are still handed on.
+        let z = zip::ZipArchive::new(std::io::Cursor::new(&c.bytes)).unwrap();
+        let names: Vec<String> = z.file_names().map(|n| n.unwrap().into_owned()).collect();
+        assert_eq!(names, ["alice.npy", "zz_noise.npy"]);
     }
 }
 

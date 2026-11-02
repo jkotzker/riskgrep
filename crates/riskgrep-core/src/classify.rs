@@ -382,9 +382,11 @@ impl<S: ?Sized> Seek for Budgeted<'_, S> {
 /// `*.npy` its first [`NPZ_MEMBER_BYTES`] uncompressed bytes, each read by
 /// offset under a byte budget. The result is a stored zip of those member
 /// prefixes in archive order: everything the `.npz` post-processor reads.
-/// A directory or member over its budget, a directory that does not parse,
-/// and a `.npy` member whose data cannot be read all make the file unscanned. No member name is ever put in
-/// a reason (names may be personal data).
+/// A directory or member over its budget, or a directory that does not parse,
+/// makes the file unscanned. A `.npy` member whose data cannot be read is left
+/// out and the first such member is noted (partial), as the post-processor
+/// does for a file read whole. No member name is ever put in a reason (names
+/// may be personal data).
 fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
     let left = Cell::new(NPZ_DIRECTORY_MAX);
     let over = Cell::new(false);
@@ -404,6 +406,7 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
         }
         _ => return Content::unscanned("npz central directory unreadable".into()),
     };
+    let mut unread: Option<usize> = None;
     let mut out = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
     let stored =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -431,9 +434,10 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
             ));
         }
         // A `.npy` member that cannot be read (a wrong checksum, a size the
-        // data runs past) is data the scan did not see.
+        // data runs past) is data the scan did not see: note the first one.
         let Some(head) = head else {
-            return Content::unscanned(format!("npz member {i} could not be read"));
+            unread.get_or_insert(i);
+            continue;
         };
         let written = out
             .start_file(name, stored)
@@ -444,7 +448,10 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
         }
     }
     match out.finish() {
-        Ok(c) => Content::whole(c.into_inner(), None),
+        Ok(c) => Content::whole(
+            c.into_inner(),
+            unread.map(|i| format!("npz member {i} could not be read")),
+        ),
         Err(_) => Content::unscanned("npz member headers could not be re-encoded".into()),
     }
 }
