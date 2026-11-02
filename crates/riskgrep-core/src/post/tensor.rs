@@ -147,13 +147,34 @@ impl Post for NpzMembers {
         let mut floats = 0u64;
         // Per shape: member count, archive index of the first member, facts.
         let mut banks: BTreeMap<Vec<u64>, (u64, usize, ShapeFacts)> = BTreeMap::new();
+        // Without a bank requirement, the first qualifying member decides.
+        let mut first: Option<ShapeFacts> = None;
+        // The first `.npy` member that could not be read.
+        let mut unread: Option<usize> = None;
         for i in 0..zip.len().min(NPZ_MAX_MEMBERS) {
-            let Ok(file) = zip.by_index(i) else { continue };
-            let Some(name) = file.name().strip_suffix(".npy").map(str::to_string) else {
+            // A member is in scope when its stored name ends in `.npy`; that
+            // comes from the directory, so it holds when the data is damaged.
+            let in_scope = zip
+                .name_for_index(i)
+                .and_then(Result::ok)
+                .is_some_and(|n| n.ends_with(".npy"));
+            if !in_scope {
+                continue;
+            }
+            let Ok(file) = zip.by_index(i) else {
+                unread.get_or_insert(i);
+                continue;
+            };
+            let Some(name) = file
+                .name()
+                .ok()
+                .and_then(|n| n.strip_suffix(".npy").map(str::to_string))
+            else {
                 continue;
             };
             let mut head = Vec::new();
             if file.take(NPZ_MEMBER_BYTES).read_to_end(&mut head).is_err() {
+                unread.get_or_insert(i);
                 continue;
             }
             let Some((dtype, shape)) = npy_float(&head) else {
@@ -171,21 +192,31 @@ impl Post for NpzMembers {
                 name: Some(name),
             };
             if self.min_bank.is_none() {
-                return PostResult::KeepWithShape(m, facts);
+                first.get_or_insert(facts);
+                continue;
             }
             banks.entry(shape).or_insert((0, i, facts)).0 += 1;
         }
-        let Some(min) = self.min_bank else {
-            return PostResult::Drop;
-        };
-        // Archive order: the first member of the earliest qualifying bank.
-        banks
-            .into_values()
-            .filter(|(n, _, _)| bank_qualifies(*n, floats, min, self.min_bank_share))
-            .min_by_key(|(_, first, _)| *first)
-            .map_or(PostResult::Drop, |(_, _, facts)| {
+        let verdict = match self.min_bank {
+            None => first.map_or(PostResult::Drop, |facts| {
                 PostResult::KeepWithShape(m, facts)
-            })
+            }),
+            // Archive order: the first member of the earliest qualifying bank.
+            Some(min) => banks
+                .into_values()
+                .filter(|(n, _, _)| bank_qualifies(*n, floats, min, self.min_bank_share))
+                .min_by_key(|(_, first, _)| *first)
+                .map_or(PostResult::Drop, |(_, _, facts)| {
+                    PostResult::KeepWithShape(m, facts)
+                }),
+        };
+        match unread {
+            Some(i) => PostResult::Incomplete(
+                Box::new(verdict),
+                format!("npz member {i} could not be read"),
+            ),
+            None => verdict,
+        }
     }
 }
 

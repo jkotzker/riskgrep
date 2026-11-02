@@ -29,6 +29,14 @@ pub enum PostResult {
     KeepAll(Vec<Range<usize>>),
     KeepWithShape(Range<usize>, ShapeFacts),
     Drop,
+    /// The processor could not inspect part of the content. The first field
+    /// is its verdict on the part it could inspect, another `PostResult`, so
+    /// anything found there still counts; the string says what was not
+    /// inspected. The engine acts on the verdict as usual and reports the
+    /// target as partial with this note, and nothing derived from the content
+    /// is cached for later runs to take as complete. The note must never hold
+    /// content or the names of members.
+    Incomplete(Box<PostResult>, String),
 }
 
 pub trait Post: Send + Sync {
