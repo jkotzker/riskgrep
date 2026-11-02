@@ -5,8 +5,8 @@ use riskgrep_core::ruleset::Ruleset;
 use std::fs;
 use std::path::{Path, PathBuf};
 use xtask::{
-    can_match_newline, convert_gitleaks, lazy_to_greedy, line_complete, sets_multi_line,
-    steer_atoms, PINNED_TAG,
+    can_match_newline, convert_gitleaks, lazy_to_greedy, line_complete, same_line_value,
+    sets_multi_line, steer_atoms, PINNED_TAG,
 };
 
 fn repo() -> PathBuf {
@@ -144,6 +144,9 @@ fn line_complete_marks_rules_whose_matches_stay_on_one_line() {
         "openai_api_key",
         "anthropic_api_key",
         "stripe_access_token",
+        // Assignment separators without line breaks (same_line_value).
+        "generic_api_key",
+        "adafruit_api_key",
     ] {
         assert!(rule_meta(ident).contains("line_complete = true"), "{ident}");
     }
@@ -151,10 +154,11 @@ fn line_complete_marks_rules_whose_matches_stay_on_one_line() {
         "private_key",
         "kubernetes_secret_yaml",
         "pkcs12_file",
-        "generic_api_key",
         // Whitespace before the secret.
-        "adafruit_api_key",
         "azure_ad_client_secret",
+        // The secret is the first non-empty group of an alternation, so no
+        // part may admit a line feed, and the trailing delimiter does.
+        "atlassian_api_token",
         // The secret is the whole match, trailing delimiter included.
         "sentry_org_token",
     ] {
@@ -374,4 +378,73 @@ fn no_generated_regex_matches_its_own_rule() {
             "{name} matches its own source"
         );
     }
+}
+
+#[test]
+fn value_separator_stays_on_the_line() {
+    let op = r"(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)";
+    let upstream =
+        format!(r#"key[\s'"]{{0,3}}{op}[\x60'"\s=]{{0,5}}([a-z0-9]{{20}})(?:[\x60'"\s;]|$)"#);
+    let (re, changed) = same_line_value(&upstream).unwrap();
+    assert!(changed);
+    assert_eq!(
+        re,
+        format!(r#"key[ \t'"]{{0,3}}{op}[\x60'" \t=]{{0,5}}([a-z0-9]{{20}})(?:[\x60'"\s;]|$)"#)
+    );
+    let rx = regex::Regex::new(&re).unwrap();
+    assert!(rx.is_match("key=\t'abcdefghij0123456789"));
+    assert!(!rx.is_match("key=\nabcdefghij0123456789"));
+    // No assignment operator: nothing to rewrite.
+    let other = r#"\b(abc[0-9]{4})(?:[\x60'"\s;]|$)"#;
+    assert_eq!(same_line_value(other).unwrap(), (other.to_string(), false));
+    // An operator followed by a separator spelled differently is an error,
+    // so a changed upstream template gets reviewed.
+    let respelled = format!(r#"key[\s'"]{{0,3}}{op}[\s\x60'"=]{{0,5}}([a-z0-9]{{20}})"#);
+    assert!(same_line_value(&respelled).is_err());
+
+    // The separator between the name and the operator stays on the line too,
+    // also where a group closes before the operator.
+    let value = r#"[\x60'"\s=]{0,5}([a-z0-9]{20})"#;
+    let same = r#"[\x60'" \t=]{0,5}([a-z0-9]{20})"#;
+    for (name, want) in [
+        (r#"key[\s'"]{0,3}"#, r#"key[ \t'"]{0,3}"#),
+        (r#"(?i:key[\s'"]{0,3})"#, r#"(?i:key[ \t'"]{0,3})"#),
+    ] {
+        let (re, changed) = same_line_value(&format!("{name}{op}{value}")).unwrap();
+        assert!(changed);
+        assert_eq!(re, format!("{want}{op}{same}"));
+        let rx = regex::Regex::new(&re).unwrap();
+        assert!(rx.is_match("key\t'=\tabcdefghij0123456789"));
+        assert!(!rx.is_match("key\n=abcdefghij0123456789"));
+        assert!(!rx.is_match("key\r\n=abcdefghij0123456789"));
+    }
+    let respelled = format!(r#"key[\s"']{{0,3}}{op}{value}"#);
+    assert!(same_line_value(&respelled).is_err());
+}
+
+#[test]
+fn no_generated_value_separator_crosses_a_line() {
+    let d = convert_to_temp();
+    let yar = fs::read_to_string(d.path().join("gitleaks.yar")).unwrap();
+    // Escaped once in `$re` and twice in the `span_regex` string.
+    assert!(!yar.contains(r#"[\x60'"\s=]{0,5}"#));
+    assert!(!yar.contains(r#"[\\x60'\"\\s=]{0,5}"#));
+    assert!(!yar.contains(r#"[\s'"]{0,3}"#));
+    assert!(!yar.contains(r#"[\\s'\"]{0,3}"#));
+    let rewritten = yar
+        .split("\nrule ")
+        .filter(|b| b.contains(r#"[\\x60'\" \\t=]{0,5}"#))
+        .count();
+    let upstream = String::from_utf8(pinned_config()).unwrap();
+    let templated = upstream
+        .lines()
+        .filter(|l| l.starts_with("regex = ") && l.contains(r#"[\x60'"\s=]{0,5}"#))
+        .count();
+    assert!(templated > 0);
+    assert_eq!(rewritten, templated);
+    let md = fs::read_to_string(d.path().join("UPSTREAM.md")).unwrap();
+    assert!(
+        md.contains(&format!("in {templated} rules")),
+        "UPSTREAM.md names the count"
+    );
 }

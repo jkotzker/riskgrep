@@ -76,7 +76,7 @@ Merge the printed fragment into `~/.claude/settings.json` by hand: a `PreToolUse
 
 ## Configuration
 
-Settings are layered: built-in defaults, then `~/.config/riskgrep/config.toml` (both platforms), then the repository's `.riskgrep.toml`, then command-line options. Example:
+Settings are layered: built-in defaults, then `~/.config/riskgrep/config.toml` (both platforms), then the repository's `.riskgrep.toml`, then command-line options. The user configuration is read from `$HOME/.config/riskgrep/config.toml` on both macOS and Linux; `XDG_CONFIG_HOME` is not consulted. Example:
 
 ```toml
 trusted_repos = ["/Users/me/work/project"]
@@ -91,6 +91,8 @@ secret = 85
 [limits]
 walk_files = 20000
 ```
+
+`limits.walk_files` is the most files one directory walk visits (default 10,000); a directory with more is reported unscanned, and the Claude Code hook applies the same limit to the files a `Grep` would search, to directory walks, and to the names a `Glob` or a directory-listing MCP tool would reveal.
 
 Zip archives (and jar, docx, xlsx, and wheel files) are opened and their members scanned like files; findings name the member as `archive.zip!/path/in/archive`. The members of one archive, nested archives included, share these limits, shown with their defaults:
 

@@ -244,6 +244,15 @@ struct Drawn {
 
 const DRAW_PATH: &str = "config/settings.txt";
 
+/// The path to scan drawn findings under: [`DRAW_PATH`], or one that
+/// satisfies a rule's path condition.
+fn draw_path(rule: &str) -> &'static str {
+    match rule {
+        "hashicorp_tf_password" => "config/main.tf",
+        _ => DRAW_PATH,
+    }
+}
+
 /// The `$kw` keywords of `rule` in `rs`'s sources, or `None` when no source
 /// defines the rule.
 fn rule_keywords(rs: &Ruleset, rule: &str) -> Option<Vec<String>> {
@@ -290,7 +299,7 @@ fn draw_finding(rule: &str, span: &str, head: &[u8], base: u64) -> Option<Drawn>
         let at = content.len();
         content.extend_from_slice(&line);
         content.extend_from_slice(b"\n}\n");
-        let ev = scan(DRAW_PATH, &content);
+        let ev = scan(draw_path(rule), &content);
         let Some(e) = ev.iter().find(|e| e.rule == rule) else {
             continue;
         };
@@ -431,7 +440,7 @@ fn every_line_complete_rule_locates_every_secret() {
             continue;
         }
         for l in layouts(&head, &drawn, &compile_regex(span).unwrap()) {
-            let ev = scan(DRAW_PATH, &l.content);
+            let ev = scan(draw_path(rule), &l.content);
             let locs: Vec<(u32, u32)> = ev
                 .iter()
                 .filter(|e| e.rule == *rule)
@@ -450,7 +459,7 @@ fn every_line_complete_rule_locates_every_secret() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
-    assert!(marked.len() >= 111, "{} rules tested", marked.len());
+    assert!(marked.len() >= 211, "{} rules tested", marked.len());
 }
 
 #[test]
@@ -463,15 +472,21 @@ fn line_complete_rules() {
         "slack_bot_token",
         "openai_api_key",
         "stripe_access_token",
+        // Name, operator, and value share a line (#65).
+        "generic_api_key",
+        "adafruit_api_key",
+        "cohere_api_token",
+        "hashicorp_tf_password",
     ] {
         assert!(flag(r), "{r}");
     }
-    // Matches that can span lines, path rules, and binary key stores.
+    // Matches that can span lines, path rules, and binary key stores. An
+    // alternation whose secret is the first non-empty group cannot admit a
+    // line feed anywhere, and atlassian_api_token's trailing delimiter can.
     for r in [
         "private_key",
         "kubernetes_secret_yaml",
-        "generic_api_key",
-        "adafruit_api_key",
+        "atlassian_api_token",
         "pkcs12_file",
         "der_key_file",
         "pkcs12_keystore",
@@ -521,6 +536,106 @@ fn low_entropy_generic() {
     let ev = scan("settings.py", &content);
     assert!(ev.is_empty(), "rules {:?}", rule_ids(&ev));
     assert_eq!(secret_score(&ev), None);
+}
+
+#[test]
+fn value_must_start_on_the_assignment_line() {
+    // An empty `NAME=` does not take the next line as its value (#65).
+    for text in [
+        "DB_PASSWORD=\nINFLUXDB_ORG=\n",
+        "DB_PASSWORD=\nINFLUXDB_ORG=x\n",
+        "DB_PASSWORD=\n\nINFLUXDB_ORG=\n",
+        "DB_PASSWORD=\r\nINFLUXDB_ORG=\r\n",
+        "DB_PASSWORD= \n  INFLUXDB_ORG=\n",
+    ] {
+        let ev = scan(".env.example", text.as_bytes());
+        assert!(ev.is_empty(), "{text:?}: rules {:?}", rule_ids(&ev));
+    }
+    // The same separator in a provider-context rule.
+    let mut rng = synth::Rng::new(11);
+    let value: String = (0..32)
+        .map(|_| b"abcdefghijklmnopqrstuvwxyz0123456789"[(rng.next_u64() % 36) as usize] as char)
+        .collect();
+    let ev = scan(
+        ".env.example",
+        format!("ADAFRUIT_KEY=\n{value}\n").as_bytes(),
+    );
+    assert!(ev.is_empty(), "rules {:?}", rule_ids(&ev));
+    let line = format!("ADAFRUIT_KEY={value}\n");
+    let ev = scan(".env.example", line.as_bytes());
+    assert_span(&ev, "adafruit_api_key", 13..13 + value.len());
+
+    // A value on the assignment's own line, after an empty one, is found.
+    let assignment = synth::fake_secret("generic_api_key_assignment", 7);
+    let value = assignment.split('"').nth(1).unwrap();
+    for sep in ["=", "= ", "=\t", "=\""] {
+        let head = "DB_PASSWORD=\n";
+        let text = format!("{head}API_TOKEN{sep}{value}\n");
+        let start = head.len() + "API_TOKEN".len() + sep.len();
+        let ev = scan(".env.example", text.as_bytes());
+        assert_span(&ev, "generic_api_key", start..start + value.len());
+        assert_score(&ev, 80.0);
+    }
+}
+
+#[test]
+fn name_and_operator_must_share_a_line() {
+    // A name on one line and an operator on the next are not an assignment
+    // (#65): a CSV header ending in a credential name followed by a row that
+    // starts with `,value`, and a name whose `=` or `:` is on the next line.
+    let assignment = synth::fake_secret("generic_api_key_assignment", 7);
+    let value = assignment.split('"').nth(1).unwrap();
+    for text in [
+        format!("user,password\n,{value}\n"),
+        format!("user,password\r\n,{value}\r\n"),
+        format!("user,password \n,{value}\n"),
+        format!("api_token\n= {value}\n"),
+        format!("API_TOKEN\t\n={value}\n"),
+        format!("\"api_token\"\n: \"{value}\"\n"),
+        format!("'api_token'\r\n=> '{value}'\r\n"),
+    ] {
+        let ev = scan("data.csv", text.as_bytes());
+        assert!(ev.is_empty(), "{text:?}: rules {:?}", rule_ids(&ev));
+    }
+    // The same shapes on one line are found.
+    for (text, start) in [
+        (format!("user,password,{value}\n"), 14),
+        (format!("api_token = {value}\n"), 12),
+        (format!("\"api_token\" : \"{value}\"\n"), 15),
+        (format!("API_TOKEN\t={value}\n"), 11),
+    ] {
+        let ev = scan("data.csv", text.as_bytes());
+        assert_span(&ev, "generic_api_key", start..start + value.len());
+    }
+
+    // Provider-context rules share the separator, including those whose
+    // separator closes a group before the operator (cohere).
+    let mut rng = synth::Rng::new(13);
+    let mut draw = |n: usize, alphabet: &[u8]| -> String {
+        (0..n)
+            .map(|_| alphabet[(rng.next_u64() % alphabet.len() as u64) as usize] as char)
+            .collect()
+    };
+    let adafruit = draw(32, b"abcdefghijklmnopqrstuvwxyz0123456789");
+    let cohere = draw(
+        40,
+        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    );
+    for (rule, name, v) in [
+        ("adafruit_api_key", "ADAFRUIT_KEY", &adafruit),
+        ("cohere_api_token", "COHERE_TOKEN", &cohere),
+    ] {
+        let crossing = format!("{name}\n={v}\n");
+        let ev = scan(".env.example", crossing.as_bytes());
+        assert!(
+            !rule_ids(&ev).contains(&rule),
+            "{rule} across a line: rules {:?}",
+            rule_ids(&ev)
+        );
+        let line = format!("{name}={v}\n");
+        let ev = scan(".env.example", line.as_bytes());
+        assert_span(&ev, rule, name.len() + 1..name.len() + 1 + v.len());
+    }
 }
 
 #[test]

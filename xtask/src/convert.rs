@@ -27,11 +27,17 @@ const GLOBAL_STOPWORDS: &str = "secrets_core_global";
 /// A literal prefix at least this long makes a rule provider-specific.
 const MIN_PREFIX: usize = 3;
 
-/// Rules whose weight combines with a hand-written rule in `keystores.yar`:
-/// `(gitleaks id, family, family_cap)`. A `.p12` file with a DER header hits
-/// both `pkcs12-file` (name only) and `pkcs12_keystore`; the family keeps the
-/// pair at the key-store weight.
-const FAMILIES: &[(&str, &str, u32)] = &[("pkcs12-file", "pkcs12", 90)];
+/// Rules whose weight combines with hand-written rules: `(gitleaks id,
+/// family, family_cap)`. A `.p12` file with a DER header hits both
+/// `pkcs12-file` (name only) and `pkcs12_keystore` in `keystores.yar`; the
+/// family keeps the pair at the key-store weight. A credential-named key can
+/// be found by both `generic-api-key` and the rules in `config.yar` (a
+/// `token:` inside `credentials:`); the family keeps one value at 80 instead
+/// of stacking to 96.
+const FAMILIES: &[(&str, &str, u32)] = &[
+    ("pkcs12-file", "pkcs12", 90),
+    ("generic-api-key", "credential_assignment", 80),
+];
 
 /// A local change to one upstream rule: its regex has `find` replaced by
 /// `replace` (exactly once; an upstream regex without `find` is an error, so
@@ -470,6 +476,74 @@ fn apply_local_changes(cfg: &mut Config) -> Result<(), String> {
     Ok(())
 }
 
+/// gitleaks' separator between a name and its assignment operator. `\s`
+/// admits a line feed, so a name could end one line and the operator start
+/// the next, as in a CSV header ending in `password` and a row starting with
+/// `,value`.
+const NAME_SEPARATOR: &str = r#"[\s'"]{0,3}"#;
+/// The same separator without line breaks.
+const SAME_LINE_NAME_SEPARATOR: &str = r#"[ \t'"]{0,3}"#;
+/// gitleaks' separator between an assignment operator and its value. `\s`
+/// admits a line feed, so after an empty `NAME=` the value could be the next
+/// line's text.
+const VALUE_SEPARATOR: &str = r#"[\x60'"\s=]{0,5}"#;
+/// The same separator without line breaks: the value starts on the line of
+/// its assignment.
+const SAME_LINE_SEPARATOR: &str = r#"[\x60'" \t=]{0,5}"#;
+
+/// gitleaks' assignment operators, between the name and value separators.
+const ASSIGNMENT: &str = r"(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)";
+
+/// Rewrites gitleaks' separators on both sides of an assignment operator so
+/// the name, the operator, and the start of the value share a line; returns
+/// the regex and whether it changed. The name separator may be followed by
+/// the `)` of a group that holds the name. A regex whose operator has any
+/// other separator on either side is an error, so a changed upstream
+/// template gets reviewed.
+pub fn same_line_value(re: &str) -> Result<(String, bool), String> {
+    if !re.contains(ASSIGNMENT) {
+        return Ok((re.to_string(), false));
+    }
+    let mut new = re.to_string();
+    for close in ["", ")"] {
+        new = new.replace(
+            &format!("{NAME_SEPARATOR}{close}{ASSIGNMENT}{VALUE_SEPARATOR}"),
+            &format!("{SAME_LINE_NAME_SEPARATOR}{close}{ASSIGNMENT}{SAME_LINE_SEPARATOR}"),
+        );
+    }
+    let rewritten: usize = ["", ")"]
+        .iter()
+        .map(|close| {
+            new.matches(&format!(
+                "{SAME_LINE_NAME_SEPARATOR}{close}{ASSIGNMENT}{SAME_LINE_SEPARATOR}"
+            ))
+            .count()
+        })
+        .sum();
+    if new.matches(ASSIGNMENT).count() != rewritten {
+        return Err(
+            "an assignment operator is not between gitleaks' name and value separators: \
+             review same_line_value against the upstream regex"
+                .into(),
+        );
+    }
+    let changed = new != re;
+    Ok((new, changed))
+}
+
+/// Applies [`same_line_value`] to every rule regex; returns how many changed.
+fn apply_same_line_value(cfg: &mut Config) -> Result<usize, String> {
+    let mut changed = 0;
+    for r in &mut cfg.rules {
+        if let Some(re) = r.regex.as_mut() {
+            let (new, c) = same_line_value(re).map_err(|e| format!("{}: {e}", r.id))?;
+            *re = new;
+            changed += usize::from(c);
+        }
+    }
+    Ok(changed)
+}
+
 /// Applies [`go_to_rust`] to every regex in the configuration.
 fn normalise(cfg: &mut Config) {
     fn list(a: &mut Allowlist) {
@@ -901,6 +975,7 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
     let mut cfg: Config = toml::from_str(text).map_err(|e| format!("gitleaks config: {e}"))?;
     normalise(&mut cfg);
     apply_local_changes(&mut cfg)?;
+    let same_line = apply_same_line_value(&mut cfg)?;
     let sha = Sha256::digest(config)
         .iter()
         .fold(String::new(), |mut s, b| {
@@ -1168,7 +1243,8 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
         yar.push_str(&block);
     }
 
-    let upstream = upstream_md(tag, &sha, &cfg, marked, &classes, &defanged, &skipped);
+    let counts = Counts { marked, same_line };
+    let upstream = upstream_md(tag, &sha, &cfg, counts, &classes, &defanged, &skipped);
     Ok(Generated {
         yar,
         stopwords,
@@ -1176,11 +1252,19 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
     })
 }
 
+/// Rule counts reported in `UPSTREAM.md`.
+struct Counts {
+    /// Rules marked `line_complete`.
+    marked: usize,
+    /// Rules whose assignment separators [`same_line_value`] rewrote.
+    same_line: usize,
+}
+
 fn upstream_md(
     tag: &str,
     sha: &str,
     cfg: &Config,
-    marked: usize,
+    Counts { marked, same_line }: Counts,
     classes: &[(Class, String)],
     defanged: &[String],
     skipped: &[(String, String)],
@@ -1211,8 +1295,9 @@ fn upstream_md(
     writeln!(
         s,
         "- Each rule becomes one YARA-X rule named after the gitleaks id with `-` replaced by `_` (and `_` prepended to an id starting with a digit).\n\
-         - Regexes are read with Go (RE2) syntax: a `{{` that does not start a repetition is escaped for Rust and YARA-X; nothing else changes.\n\
-         - The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The original regex is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret: `secretGroup` when the rule sets it, otherwise as gitleaks does, the first capture group that matched non-empty, else the whole match (`secret_group = \"first_nonempty\"`; `secret_group = 1` when group 1 always takes part and is never empty, which selects the same text).\n\
+         - Regexes are read with Go (RE2) syntax: a `{{` that does not start a repetition is escaped for Rust and YARA-X; no other syntax changes.\n\
+         - The separators on both sides of an assignment operator lose their line breaks in {same_line} rules: `[\\s'\"]{{0,3}}` between the name and the operator becomes `[ \\t'\"]{{0,3}}`, and `[\\x60'\"\\s=]{{0,5}}` between the operator and the value becomes `[\\x60'\" \\t=]{{0,5}}`, so the name, the operator, and the start of the value share a line. With `\\s`, an empty `NAME=` took the next line's text as its value, which flagged files that list names with empty values (`.env.example`), and a CSV header ending in a credential name took the next row's first field as its value.\n\
+         - The regex is the anchor `$re`, with lazy quantifiers rewritten as greedy (YARA-X refuses mixed greediness). The regex as changed above is kept as `span_regex`; the `span` post-processor re-runs it inside each match to find the secret: `secretGroup` when the rule sets it, otherwise as gitleaks does, the first capture group that matched non-empty, else the whole match (`secret_group = \"first_nonempty\"`; `secret_group = 1` when group 1 always takes part and is never empty, which selects the same text).\n\
          - In `$re` only, a repetition of 4 or more over a class of at most 11 characters with no letters (`[0-9]{{11}}`, `\\d{{15,16}}`) is written `(?:RUN|$^)`. YARA-X otherwise searches for every 4-digit string in place of the rule's literal prefix, which made digit-dense text scan as slowly as 0.8 MB/s. Without multi-line mode `$^` matches only an empty input and no converted regex matches the empty string, so `$re` matches exactly what it did. A regex that sets multi-line mode (an inline flag group containing `m`) is not rewritten, because `$^` also matches between lines there; the rule is listed under Not translated.\n\
          - The `span` post-processor reports every non-overlapping match of `span_regex` inside each `$re` match, so a match that runs over several secrets yields one location per secret.\n\
          - `line_complete = true` is set when every match of `span_regex` stays on the line of its secret. When the secret is one capture group (`secret_group` 1 or more) inside a top-level element of the regex, nothing up to the end of that element may match a line feed, and the rest of the regex either cannot match one or is one element whose every alternative that can is at most one byte long, such as gitleaks' trailing delimiter `(?:[\\x60'\"\\s;]|\\\\[nr]|$)`. Otherwise (`secret_group = 0` or `\"first_nonempty\"`) no part of `span_regex` may match a line feed. Any literal or class that admits one counts, including `\\s`, `\\W`, `\\D`, negated classes, `[\\s\\S]`, dot-all `.`, `[[:space:]]`, and `\\n` or `\\x0a`. A line feed can then only be the last byte of a match, which belongs to the line it ends; the search for the next match resumes at the start of the following line, and since nothing before a secret can match a line feed, no later match needs that byte. With one location per secret (above), the locations cover every secret, each on one line, and the Claude Code hook offers partial reads only for files whose findings all come from such rules. {marked} of the {} rules are marked; `cargo test -p riskgrep-core --test ruleset_secrets every_line_complete_rule_locates_every_secret` checks each of them with generated secrets on one line, on adjacent lines, with CRLF line endings, and at the end of a file without a final line feed.\n\
@@ -1270,7 +1355,8 @@ fn upstream_md(
         s,
         "\nA rule is \"fixed provider prefix\" when every match of its secret starts with a literal of at least {MIN_PREFIX} bytes (for example `ghp_`). \
          `private-key` and `pkcs12-file` are private keys; ids starting `generic` are generic; the rest are \"provider context\" (a provider name near a value). \
-         `pkcs12-file` is in family `pkcs12` with cap 90, shared with `pkcs12_keystore` in `keystores.yar`.\n"
+         `pkcs12-file` is in family `pkcs12` with cap 90, shared with `pkcs12_keystore` in `keystores.yar`; \
+         `generic-api-key` is in family `credential_assignment` with cap 80, shared with the rules in `config.yar`.\n"
     )
     .unwrap();
 

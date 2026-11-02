@@ -106,6 +106,30 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "opvault",
 ];
 
+/// Credentials in configuration files, recognised by the name of the XML
+/// element, JSON object, or YAML mapping that holds them (`config.yar`):
+/// `(eval kind, synth::credential_file kind, file name)`. Gated with the
+/// generic secrets.
+pub const CONFIG_CREDENTIAL_KINDS: &[(&str, &str, &str)] = &[
+    ("config_xml", "config_xml_credential", "config.xml"),
+    (
+        "config_json_object",
+        "config_json_credential_object",
+        "settings.json",
+    ),
+    (
+        "config_yaml_mapping",
+        "config_yaml_credential_mapping",
+        "settings.yaml",
+    ),
+    ("config_dotnet", "config_dotnet_app_settings", "web.config"),
+    (
+        "config_key_hex",
+        "config_key_hex_low_entropy",
+        "settings.conf",
+    ),
+];
+
 /// Probe sets (reported, not gated).
 pub const PROBE_KINDS: &[&str] = &[
     "probe_npy_offlist_width",
@@ -478,6 +502,11 @@ fn credential_files(out: &mut Vec<Sample>) {
         ("recovery_few_codes", "recovery-codes.txt"),
         ("recovery_large_document", "notes.md"),
         ("recovery_source_like", "backup_codes.py"),
+        ("config_xml_non_secret", "config.xml"),
+        ("config_json_non_secret", "settings.json"),
+        ("config_yaml_non_secret", "settings.yaml"),
+        ("config_dotnet_non_secret", "web.config"),
+        ("config_key_hex_non_secret", "settings.yaml"),
     ];
     for (k, name) in near_misses {
         for i in 0..3 {
@@ -536,6 +565,12 @@ fn generic_secrets(out: &mut Vec<Sample>) {
             ),
         };
         out.push(sample(Group::Generic, "generic_api_key", name, text));
+    }
+    for (kind, file, name) in CONFIG_CREDENTIAL_KINDS {
+        for i in 0..PER_FORMAT {
+            let bytes = synth::credential_file(file, 4100 + i as u64);
+            out.push(sample(Group::Generic, kind, name.to_string(), bytes));
+        }
     }
 }
 
@@ -1656,6 +1691,9 @@ pub fn shortfalls(c: &[Sample]) -> Vec<String> {
         n(Group::Generic, "generic_api_key"),
         GENERIC,
     );
+    for (k, _, _) in CONFIG_CREDENTIAL_KINDS {
+        need(format!("generic {k}"), n(Group::Generic, k), PER_FORMAT);
+    }
     for k in BIOMETRIC_KINDS {
         need(format!("biometric {k}"), n(Group::Biometric, k), PER_FORMAT);
     }
