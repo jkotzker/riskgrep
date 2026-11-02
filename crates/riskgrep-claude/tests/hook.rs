@@ -1433,3 +1433,17 @@ fn a_file_read_whole_or_for_its_header_alone_gets_no_partial_decision() {
         assert!(!reason.contains("could not scan"), "{name}: {reason}");
     }
 }
+
+#[test]
+fn an_archive_of_only_unknown_binaries_follows_on_skipped() {
+    let e = Env::new();
+    let f = e.write(
+        "b.zip",
+        &synth::zip(&[("blob", vec![0u8, 1, 2, 3, 0xff, 0xfe])]),
+    );
+    assert_eq!(read_decision(&e, &f, None, None).0, "none");
+    e.user_config("[claude_code]\non_skipped = \"ask\"\n");
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "ask", "{reason}");
+    assert!(reason.contains("unknown format"), "{reason}");
+}

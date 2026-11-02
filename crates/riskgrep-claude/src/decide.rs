@@ -47,7 +47,8 @@ fn severity(a: Action) -> Option<Sev> {
     match a {
         Action::Allow => None,
         Action::Ask => Some(Sev::Ask),
-        Action::Deny | Action::Block => Some(Sev::Deny),
+        // `Deny`, `Block`, and any action added later: refuse rather than pass.
+        _ => Some(Sev::Deny),
     }
 }
 
@@ -843,7 +844,7 @@ mod tests {
     /// A zip target whose `members` hold `secret` evidence, with member
     /// scores in its member table.
     fn zip_target(members: &[(&str, f64)], status: TargetStatus) -> TargetReport {
-        use riskgrep_core::model::{ContainerReport, MemberKind, MemberReport};
+        use riskgrep_core::model::{ContainerReport, MemberReport};
         let evidence = members
             .iter()
             .map(|(m, _)| {
@@ -867,7 +868,6 @@ mod tests {
                 .iter()
                 .map(|(m, score)| MemberReport {
                     path: m.to_string(),
-                    kind: MemberKind::File,
                     status: TargetStatus::Scanned,
                     scores: BTreeMap::from([(Category("secret".into()), *score)]),
                 })

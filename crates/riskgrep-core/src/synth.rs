@@ -265,6 +265,7 @@ fn dtype_bytes(dtype: &str) -> u64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FloatStyle {
     /// `[0.123456, -0.234567, ...]`
     PythonList,

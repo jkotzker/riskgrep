@@ -29,6 +29,7 @@ pub const BASELINE_FILE: &str = ".riskgrep-baseline.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Action {
     Allow,
     Ask,
@@ -45,6 +46,7 @@ pub enum Action {
 /// own. It adds to what the part read scores and never lowers that decision.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum OnPartial {
     #[default]
     Error,
@@ -149,6 +151,7 @@ pub struct Overrides {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Mode {
     Cli,
     Git,
@@ -571,6 +574,7 @@ pub fn baseline_path(mode: Mode, repo_root: Option<&Path>, cfg: &Config) -> Opti
 /// What an MCP tool does with the paths its input names.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum McpKind {
     /// Reads each named file; a directory or missing path reads nothing.
     #[default]

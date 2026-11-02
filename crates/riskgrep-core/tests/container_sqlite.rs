@@ -375,7 +375,7 @@ fn text(seed: &mut u64, n: usize) -> String {
 
 #[test]
 fn regions_hold_what_the_engine_reads_at_every_page_size_and_encoding() {
-    for page in [512u32, 1024, 4096, 65536] {
+    for page in [512u32, 1024, 2048, 4096, 8192, 16384, 32768, 65536] {
         for encoding in ["UTF-8", "UTF-16le", "UTF-16be"] {
             for vacuum in ["NONE", "FULL"] {
                 let d = tempfile::tempdir().unwrap();

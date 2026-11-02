@@ -27,6 +27,7 @@ impl std::error::Error for MetaError {}
 /// compiled by the scan engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "post", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
 pub enum PostSpec {
     Span {
         regex: String,

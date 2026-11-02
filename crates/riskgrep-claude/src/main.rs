@@ -290,6 +290,8 @@ fn mcp_job(hook: &HookInput, cc: &config::ClaudeCodeConfig, cwd: &Path) -> Resul
             glob: None,
             max_depth: tool.max_depth,
         },
+        // A kind this build does not know cannot be resolved to paths.
+        _ => return Err(()),
     }))
 }
 

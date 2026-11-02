@@ -13,6 +13,7 @@ use std::time::Duration;
 
 /// Binary formats whose structure is understood well enough to read selectively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Known {
     Npy,
     Npz,
@@ -23,6 +24,7 @@ pub enum Known {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FileClass {
     Text,
     /// UTF-16 or UTF-32 text, transcoded to UTF-8 for the scan engine.

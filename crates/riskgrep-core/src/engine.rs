@@ -13,6 +13,7 @@ use std::ops::Range;
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ScanError {
     Timeout,
     Yara(String),

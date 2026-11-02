@@ -40,6 +40,7 @@ pub struct Location {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum ShapeFacts {
     Tensor {
         dtype: String,
@@ -81,6 +82,7 @@ pub struct Evidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TargetStatus {
     Scanned,
     Partial { not_read: String },
@@ -157,18 +159,10 @@ pub struct ContainerReport {
     pub listed: Vec<MemberReport>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemberKind {
-    /// An archive entry: the bytes of a file, read like a file on disk.
-    File,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MemberReport {
     /// Path inside the container, as in [`Evidence::member`].
     pub path: String,
-    pub kind: MemberKind,
     #[serde(flatten)]
     pub status: TargetStatus,
     /// The member's own scores, for display; the container's scores cover

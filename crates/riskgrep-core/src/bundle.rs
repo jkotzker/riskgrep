@@ -234,6 +234,7 @@ fn private_file(file: &Path) -> bool {
 /// What [`load_or_compile_keyed`] does with the rule-metadata sidecar of a
 /// bundle read from the cache (a compiled bundle always writes one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Sidecar {
     /// Parse it and rewrite it when it does not load.
     Validate,

@@ -112,7 +112,8 @@ fn note_stdin_cut(r: &mut Report) {
             r.summary.partial += 1;
         }
         TargetStatus::Partial { not_read } => *not_read = format!("{not_read}, {beyond}"),
-        TargetStatus::Skipped { .. } | TargetStatus::Unscanned { .. } => {}
+        // `skipped` and `unscanned` already say the content was not read.
+        _ => {}
     }
 }
 

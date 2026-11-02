@@ -13,8 +13,7 @@ use crate::container::{self, Cause, Extracted, Extractor, Unread};
 use crate::engine::{Engine, ScanError};
 use crate::meta::RuleMeta;
 use crate::model::{
-    Category, ContainerReport, Evidence, MemberKind, MemberReport, Report, TargetReport,
-    TargetStatus,
+    Category, ContainerReport, Evidence, MemberReport, Report, TargetReport, TargetStatus,
 };
 use crate::ruleset::{builtin_rulesets, Ruleset};
 use crate::score::{score_container, score_target};
@@ -117,6 +116,28 @@ struct ContainerInfo {
     unread: Vec<Unread>,
 }
 
+impl ContainerInfo {
+    /// Members were counted, none was scanned, and every one is a skipped
+    /// file or a nested container of them. Only meaningful for a container
+    /// with nothing unread.
+    fn all_skipped(&self) -> bool {
+        self.counts.scanned == 0 && self.read_in_part == 0 && self.counts.skipped > 0
+    }
+
+    fn report(self, listed: Vec<MemberReport>) -> ContainerReport {
+        ContainerReport {
+            format: self.counts.format,
+            members: self.counts.members,
+            scanned: self.counts.scanned,
+            read_in_part: self.read_in_part,
+            skipped: self.counts.skipped,
+            not_read: self.not_read,
+            opened: self.opened,
+            listed,
+        }
+    }
+}
+
 impl Raw {
     fn status(target: String, status: TargetStatus) -> Raw {
         Raw {
@@ -129,6 +150,19 @@ impl Raw {
             container: None,
             read_failed: false,
         }
+    }
+
+    /// A container read whole with nothing in it scanned: it is what a lone
+    /// file of its members' kind would be, so `on_skipped` applies.
+    fn all_skipped(target: String, info: ContainerInfo) -> Raw {
+        let mut raw = Raw::status(
+            target,
+            TargetStatus::Skipped {
+                reason: container::ALL_SKIPPED.to_string(),
+            },
+        );
+        raw.container = Some(info);
+        raw
     }
 
     /// A target answered from the cache.
@@ -144,6 +178,10 @@ impl Raw {
             counts,
             unread: Vec::new(),
         });
+        let container = match container {
+            Some(info) if info.all_skipped() => return Raw::all_skipped(target, info),
+            other => other,
+        };
         Raw {
             target,
             status: TargetStatus::Scanned,
@@ -1035,14 +1073,18 @@ impl RiskGrep {
                 }
             }
         }
-        let mut raw = Raw::scanned(p.target, p.rel, status, ev_all, false);
-        raw.container = Some(ContainerInfo {
+        let info = ContainerInfo {
             counts,
             read_in_part: in_part.len() as u64,
             not_read,
             opened: x.opened,
             unread,
-        });
+        };
+        if status == TargetStatus::Scanned && info.all_skipped() {
+            return Raw::all_skipped(p.target, info);
+        }
+        let mut raw = Raw::scanned(p.target, p.rel, status, ev_all, false);
+        raw.container = Some(info);
         raw
     }
 
@@ -1149,6 +1191,8 @@ impl RiskGrep {
         };
         let info = raw.container;
         if !raw.content {
+            // A skipped container keeps its counts; it has nothing to list.
+            t.container = info.map(|i| i.report(Vec::new()));
             return t;
         }
         let sm = match &self.meta {
@@ -1226,7 +1270,6 @@ impl RiskGrep {
                 .map_or(TargetStatus::Scanned, unread_status);
             listed.push(MemberReport {
                 path: path.to_string(),
-                kind: MemberKind::File,
                 status,
                 scores: zero(score_target(ev, meta)),
             });
@@ -1238,22 +1281,12 @@ impl RiskGrep {
             }
             listed.push(MemberReport {
                 path: path.clone(),
-                kind: MemberKind::File,
                 status: unread_status(u),
                 scores: zero(BTreeMap::new()),
             });
         }
         listed.truncate(container::LISTED_MAX);
-        ContainerReport {
-            format: info.counts.format,
-            members: info.counts.members,
-            scanned: info.counts.scanned,
-            read_in_part: info.read_in_part,
-            skipped: info.counts.skipped,
-            not_read: info.not_read,
-            opened: info.opened,
-            listed,
-        }
+        info.report(listed)
     }
 }
 

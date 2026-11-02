@@ -22,6 +22,7 @@ pub use tensor::{NpyHeader, NpzMembers, SafetensorsHeader};
 pub use words::Stopwords;
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum PostResult {
     Keep(Range<usize>),
     /// Several ranges, each continuing through the rest of the chain on its
