@@ -25,6 +25,7 @@ fn ev(rule: &str, secrets: &[(&str, u64)]) -> Evidence {
             .map(|(s, _)| *blake3::hash(s.as_bytes()).as_bytes())
             .collect(),
         line_complete: false,
+        member: None,
     }
 }
 
@@ -36,6 +37,8 @@ fn target(path: &str, evidence: Vec<Evidence>) -> TargetReport {
         evidence,
         suppressed: 0,
         text: true,
+        container: None,
+        unseen: false,
     }
 }
 
@@ -200,4 +203,64 @@ fn load_rejects_bad_files() {
     std::fs::write(&p, r#"{"version":1,"key":"zz","fingerprints":[]}"#).unwrap();
     assert!(Baseline::load(&p).is_err());
     assert!(Baseline::load(&dir.path().join("missing.json")).is_err());
+}
+
+fn in_member(member: &str, mut e: Evidence) -> Evidence {
+    e.member = Some(member.into());
+    e
+}
+
+#[test]
+fn member_evidence_is_ignored_by_container_or_member_globs() {
+    let s = fake_secret("aws_access_key", 1);
+    let t = || {
+        target(
+            "fixtures/backup.zip",
+            vec![
+                in_member("config/.env", ev("aws_access_token", &[(&s, 1)])),
+                in_member("src/app.py", ev("aws_access_token", &[(&s, 2)])),
+            ],
+        )
+    };
+    // A glob on the container covers every member.
+    let mut ts = [t()];
+    apply(&mut ts, &rules(&["fixtures/*.zip"], &[]), None, ident);
+    assert!(ts[0].evidence.is_empty());
+    assert_eq!(ts[0].suppressed, 2);
+    // A glob on a joined member path covers that member only.
+    let mut ts = [t()];
+    apply(
+        &mut ts,
+        &rules(&["**/backup.zip!/config/**"], &[]),
+        None,
+        ident,
+    );
+    assert_eq!(ts[0].evidence.len(), 1);
+    assert_eq!(ts[0].evidence[0].member.as_deref(), Some("src/app.py"));
+}
+
+#[test]
+fn member_evidence_is_baselined_under_the_joined_path() {
+    let s = fake_secret("aws_access_key", 2);
+    let t = |member: &str| {
+        target(
+            "backup.zip",
+            vec![in_member(member, ev("aws_access_token", &[(&s, 1)]))],
+        )
+    };
+    let b = Baseline::create(&[t("config/.env")], ident).unwrap();
+    let digest = blake3::hash(s.as_bytes());
+    assert!(b.fingerprints.contains(&fingerprint(
+        &b.key,
+        "aws_access_token",
+        "backup.zip!/config/.env",
+        Some(digest.as_bytes())
+    )));
+    let mut same = [t("config/.env")];
+    apply(&mut same, &IgnoreRules::default(), Some(&b), ident);
+    assert!(same[0].evidence.is_empty());
+    // The same value in another member is a new finding.
+    let mut moved = [t("other/.env")];
+    apply(&mut moved, &IgnoreRules::default(), Some(&b), ident);
+    assert_eq!(moved[0].evidence.len(), 1);
 }

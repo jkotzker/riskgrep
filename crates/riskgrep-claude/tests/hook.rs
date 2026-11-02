@@ -1290,3 +1290,19 @@ fn no_partial_read_for_utf16_be_text() {
     assert!(!reason.contains(" on line"), "{reason}");
     assert_eq!(read_decision(&e, &f, Some(20), Some(5)).0, "deny");
 }
+
+#[test]
+fn an_unreadable_npz_member_follows_on_partial() {
+    let e = Env::new();
+    e.user_config("[claude_code]\ntime_budget_ms = 600000\n");
+    let f = e.write("m.npz", &synth::npz_with_unreadable_member());
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "ask");
+    assert!(
+        reason.contains("could not scan part of ")
+            && reason.contains("npz member 0 could not be read"),
+        "{reason}"
+    );
+    e.user_config("[claude_code]\ntime_budget_ms = 600000\non_partial = \"allow\"\n");
+    e.run("Read", json!({ "file_path": f })).silent();
+}

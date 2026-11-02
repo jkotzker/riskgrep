@@ -1715,6 +1715,7 @@ name = "riskgrep-core"
 version = "1.1.0"
 dependencies = [
  "blake3",
+ "flate2",
  "getrandom",
  "globset",
  "include_dir",

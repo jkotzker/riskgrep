@@ -196,3 +196,39 @@ pub fn score_target(
         .collect();
     score(&contribs)
 }
+
+/// Scores of a container: its members' evidence merged by rule, as if the
+/// container were one file holding everything its members hold, then
+/// scored like [`score_target`]. Located evidence of one rule adds its
+/// counts across members; location-free evidence of one rule (path and
+/// condition-only rules, which can fire on every member because member
+/// paths share the container's path) counts once, however many members it
+/// fired on.
+pub fn score_container(
+    evidence: &[Evidence],
+    meta: &HashMap<String, RuleMeta>,
+) -> BTreeMap<Category, f64> {
+    let mut merged: Vec<Evidence> = Vec::new();
+    // Per merged rule: summed located count, largest location-free count.
+    let mut counts: Vec<(u32, u32)> = Vec::new();
+    for e in evidence {
+        let i = match merged.iter().position(|m| m.rule == e.rule) {
+            Some(i) => i,
+            None => {
+                merged.push(e.clone());
+                counts.push((0, 0));
+                merged.len() - 1
+            }
+        };
+        let c = &mut counts[i];
+        if e.locations.is_empty() {
+            c.1 = c.1.max(e.count);
+        } else {
+            c.0 = c.0.saturating_add(e.count);
+        }
+    }
+    for (m, (located, free)) in merged.iter_mut().zip(counts) {
+        m.count = located.saturating_add(free);
+    }
+    score_target(&merged, meta)
+}

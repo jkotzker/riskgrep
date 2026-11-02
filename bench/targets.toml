@@ -10,6 +10,10 @@ p95_ms = 5.0
 description = "riskgrep-claude Read, uncached text file of 64 KB (evidence cache wiped before each run)"
 p95_ms = 15.0
 
+[case.claude_read_zip_uncached]
+description = "riskgrep-claude Read, uncached zip of 100 text members, about 1 MiB uncompressed (evidence cache wiped before each run)"
+p95_ms = 25.0
+
 [case.scan_stdin_4kb]
 description = "riskgrep scan - with 4 KB on standard input"
 p95_ms = 15.0

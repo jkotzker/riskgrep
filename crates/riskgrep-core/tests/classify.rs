@@ -2,6 +2,7 @@ use riskgrep_core::classify::{
     classify, classify_sized, read_for_scan, safetensors_header_fits, slice_for_scan, FileClass,
     Known, Limits, Tail, KEY_STORE_MAX,
 };
+use riskgrep_core::container::ContainerKind;
 use riskgrep_core::synth;
 use std::fs::File;
 use std::io::Write;
@@ -38,7 +39,10 @@ fn npy_magic() {
 #[test]
 fn zip_and_npz() {
     let h = pad(b"PK\x03\x04".to_vec(), 32);
-    assert_eq!(classify("a.zip", &h), FileClass::Archive("zip"));
+    assert_eq!(
+        classify("a.zip", &h),
+        FileClass::Container(ContainerKind::Zip)
+    );
     assert_eq!(classify("a.npz", &h), FileClass::KnownBinary(Known::Npz));
     assert_eq!(classify("A.NPZ", &h), FileClass::KnownBinary(Known::Npz));
 }
@@ -182,23 +186,26 @@ fn key_stores() {
 fn archives_by_magic() {
     assert_eq!(
         classify("x", &pad(b"%PDF-1.7".to_vec(), 64)),
-        FileClass::Archive("pdf")
+        FileClass::Container(ContainerKind::Pdf)
     );
     assert_eq!(
         classify("x", &pad(b"SQLite format 3\0".to_vec(), 64)),
-        FileClass::Archive("sqlite")
+        FileClass::Container(ContainerKind::Sqlite)
     );
     assert_eq!(
         classify("x", &pad(vec![0x1F, 0x8B, 8, 0], 64)),
-        FileClass::Archive("gzip")
+        FileClass::Container(ContainerKind::Gzip)
     );
     assert_eq!(
         classify("x", &pad(vec![0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C], 64)),
-        FileClass::Archive("7z")
+        FileClass::Container(ContainerKind::SevenZ)
     );
     let mut tar = vec![b'a'; 512];
     tar[257..262].copy_from_slice(b"ustar");
-    assert_eq!(classify("x", &tar), FileClass::Archive("tar"));
+    assert_eq!(
+        classify("x", &tar),
+        FileClass::Container(ContainerKind::Tar)
+    );
 }
 
 #[test]
@@ -704,7 +711,7 @@ fn npz_over_limit_with_many_members_reads_them_all() {
 fn other_classes_read_nothing() {
     let (_t, f) = temp_with(b"PK\x03\x04abcd");
     for class in [
-        FileClass::Archive("zip"),
+        FileClass::Container(ContainerKind::Zip),
         FileClass::Image("png"),
         FileClass::UnknownBinary,
     ] {

@@ -785,3 +785,26 @@ fn pre_commit_prunes_the_cache_at_most_once_a_day() {
     run(&r);
     assert!(!stale.exists());
 }
+
+#[test]
+fn an_unreadable_npz_member_follows_on_partial() {
+    let r = Repo::new();
+    r.write("m.npz", synth::npz_with_unreadable_member());
+    r.stage("m.npz");
+    r.pre_commit()
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "riskgrep: m.npz: partial (npz member 0 could not be read)",
+        ));
+    r.write(".riskgrep.toml", "[git]\non_partial = \"allow\"\n");
+    r.pre_commit().assert().code(0);
+}
+
+#[test]
+fn a_sampled_text_file_does_not_follow_on_partial() {
+    let r = Repo::new();
+    r.write("big.txt", big_text());
+    r.stage("big.txt");
+    r.pre_commit().assert().code(0);
+}

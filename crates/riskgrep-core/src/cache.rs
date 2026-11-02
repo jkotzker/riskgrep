@@ -20,7 +20,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Version 2 drops pre-release rows that could hold tensor names. Version 3
 /// adds the time an `evidence` row was written, which pruning needs.
-const SCHEMA_VERSION: i64 = 3;
+/// Version 4 stores each row as an object that can also describe a
+/// container's members, and evidence that names its member.
+const SCHEMA_VERSION: i64 = 4;
 const DB_NAME: &str = "evidence.sqlite";
 /// A stat entry written less than this long after the file's mtime may predate
 /// a further edit within the same timestamp granularity; it is not trusted.
@@ -51,12 +53,37 @@ impl StatKey {
     }
 }
 
-/// Row payload. `Evidence` skips its fingerprints when serialized, so they are
-/// carried alongside as hex.
+/// One evidence item of a row. `Evidence` skips its fingerprints when
+/// serialized, so they are carried alongside as hex.
 #[derive(Serialize, Deserialize)]
 struct CachedEvidence {
     evidence: Evidence,
     fingerprints: Vec<String>,
+}
+
+/// Row payload.
+#[derive(Serialize, Deserialize)]
+struct Row {
+    evidence: Vec<CachedEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container: Option<ContainerRow>,
+}
+
+/// Member counts of a container read whole (only those are cached): member
+/// names live in its evidence, never anything a member holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerRow {
+    pub format: String,
+    pub members: u64,
+    pub scanned: u64,
+    pub skipped: u64,
+}
+
+/// A cached scan result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry {
+    pub evidence: Vec<Evidence>,
+    pub container: Option<ContainerRow>,
 }
 
 pub struct Cache {
@@ -296,6 +323,12 @@ impl Cache {
     /// Cached evidence for (`hash`, `bundle`); `None` on a miss or an
     /// unreadable row.
     pub fn evidence(&self, hash: [u8; 32], bundle: &str) -> Option<Vec<Evidence>> {
+        self.entry(hash, bundle).map(|e| e.evidence)
+    }
+
+    /// The cached result for (`hash`, `bundle`); `None` on a miss or an
+    /// unreadable row.
+    pub fn entry(&self, hash: [u8; 32], bundle: &str) -> Option<Entry> {
         if self.failed.get() {
             return None;
         }
@@ -315,14 +348,16 @@ impl Cache {
                 return None;
             }
         };
-        let rows: Vec<CachedEvidence> = match serde_json::from_str(&json) {
+        let row: Row = match serde_json::from_str(&json) {
             Ok(r) => r,
             Err(_) => {
                 self.warn("read", "stored evidence is unreadable");
                 return None;
             }
         };
-        rows.into_iter()
+        let container = row.container;
+        row.evidence
+            .into_iter()
             .map(|c| {
                 let fps = c
                     .fingerprints
@@ -338,6 +373,10 @@ impl Cache {
                 self.warn("read", "stored fingerprints are unreadable");
                 None
             })
+            .map(|evidence| Entry {
+                evidence,
+                container,
+            })
     }
 
     pub fn put_evidence(&self, hash: [u8; 32], bundle: &str, ev: &[Evidence]) {
@@ -348,20 +387,46 @@ impl Cache {
     /// written. The time is set only here, on a miss; a cache hit never
     /// writes, so the Claude Code hook's cached-read path stays read-only.
     pub fn put_evidence_at(&self, hash: [u8; 32], bundle: &str, ev: &[Evidence], now: SystemTime) {
+        self.put_entry_at(hash, bundle, ev, None, now);
+    }
+
+    /// [`Cache::put_evidence`] for a container read whole, with its member
+    /// counts.
+    pub fn put_entry(
+        &self,
+        hash: [u8; 32],
+        bundle: &str,
+        ev: &[Evidence],
+        container: Option<&ContainerRow>,
+    ) {
+        self.put_entry_at(hash, bundle, ev, container, SystemTime::now());
+    }
+
+    fn put_entry_at(
+        &self,
+        hash: [u8; 32],
+        bundle: &str,
+        ev: &[Evidence],
+        container: Option<&ContainerRow>,
+        now: SystemTime,
+    ) {
         if self.failed.get() {
             return;
         }
         let Ok(written) = i64::try_from(ns_since_epoch(now)) else {
             return;
         };
-        let rows: Vec<CachedEvidence> = ev
-            .iter()
-            .map(|e| CachedEvidence {
-                fingerprints: e.fingerprints.iter().map(hex).collect(),
-                evidence: e.clone(),
-            })
-            .collect();
-        let json = match serde_json::to_string(&rows) {
+        let row = Row {
+            evidence: ev
+                .iter()
+                .map(|e| CachedEvidence {
+                    fingerprints: e.fingerprints.iter().map(hex).collect(),
+                    evidence: e.clone(),
+                })
+                .collect(),
+            container: container.cloned(),
+        };
+        let json = match serde_json::to_string(&row) {
             Ok(j) => j,
             Err(_) => {
                 self.warn("write", "evidence could not be encoded");

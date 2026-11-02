@@ -36,6 +36,36 @@ pub enum Action {
     Block,
 }
 
+/// What a target does when part of its content could not be read, as with a
+/// container's unread members or an `.npz`'s unreadable member (`on_partial`;
+/// a file read in part by design is not affected): `error` applies the
+/// integration's `on_error` action, as for a target that could not be
+/// scanned; the other values are actions of their own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnPartial {
+    #[default]
+    Error,
+    Allow,
+    Ask,
+    Deny,
+    Block,
+}
+
+impl OnPartial {
+    /// The action for a target with content that could not be read, given
+    /// `on_error`.
+    pub fn action(self, on_error: Action) -> Action {
+        match self {
+            OnPartial::Error => on_error,
+            OnPartial::Allow => Action::Allow,
+            OnPartial::Ask => Action::Ask,
+            OnPartial::Deny => Action::Deny,
+            OnPartial::Block => Action::Block,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Threshold {
@@ -48,6 +78,8 @@ pub struct ClaudeCodeConfig {
     pub thresholds: BTreeMap<Category, Threshold>,
     pub on_error: Action,
     pub on_skipped: Action,
+    /// A target with content that could not be read (see [`OnPartial`]).
+    pub on_partial: OnPartial,
     pub on_unresolved: Action,
     pub time_budget_ms: u64,
     /// MCP tools whose input names files, keyed by tool name (see
@@ -60,6 +92,8 @@ pub struct GitConfig {
     pub block_at: BTreeMap<Category, f64>,
     pub on_error: Action,
     pub on_skipped: Action,
+    /// A target with content that could not be read (see [`OnPartial`]).
+    pub on_partial: OnPartial,
     pub full_files: bool,
 }
 
@@ -151,6 +185,7 @@ impl Default for Config {
                 ]),
                 on_error: Action::Ask,
                 on_skipped: Action::Allow,
+                on_partial: OnPartial::Error,
                 on_unresolved: Action::Allow,
                 time_budget_ms: 2000,
                 mcp_tools: default_mcp_tools(),
@@ -159,6 +194,7 @@ impl Default for Config {
                 block_at: BTreeMap::from([(cat("secret"), 80.0), (cat("biometric"), 75.0)]),
                 on_error: Action::Block,
                 on_skipped: Action::Allow,
+                on_partial: OnPartial::Error,
                 full_files: false,
             },
             trusted_repos: Vec::new(),
@@ -182,6 +218,11 @@ struct LimitsLayer {
     sniff: Option<usize>,
     walk_files: Option<usize>,
     time_budget_ms: Option<u64>,
+    container_bytes: Option<u64>,
+    member_bytes: Option<u64>,
+    container_members: Option<u32>,
+    container_depth: Option<u32>,
+    container_ratio: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -190,6 +231,7 @@ struct ClaudeLayer {
     thresholds: Option<BTreeMap<Category, Threshold>>,
     on_error: Option<Action>,
     on_skipped: Option<Action>,
+    on_partial: Option<OnPartial>,
     on_unresolved: Option<Action>,
     time_budget_ms: Option<u64>,
     mcp_tools: Option<BTreeMap<String, McpTool>>,
@@ -201,6 +243,7 @@ struct GitLayer {
     block_at: Option<BTreeMap<Category, f64>>,
     on_error: Option<Action>,
     on_skipped: Option<Action>,
+    on_partial: Option<OnPartial>,
     full_files: Option<bool>,
 }
 
@@ -306,6 +349,21 @@ impl Config {
             if let Some(v) = x.time_budget_ms {
                 self.limits.time_budget = Duration::from_millis(v);
             }
+            if let Some(v) = x.container_bytes {
+                self.limits.container_bytes = v;
+            }
+            if let Some(v) = x.member_bytes {
+                self.limits.member_bytes = v;
+            }
+            if let Some(v) = x.container_members {
+                self.limits.container_members = v;
+            }
+            if let Some(v) = x.container_depth {
+                self.limits.container_depth = v;
+            }
+            if let Some(v) = x.container_ratio {
+                self.limits.container_ratio = v;
+            }
         }
         if let Some(x) = l.ignore {
             if let Some(v) = x.paths {
@@ -332,6 +390,9 @@ impl Config {
             }
             if let Some(v) = x.on_skipped {
                 self.claude_code.on_skipped = v;
+            }
+            if let Some(v) = x.on_partial {
+                self.claude_code.on_partial = v;
             }
             if let Some(v) = x.on_unresolved {
                 self.claude_code.on_unresolved = v;
@@ -360,6 +421,9 @@ impl Config {
             }
             if let Some(v) = x.on_skipped {
                 self.git.on_skipped = v;
+            }
+            if let Some(v) = x.on_partial {
+                self.git.on_partial = v;
             }
             if let Some(v) = x.full_files {
                 self.git.full_files = v;

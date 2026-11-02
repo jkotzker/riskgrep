@@ -70,6 +70,7 @@ fn evidence() -> Vec<Evidence> {
         shape: vec![],
         fingerprints: vec![[1; 32]],
         line_complete: false,
+        member: None,
     }]
 }
 

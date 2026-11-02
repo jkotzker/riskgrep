@@ -52,7 +52,7 @@ riskgrep rules test                             # run the rulesets' own test cas
 riskgrep cache prune --dry-run                  # what pruning the cache would remove
 ```
 
-`--fail-at CATEGORY=N[,CATEGORY=N…]` makes the exit status 1 when a target's score for that category is at or above `N`. A target meets a threshold when its score rounded to one decimal, the number every output shows, is at least the threshold; `--fail-at`, the git hook's `block_at`, and the Claude Code hook's `ask` and `deny` thresholds all use that one rule (`cargo test -p riskgrep --test cli fail_at_is_inclusive`). Exit status 2 means a target could not be scanned and `--on-error block` applies; 3 is a usage or configuration error. When standard output is closed early (`riskgrep scan … | head -1`), the command stops writing without a message and keeps the exit status the scan computed, so a gate in a pipeline with `set -o pipefail` still fails on 1 or 2; a scan that passed exits 0 (`cargo test -p riskgrep --test epipe`). `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
+`--fail-at CATEGORY=N[,CATEGORY=N…]` makes the exit status 1 when a target's score for that category is at or above `N`. A target meets a threshold when its score rounded to one decimal, the number every output shows, is at least the threshold; `--fail-at`, the git hook's `block_at`, and the Claude Code hook's `ask` and `deny` thresholds all use that one rule (`cargo test -p riskgrep --test cli fail_at_is_inclusive`). Exit status 2 means a target could not be scanned and `--on-error block` applies, or part of a target's content could not be read (a zip archive's unread members, an `.npz` member that cannot be read) and `--on-partial` blocks (`--on-partial error`, the default, follows `--on-error`; a file read in part by design, such as a sampled large text file, is not affected); 3 is a usage or configuration error. When standard output is closed early (`riskgrep scan … | head -1`), the command stops writing without a message and keeps the exit status the scan computed, so a gate in a pipeline with `set -o pipefail` still fails on 1 or 2; a scan that passed exits 0 (`cargo test -p riskgrep --test epipe`). `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
 
 ## Git hook
 
@@ -92,7 +92,28 @@ secret = 85
 walk_files = 20000
 ```
 
-`limits.walk_files` is the most files one directory walk visits (default 10,000); a directory with more is reported unscanned, and the Claude Code hook applies the same limit to the files a `Grep` would search, to directory walks, and to the names a `Glob` or a directory-listing MCP tool would reveal. Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weights (`weight_overrides`), and list paths and rules to ignore (`[ignore]`).
+`limits.walk_files` is the most files one directory walk visits (default 10,000); a directory with more is reported unscanned, and the Claude Code hook applies the same limit to the files a `Grep` would search, to directory walks, and to the names a `Glob` or a directory-listing MCP tool would reveal.
+
+Zip archives (and jar, docx, xlsx, and wheel files) are opened and their members scanned like files; findings name the member as `archive.zip!/path/in/archive`. The members of one archive, nested archives included, share these limits, shown with their defaults:
+
+```toml
+[limits]
+container_bytes = 8388608    # uncompressed bytes read from all members
+member_bytes = 8388608       # bytes read from one member
+container_members = 1000     # members examined
+container_depth = 3          # nesting depth; the archive itself is depth 1
+container_ratio = 100        # uncompressed-to-compressed ratio, per member and overall, checked past 1 MiB
+
+[claude_code]
+on_partial = "error"         # content that could not be read: "error" follows on_error, or allow, ask, deny, block
+
+[git]
+on_partial = "error"
+```
+
+An archive with members that were not read (a limit reached, an encrypted member) is reported `partial` and never passes silently: `on_partial` applies, and by default it follows `on_error`. The same holds for an `.npz` with a `.npy` member that cannot be read. See [Known limitations](docs/known-limitations.md#zip-members-are-read-within-shared-limits).
+
+Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weights (`weight_overrides`), and list paths and rules to ignore (`[ignore]`).
 
 Trust: the Claude Code hook reads a repository's `.riskgrep.toml` and `.riskgrep-baseline.json` only when the repository is listed in `trusted_repos` in the user config. An agent can write files in a repository, so an untrusted repository file is never allowed to loosen the checks. The command line and the git hook read the repository files without this restriction. `trusted_repos` in a repository file is ignored.
 

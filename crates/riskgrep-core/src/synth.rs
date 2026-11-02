@@ -104,6 +104,38 @@ pub fn npz(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
     w.finish().expect("zip finish").into_inner()
 }
 
+/// An `.npz` of one embedding-shaped `.npy` member whose checksum is wrong,
+/// so the member cannot be read.
+pub fn npz_with_unreadable_member() -> Vec<u8> {
+    npz_with_unreadable_first(&[])
+}
+
+/// An `.npz` whose first member is as in [`npz_with_unreadable_member`],
+/// followed by `rest`.
+pub fn npz_with_unreadable_first(rest: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut members = vec![("bad.npy", npy("<f4", &[1, 128]))];
+    members.extend_from_slice(rest);
+    let mut z = npz(&members);
+    // The end record is the last 22 bytes and gives the directory's offset.
+    let end = z.len() - 22;
+    let central = u32::from_le_bytes(z[end + 16..end + 20].try_into().unwrap()) as usize;
+    z[14..18].fill(0);
+    z[central + 16..central + 20].fill(0);
+    z
+}
+
+/// A zip archive of `(member name, bytes)` pairs, deflated.
+pub fn zip(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, data) in members {
+        w.start_file(*name, opts).expect("zip member");
+        w.write_all(data).expect("zip data");
+    }
+    w.finish().expect("zip finish").into_inner()
+}
+
 /// A safetensors file from `(name, dtype, shape)` triples, with random data.
 /// `dtype` uses safetensors names (`F32`, `I64`, ...).
 pub fn safetensors(tensors: &[(&str, &str, &[u64])]) -> Vec<u8> {
