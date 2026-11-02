@@ -1398,7 +1398,9 @@ fn a_finding_in_the_part_read_keeps_its_decision() {
 #[test]
 fn a_safetensors_file_past_its_cap_follows_on_partial() {
     let e = Env::new();
-    e.user_config("[claude_code]\ntime_budget_ms = 600000\n");
+    // A debug build can take longer than the default budget over 100 MiB.
+    let budget = "[limits]\ntime_budget_ms = 600000\n[claude_code]\ntime_budget_ms = 600000\n";
+    e.user_config(budget);
     let s = synth::safetensors_past_cap(false);
     let f = e.work.path().join("big.safetensors");
     s.write_to(&f).unwrap();
@@ -1408,7 +1410,7 @@ fn a_safetensors_file_past_its_cap_follows_on_partial() {
         reason.contains("read only part of ") && reason.contains(&s.not_read()),
         "{reason}"
     );
-    e.user_config("[claude_code]\ntime_budget_ms = 600000\non_partial = \"allow\"\n");
+    e.user_config(&format!("{budget}on_partial = \"allow\"\n"));
     synth::safetensors_past_cap(true).write_to(&f).unwrap();
     assert_ne!(read_decision(&e, &f, None, None).0, "none");
 }

@@ -56,6 +56,8 @@ Header conditions that read integers (`uint32(0)`, `uint32(4)`) must guard again
 
 Regexes are compiled without Unicode, so use `(?i)` for ASCII case folding; YARA-X regexes have no lookaround.
 
+A regex in a condition (`path matches /…/`) is compiled by each scanner on its first use, so a scanner that handles one file, as `riskgrep git pre-commit` does, pays about 1M to 3M instructions per regex for every file, whether or not the name matches (`eval/README.md`, round 9). In a path rule, prefer the string operators (`iequals`, `iendswith`, `icontains`), or put a string prefilter before the regex.
+
 UTF-16 and UTF-32 text reaches the rules transcoded to UTF-8, without its byte-order mark, so text patterns need no `wide` modifier, and `filesize` and offsets in conditions refer to the transcoded text. Evidence locations are moved back to byte offsets in the file after the scan.
 
 ## Rule tests (`tests.toml`)
