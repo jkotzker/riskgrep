@@ -1040,12 +1040,15 @@ fn an_unreadable_npy_in_an_npz_member_makes_it_partial() {
         let t = only(&scan(&mut scanner(), &p)).clone();
         assert_eq!(
             partial(&t),
-            "member 2 not scanned (npz member 0 could not be read)",
+            "member 2 read only in part (npz member 0 could not be read)",
             "run {run}"
         );
         assert!(t.unseen_part().is_some());
         let c = t.container.unwrap();
-        assert_eq!((c.members, c.scanned, c.not_read), (2, 2, 1));
+        assert_eq!(
+            (c.members, c.scanned, c.read_in_part, c.not_read),
+            (2, 1, 1, 0)
+        );
     }
 }
 
@@ -1060,7 +1063,7 @@ fn an_npz_member_over_the_text_limit_keeps_its_reason() {
     let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
     assert_eq!(
         partial(&t),
-        "member 1 not scanned (npz member 0 could not be read)"
+        "member 1 read only in part (npz member 0 could not be read)"
     );
 }
 
@@ -1247,4 +1250,501 @@ fn an_entry_comment_is_read_as_the_bytes_stored() {
     let t = only(&scan(&mut scanner(), &p)).clone();
     assert_eq!(t.scores[&secret()], 95.0);
     assert_eq!(members_with_evidence(&t), ["a.txt!comment!"]);
+}
+
+/// An entry built by hand, with its CRC-32 and sizes correct for `content`
+/// and `data` as its stored bytes.
+struct Hand<'a> {
+    name: &'a str,
+    /// The name in the local header, when it differs from `name`.
+    local_name: Option<&'a [u8]>,
+    method: u16,
+    data: Vec<u8>,
+    content: Vec<u8>,
+    descriptor: bool,
+}
+
+impl<'a> Hand<'a> {
+    fn stored(name: &'a str, content: &[u8]) -> Self {
+        Hand {
+            name,
+            local_name: None,
+            method: 0,
+            data: content.to_vec(),
+            content: content.to_vec(),
+            descriptor: false,
+        }
+    }
+
+    fn deflated(name: &'a str, content: &[u8]) -> Self {
+        let mut encode = flate2::Compress::new(flate2::Compression::default(), false);
+        let mut data = Vec::with_capacity(content.len() + 64);
+        encode
+            .compress_vec(content, &mut data, flate2::FlushCompress::Finish)
+            .unwrap();
+        Hand {
+            data,
+            method: 8,
+            ..Hand::stored(name, content)
+        }
+    }
+
+    fn then(mut self, trailing: &[u8]) -> Self {
+        self.data.extend_from_slice(trailing);
+        self
+    }
+
+    fn with_descriptor(mut self) -> Self {
+        self.descriptor = true;
+        self
+    }
+
+    fn named_locally(mut self, local_name: &'a [u8]) -> Self {
+        self.local_name = Some(local_name);
+        self
+    }
+}
+
+fn hand_zip(entries: &[Hand]) -> Vec<u8> {
+    let le16 = |v: usize| (v as u16).to_le_bytes();
+    let le32 = |v: usize| (v as u32).to_le_bytes();
+    let (mut out, mut directory) = (Vec::new(), Vec::new());
+    for e in entries {
+        let mut crc = flate2::Crc::new();
+        crc.update(&e.content);
+        let crc = crc.sum() as usize;
+        let at = out.len();
+        let flags: usize = if e.descriptor { 0x0808 } else { 0x0800 };
+        let local_name = e.local_name.unwrap_or(e.name.as_bytes());
+        let (local_crc, local_compressed, local_size) = if e.descriptor {
+            (0, 0, 0)
+        } else {
+            (crc, e.data.len(), e.content.len())
+        };
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&le16(20));
+        out.extend_from_slice(&le16(flags));
+        out.extend_from_slice(&le16(e.method.into()));
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&le32(local_crc));
+        out.extend_from_slice(&le32(local_compressed));
+        out.extend_from_slice(&le32(local_size));
+        out.extend_from_slice(&le16(local_name.len()));
+        out.extend_from_slice(&le16(0));
+        out.extend_from_slice(local_name);
+        out.extend_from_slice(&e.data);
+        if e.descriptor {
+            out.extend_from_slice(b"PK\x07\x08");
+            out.extend_from_slice(&le32(crc));
+            out.extend_from_slice(&le32(e.data.len()));
+            out.extend_from_slice(&le32(e.content.len()));
+        }
+        directory.extend_from_slice(b"PK\x01\x02");
+        directory.extend_from_slice(&le16(20));
+        directory.extend_from_slice(&le16(20));
+        directory.extend_from_slice(&le16(flags));
+        directory.extend_from_slice(&le16(e.method.into()));
+        directory.extend_from_slice(&[0; 4]);
+        directory.extend_from_slice(&le32(crc));
+        directory.extend_from_slice(&le32(e.data.len()));
+        directory.extend_from_slice(&le32(e.content.len()));
+        directory.extend_from_slice(&le16(e.name.len()));
+        directory.extend_from_slice(&[0; 8]);
+        directory.extend_from_slice(&le32(0));
+        directory.extend_from_slice(&le32(at));
+        directory.extend_from_slice(e.name.as_bytes());
+    }
+    let record = end_record(entries.len() as u16, directory.len(), out.len());
+    [out, directory, record].concat()
+}
+
+/// (members, scanned, read in part, skipped, not read, opened), which must
+/// add up.
+fn buckets(t: &TargetReport) -> (u64, u64, u64, u64, u64, u64) {
+    let c = t.container.as_ref().expect("a container");
+    assert_eq!(
+        c.members,
+        c.scanned + c.read_in_part + c.skipped + c.not_read + c.opened,
+        "{c:?}"
+    );
+    (
+        c.members,
+        c.scanned,
+        c.read_in_part,
+        c.skipped,
+        c.not_read,
+        c.opened,
+    )
+}
+
+fn scan_zip(z: &[u8]) -> TargetReport {
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "h.zip", z);
+    only(&scan(&mut scanner(), &p)).clone()
+}
+
+#[test]
+fn bytes_after_a_deflate_stream_make_it_partial() {
+    let hidden = aws_file(31);
+    let z = hand_zip(&[
+        Hand::deflated("seen.ini", &aws_file(32)),
+        Hand::deflated("private-name.txt", b"plain\n").then(&hidden),
+    ]);
+    let t = scan_zip(&z);
+    assert_eq!(
+        partial(&t),
+        format!(
+            "member 2 read only in part ({} bytes after its data not read)",
+            hidden.len()
+        )
+    );
+    assert!(t.unseen_part().is_some());
+    assert_eq!(
+        t.scores[&secret()],
+        95.0,
+        "the score of what was read stays"
+    );
+    assert_eq!(buckets(&t), (2, 1, 1, 0, 0, 0));
+}
+
+#[test]
+fn one_byte_after_a_deflate_stream_makes_it_partial() {
+    let t = scan_zip(&hand_zip(&[Hand::deflated("a.txt", b"plain\n").then(b"x")]));
+    assert_eq!(
+        partial(&t),
+        "member 1 read only in part (1 byte after its data not read)"
+    );
+}
+
+#[test]
+fn bytes_after_an_empty_deflate_stream_make_it_partial() {
+    let z = hand_zip(&[Hand::deflated("empty.txt", b"").then(&aws_file(33))]);
+    assert!(partial(&scan_zip(&z)).starts_with("member 1 read only in part ("));
+}
+
+#[test]
+fn a_stored_member_with_a_larger_compressed_size_is_not_read() {
+    // The reader refuses it, so none of it is scanned and it never passes as
+    // read.
+    let hidden = aws_file(34);
+    let z = hand_zip(&[Hand::stored("a.txt", b"plain\n").then(&hidden)]);
+    assert_eq!(
+        scan_zip(&z).status,
+        TargetStatus::Unscanned {
+            reason: "member 1 unreadable".into()
+        }
+    );
+    let z = hand_zip(&[
+        Hand::stored("seen.ini", &aws_file(43)),
+        Hand::stored("private-name.txt", b"plain\n").then(&hidden),
+    ]);
+    let t = scan_zip(&z);
+    assert_eq!(partial(&t), "member 2 unreadable");
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert_eq!(buckets(&t), (2, 1, 0, 0, 1, 0));
+}
+
+#[test]
+fn bytes_after_a_stream_in_a_nested_archive_name_the_nested_member() {
+    let inner = hand_zip(&[Hand::deflated("x.txt", b"plain\n").then(b"hidden")]);
+    let z = synth::zip(&[("a.txt", text("a\n")), ("inner.zip", inner)]);
+    let t = scan_zip(&z);
+    assert_eq!(
+        partial(&t),
+        "member 3 read only in part (6 bytes after its data not read)"
+    );
+    assert_eq!(buckets(&t), (3, 1, 1, 0, 0, 1));
+}
+
+#[test]
+fn bytes_after_the_stream_of_a_nested_archive_or_skipped_member_count_it_as_partly_read() {
+    let inner = synth::zip(&[("x.txt", text("x\n"))]);
+    let t = scan_zip(&hand_zip(
+        &[Hand::deflated("i.zip", &inner).then(b"hidden")],
+    ));
+    assert_eq!(
+        partial(&t),
+        "member 1 read only in part (6 bytes after its data not read)"
+    );
+    assert_eq!(buckets(&t), (2, 1, 1, 0, 0, 0));
+
+    let t = scan_zip(&hand_zip(&[
+        Hand::deflated("a.txt", b"a\n"),
+        Hand::deflated("l.png", PNG).then(b"hidden"),
+    ]));
+    assert_eq!(buckets(&t), (2, 1, 1, 0, 0, 0));
+    assert!(partial(&t).contains("6 bytes after its data"));
+}
+
+#[test]
+fn a_member_cut_at_a_limit_keeps_that_reason_alone() {
+    let z = hand_zip(&[Hand::deflated("a.txt", &vec![b'a'; 4096]).then(b"hidden")]);
+    let d = tempfile::tempdir().unwrap();
+    let p = write(d.path(), "h.zip", &z);
+    let mut cfg = Config::default();
+    cfg.limits.member_bytes = 1024;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert_eq!(
+        partial(&t),
+        "member 1 read only in part (limits.member_bytes)"
+    );
+}
+
+#[test]
+fn an_archive_with_bytes_after_a_stream_is_not_cached() {
+    let d = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let mk = || RiskGrep::with_cache_dir(Config::default(), None, Some(cache.path().into()));
+    let z = hand_zip(&[Hand::deflated("a.txt", b"plain\n").then(b"hidden")]);
+    let p = write(d.path(), "h.zip", &z);
+    scan(&mut mk().unwrap(), &p);
+    let mut g = mk().unwrap();
+    assert!(partial(only(&scan(&mut g, &p))).contains("6 bytes after its data"));
+    assert!(g.bundle_loaded(), "a partial archive is scanned again");
+}
+
+#[test]
+fn ordinary_archive_shapes_stay_scanned() {
+    let body = aws_file(35);
+    let shapes: Vec<(&str, Vec<u8>)> = vec![
+        ("writer", synth::zip(&[("a.txt", body.clone())])),
+        ("stored", synth::npz(&[("a.txt", body.clone())])),
+        (
+            "deflate and descriptor",
+            hand_zip(&[Hand::deflated("a.txt", &body).with_descriptor()]),
+        ),
+        (
+            "stored and descriptor",
+            hand_zip(&[Hand::stored("a.txt", &body).with_descriptor()]),
+        ),
+        (
+            "empty members",
+            hand_zip(&[
+                Hand::deflated("empty.txt", b""),
+                Hand::deflated("empty2.txt", b"").with_descriptor(),
+                Hand::stored("empty3.txt", b""),
+                Hand::stored("a.txt", &body),
+            ]),
+        ),
+        (
+            "jar",
+            hand_zip(&[
+                Hand::stored("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"),
+                Hand::deflated("a.txt", &body).with_descriptor(),
+            ]),
+        ),
+        (
+            "wheel",
+            hand_zip(&[
+                Hand::deflated("pkg/a.txt", &body),
+                Hand::deflated("pkg-1.dist-info/METADATA", b"Name: pkg\n"),
+                Hand::deflated("pkg-1.dist-info/RECORD", b"pkg/a.txt,,\n"),
+            ]),
+        ),
+        (
+            "docx",
+            hand_zip(&[
+                Hand::deflated("[Content_Types].xml", b"<Types/>"),
+                Hand::deflated("word/document.xml", &body),
+            ]),
+        ),
+    ];
+    for (shape, z) in shapes {
+        let t = scan_zip(&z);
+        assert_eq!(t.status, TargetStatus::Scanned, "{shape}");
+        assert_eq!(t.scores[&secret()], 95.0, "{shape}");
+    }
+}
+
+#[test]
+fn a_local_name_differing_from_the_directory_makes_it_partial() {
+    let body = aws_file(36);
+    // Longer, shorter, and equally long; the local name is never reported.
+    for local in [&b"a-much-longer-private-name.txt"[..], b"a", b"b.ini"] {
+        let z = hand_zip(&[Hand::deflated("a.ini", &body).named_locally(local)]);
+        let t = scan_zip(&z);
+        assert_eq!(
+            partial(&t),
+            "member 1 read only in part (local header name differs from the directory)"
+        );
+        assert!(t.unseen_part().is_some());
+        assert_eq!(t.scores[&secret()], 95.0, "the member was read");
+        assert_eq!(buckets(&t), (1, 0, 1, 0, 0, 0));
+        assert!(!format!("{t:?}").contains("private-name"));
+    }
+}
+
+#[test]
+fn a_directory_entry_whose_local_name_differs_makes_it_partial() {
+    let local = b"secret-looking-name";
+    let z = hand_zip(&[
+        Hand::stored("docs/", b"").named_locally(local),
+        Hand::stored("a.txt", b"a\n"),
+    ]);
+    assert_eq!(
+        partial(&scan_zip(&z)),
+        format!("{} bytes outside the listed members not read", local.len())
+    );
+}
+
+#[test]
+fn every_member_is_in_exactly_one_count() {
+    let d = tempfile::tempdir().unwrap();
+    let nested = synth::zip(&[("x.txt", text("x\n"))]);
+    let mut z = synth::zip(&[
+        ("whole.txt", text("a\n")),
+        ("logo.png", PNG.to_vec()),
+        ("locked.txt", text("b\n")),
+        ("long.txt", vec![b'c'; 4096]),
+        ("inner.zip", nested),
+    ]);
+    mark_encrypted(&mut z, 2);
+    let p = write(d.path(), "five.zip", &z);
+    let mut cfg = Config::default();
+    cfg.limits.text_max = 1024;
+    cfg.limits.sample = 256;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    // whole.txt and x.txt; long.txt; logo.png; locked.txt; inner.zip.
+    assert_eq!(buckets(&t), (6, 2, 1, 1, 1, 1));
+}
+
+#[test]
+fn a_cached_archive_reports_the_same_counts() {
+    let d = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let mk = || RiskGrep::with_cache_dir(Config::default(), None, Some(cache.path().into()));
+    let z = synth::zip(&[
+        ("a.txt", text("a\n")),
+        ("l.png", PNG.to_vec()),
+        ("i.zip", synth::zip(&[("x.txt", text("x\n"))])),
+    ]);
+    let p = write(d.path(), "c.zip", &z);
+    let first = only(&scan(&mut mk().unwrap(), &p)).clone();
+    let mut g = mk().unwrap();
+    let second = only(&scan(&mut g, &p)).clone();
+    assert!(!g.bundle_loaded());
+    assert_eq!(buckets(&first), (4, 2, 0, 1, 0, 1));
+    assert_eq!(buckets(&second), buckets(&first));
+}
+
+#[test]
+fn a_member_read_in_part_is_not_also_not_read() {
+    // Text over its limit: scanned, and sampled.
+    let d = tempfile::tempdir().unwrap();
+    let z = synth::zip(&[("long.txt", vec![b'c'; 4096])]);
+    let p = write(d.path(), "s.zip", &z);
+    let mut cfg = Config::default();
+    cfg.limits.text_max = 1024;
+    cfg.limits.sample = 256;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert_eq!(buckets(&t), (1, 0, 1, 0, 0, 0));
+    assert_eq!(partial(&t), "member 1 sampled (bytes 256..3840 not read)");
+    assert!(t.unseen_part().is_some(), "strict: on_partial applies");
+}
+
+#[test]
+fn an_npz_with_another_member_goes_through_the_framework() {
+    let d = tempfile::tempdir().unwrap();
+    let npy = synth::npy("<f4", &[4, 256]);
+    let z = synth::zip(&[("emb.npy", npy.clone()), ("notes.ini", aws_file(37))]);
+    let p = write(d.path(), "renamed.npz", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert_eq!(t.container.as_ref().unwrap().format, "zip");
+    assert!(members_with_evidence(&t).contains(&"notes.ini".to_string()));
+
+    // Only other members; stored as well as deflated.
+    let z = synth::npz(&[("notes.ini", aws_file(38))]);
+    let p = write(d.path(), "stored.NPZ", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.scores[&secret()], 95.0);
+
+    // Over the text limit.
+    let z = synth::zip(&[("emb.npy", npy), ("notes.ini", aws_file(39))]);
+    let p = write(d.path(), "large.npz", &z);
+    let mut cfg = Config::default();
+    cfg.limits.text_max = 64;
+    cfg.limits.sample = 16;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert_eq!(t.container.as_ref().unwrap().format, "zip");
+    assert!(members_with_evidence(&t).contains(&"notes.ini".to_string()));
+}
+
+#[test]
+fn an_npz_inside_an_archive_or_staged_goes_through_the_framework() {
+    let npz = synth::zip(&[("notes.ini", aws_file(40))]);
+    let t = scan_zip(&synth::zip(&[("m.npz", npz.clone())]));
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert_eq!(members_with_evidence(&t), vec!["m.npz!/notes.ini"]);
+
+    let t = scanner().scan_blob("m.npz", b"blob-of-renamed-zip", &npz, None);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert_eq!(t.container.as_ref().unwrap().format, "zip");
+}
+
+#[test]
+fn a_real_npz_stays_on_the_tensor_path() {
+    let d = tempfile::tempdir().unwrap();
+    let biometric = Category("biometric".into());
+    let z = synth::zip(&[("emb.npy", synth::npy("<f4", &[4, 256]))]);
+    let p = write(d.path(), "real.npz", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert!(t.container.is_none());
+    assert_eq!(t.scores[&biometric], 70.0);
+}
+
+#[test]
+fn an_npz_that_is_no_zip_is_not_reported_scanned() {
+    let d = tempfile::tempdir().unwrap();
+    let mut bytes = b"PK\x03\x04 ".to_vec();
+    bytes.extend_from_slice(&aws_file(41));
+    let p = write(d.path(), "fake.npz", &bytes);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(
+        t.status,
+        TargetStatus::Unscanned {
+            reason: "zip central directory unreadable".into()
+        }
+    );
+}
+
+#[test]
+fn a_member_named_npy_without_the_magic_makes_it_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let biometric = Category("biometric".into());
+    let z = synth::zip(&[
+        ("emb.npy", synth::npy("<f4", &[4, 256])),
+        ("private-name.npy", aws_file(42)),
+    ]);
+    let p = write(d.path(), "m.npz", &z);
+    let expect = "npz member 1 is not an npy file";
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(partial(&t), expect);
+    assert!(t.unseen_part().is_some());
+    assert_eq!(
+        t.scores[&biometric], 70.0,
+        "the real member keeps its score"
+    );
+
+    // Over the text limit, read through the member headers.
+    let mut cfg = Config::default();
+    cfg.limits.text_max = 64;
+    cfg.limits.sample = 16;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert_eq!(partial(&t), expect);
+    assert_eq!(t.scores[&biometric], 70.0);
+}
+
+#[test]
+fn an_integer_npy_member_is_not_mistaken_for_one_without_the_magic() {
+    let d = tempfile::tempdir().unwrap();
+    let z = synth::zip(&[("ids.npy", synth::npy("<i4", &[8]))]);
+    let p = write(d.path(), "ints.npz", &z);
+    assert_eq!(
+        only(&scan(&mut scanner(), &p)).status,
+        TargetStatus::Scanned
+    );
 }

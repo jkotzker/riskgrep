@@ -319,8 +319,10 @@ mod tests {
             format: "zip".into(),
             members: 2,
             scanned: 1,
+            read_in_part: 0,
             skipped: 0,
             not_read: 1,
+            opened: 0,
             listed: vec![],
         });
         let r = Report::from_targets("0", "b", vec![c]);

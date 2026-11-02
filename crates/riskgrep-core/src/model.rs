@@ -116,10 +116,11 @@ pub struct TargetReport {
 }
 
 impl TargetReport {
-    /// What could not be read, when `on_partial` applies: part of the content
-    /// was never seen, as with a container's unread members or an `.npz`'s
-    /// unreadable member. `None` for a file read in part by design, such as
-    /// a sampled large text file, which is `partial` too.
+    /// What was not read, when `on_partial` applies: part of the content was
+    /// never seen, as with any `partial` container, a sampled member included,
+    /// or an `.npz`'s unreadable member. `None` for a file outside a container
+    /// read in part by design, such as a sampled large text file, which is
+    /// `partial` too.
     pub fn unseen_part(&self) -> Option<&str> {
         match &self.status {
             TargetStatus::Partial { not_read } if self.unseen || self.container.is_some() => {
@@ -135,15 +136,21 @@ impl TargetReport {
 pub struct ContainerReport {
     /// The extractor that read it, e.g. `zip`.
     pub format: String,
-    /// Members examined or counted, nested members included.
+    /// Members examined or counted, nested members included. Each is in
+    /// exactly one of the counts below, which add up to this.
     pub members: u64,
-    /// Members read and scanned (whole or in part).
+    /// Members read whole and scanned.
     pub scanned: u64,
+    /// Members read and scanned only in part: sampled, cut at a limit, or
+    /// holding bytes their stream does not show.
+    pub read_in_part: u64,
     /// Members of formats that are not scanned (images, binary files of
     /// unknown format).
     pub skipped: u64,
-    /// Members not read whole.
+    /// Members not read or not scanned at all.
     pub not_read: u64,
+    /// Nested containers opened; what they hold is counted as members.
+    pub opened: u64,
     /// Members with evidence, then members not read whole, at most
     /// [`crate::container::LISTED_MAX`].
     pub listed: Vec<MemberReport>,

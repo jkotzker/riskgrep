@@ -16,6 +16,7 @@
 use crate::classify::{self, Content, FileClass, Limits, Source};
 use crate::model::TargetStatus;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::io::Read;
 use std::time::Instant;
@@ -110,6 +111,15 @@ pub enum NotRead {
     Corrupt,
 }
 
+/// Part of an entry's stored form that its member's stream does not show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Hidden {
+    /// Bytes inside the declared compressed size, after the end of the data.
+    PastData(u64),
+    /// The local header names the entry differently from the directory.
+    LocalName,
+}
+
 /// Whether the extractor should go on offering members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
@@ -129,6 +139,11 @@ pub trait Walk {
     /// [`ENTRY_COMMENT`], or with no owner the container's own, under
     /// [`COMMENT_MEMBER`].
     fn comment(&mut self, owner: Option<&str>, data: &mut dyn Read) -> Flow;
+    /// Whether the member last offered was read to the end of its stream.
+    fn read_to_end(&self) -> bool;
+    /// Part of the member last offered was not in its stream, so it was not
+    /// read. Ignored when that member was not read at all.
+    fn hidden(&mut self, what: Hidden);
     /// The number of members left unoffered after a `Flow::Stop`.
     fn rest(&mut self, n: u64);
     /// The deadline has passed: work done before offering members (such as
@@ -171,8 +186,12 @@ pub enum Cause {
     /// A nested container that was not opened, with the reason it would
     /// get as a file (`7z not scanned`).
     Nested(String),
-    /// The member was read but its scan did not finish.
+    /// The member's scan did not finish, or could not see all of it.
     Scan(String),
+    /// The member was read in part by design, as a file of its class is.
+    Sampled(String),
+    /// Part of the entry's stored form was not in the member's stream.
+    Hidden(Hidden),
 }
 
 impl Cause {
@@ -186,13 +205,24 @@ impl Cause {
             Cause::Corrupt => "unreadable".into(),
             Cause::Nested(reason) => format!("not opened ({reason})"),
             Cause::Scan(reason) => format!("not scanned ({reason})"),
+            Cause::Sampled(_) | Cause::Hidden(_) => self.truncated_phrase(),
         }
     }
 
     /// The phrase for a member read and scanned only in part.
     pub fn truncated_phrase(&self) -> String {
         match self {
-            Cause::Limit(key) => format!("read only in part ({key})"),
+            Cause::Limit(what) | Cause::Scan(what) => format!("read only in part ({what})"),
+            Cause::Sampled(note) => format!("sampled ({note})"),
+            Cause::Hidden(Hidden::PastData(1)) => {
+                "read only in part (1 byte after its data not read)".into()
+            }
+            Cause::Hidden(Hidden::PastData(n)) => {
+                format!("read only in part ({n} bytes after its data not read)")
+            }
+            Cause::Hidden(Hidden::LocalName) => {
+                "read only in part (local header name differs from the directory)".into()
+            }
             other => other.phrase(),
         }
     }
@@ -221,7 +251,7 @@ pub struct Unread {
     pub last: u64,
     pub path: Option<String>,
     pub cause: Cause,
-    /// Some of it was read and scanned.
+    /// Some of it was read.
     pub partly: bool,
 }
 
@@ -235,6 +265,8 @@ pub struct Extracted {
     /// Members classified as formats that are not scanned (images, binary
     /// files of unknown format); they do not make the container partial.
     pub skipped: u64,
+    /// Nested containers opened; their members are counted as members.
+    pub opened: u64,
     pub unread: Vec<Unread>,
     /// Bytes of the container, nested ones included, outside every member
     /// (see [`Walk::unaccounted`]).
@@ -299,12 +331,23 @@ fn merge(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     out
 }
 
-/// Members in `unread`, each counted once.
-pub fn unread_count(unread: &[Unread]) -> u64 {
-    merge(unread.iter().map(|u| (u.seq, u.last)).collect())
+/// The members in `unread` not read at all, each counted once, and those
+/// read only in part. A member can be listed as both (read in part, then its
+/// scan did not finish): it counts as not read.
+pub fn unread_counts(unread: &[Unread]) -> (u64, BTreeSet<u64>) {
+    let none = merge(
+        unread
+            .iter()
+            .filter(|u| !u.partly)
+            .map(|u| (u.seq, u.last))
+            .collect(),
+    );
+    let in_part = unread
         .iter()
-        .map(|(a, b)| b - a + 1)
-        .sum()
+        .filter(|u| u.partly && !none.iter().any(|&(a, b)| (a..=b).contains(&u.seq)))
+        .map(|u| u.seq)
+        .collect();
+    (none.iter().map(|(a, b)| b - a + 1).sum(), in_part)
 }
 
 /// `members 3, 7..9 encrypted; members 1001..4096 not read
@@ -403,7 +446,27 @@ struct Walker<'l> {
     prefix: Vec<String>,
     /// Why the walk stopped offering members, once it has.
     stop: Option<Cause>,
+    /// The member last offered, when any of it was read.
+    last: Option<Last>,
     out: Extracted,
+}
+
+/// A member read, for what the extractor reports about it afterwards.
+struct Last {
+    seq: u64,
+    path: String,
+    placed: Placed,
+    /// Its stream was read to the end.
+    whole: bool,
+}
+
+/// What became of a member read into memory.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Placed {
+    Kept,
+    Skipped,
+    Opened,
+    NotRead,
 }
 
 type Lookup = fn(ContainerKind) -> Option<&'static dyn Extractor>;
@@ -440,11 +503,13 @@ fn extract_with(
         depth: 1,
         prefix: Vec::new(),
         stop: None,
+        last: None,
         out: Extracted {
             format: ext.id(),
             members: Vec::new(),
             total: 0,
             skipped: 0,
+            opened: 0,
             unread: Vec::new(),
             uncovered: 0,
             error: None,
@@ -484,6 +549,7 @@ impl Walker<'_> {
     /// Assign the next position, or refuse it (setting `stop`) when the
     /// member count or the deadline is spent.
     fn admit(&mut self) -> Result<u64, Cause> {
+        self.last = None;
         self.seq += 1;
         self.out.total += 1;
         if self.seq > u64::from(self.limits.container_members) {
@@ -587,7 +653,14 @@ impl Walk for Walker<'_> {
         self.bytes_left -= len;
         self.produced += len;
         self.consumed += meta.compressed_size.unwrap_or(len);
-        self.place(seq, path, &meta, bytes, truncated);
+        let whole = truncated.is_none();
+        let placed = self.place(seq, path.clone(), &meta, bytes, truncated);
+        self.last = (placed != Placed::NotRead).then_some(Last {
+            seq,
+            path,
+            placed,
+            whole,
+        });
         if self.stop.is_some() {
             Flow::Stop
         } else {
@@ -660,6 +733,25 @@ impl Walk for Walker<'_> {
         Instant::now() >= self.deadline
     }
 
+    fn read_to_end(&self) -> bool {
+        self.last.as_ref().is_some_and(|l| l.whole)
+    }
+
+    fn hidden(&mut self, what: Hidden) {
+        let Some(last) = self.last.as_mut() else {
+            return;
+        };
+        // Read in part now, whatever else it was.
+        match last.placed {
+            Placed::Skipped => self.out.skipped -= 1,
+            Placed::Opened => self.out.opened -= 1,
+            Placed::Kept | Placed::NotRead => {}
+        }
+        last.placed = Placed::Kept;
+        let (seq, path) = (last.seq, last.path.clone());
+        self.unread(seq, Some(path), Cause::Hidden(what), true);
+    }
+
     fn unaccounted(&mut self, bytes: u64) {
         self.out.uncovered = self.out.uncovered.saturating_add(bytes);
     }
@@ -698,7 +790,7 @@ impl Walker<'_> {
         meta: &MemberMeta,
         bytes: Vec<u8>,
         truncated: Option<Cause>,
-    ) {
+    ) -> Placed {
         let base = meta.name.rsplit('/').next().unwrap_or(&meta.name);
         let head = &bytes[..bytes.len().min(self.limits.sniff)];
         let size = match &truncated {
@@ -708,7 +800,12 @@ impl Walker<'_> {
                 .max(bytes.len() as u64),
             None => bytes.len() as u64,
         };
-        let class = crate::scanner::classify_member(base, head, size);
+        let class = classify::settle_npz(
+            crate::scanner::classify_member(base, head, size),
+            &bytes[..],
+            bytes.len() as u64,
+            self.limits,
+        );
         let nested = match class {
             FileClass::Container(kind) => Some(kind),
             _ => None,
@@ -716,33 +813,39 @@ impl Walker<'_> {
         if let Some(kind) = nested {
             if let Some(t) = truncated {
                 self.unread(seq, Some(path), t, false);
-                return;
+                return Placed::NotRead;
             }
             let Some(ext) = (self.lookup)(kind) else {
                 let reason = not_scanned_reason(kind);
                 self.unread(seq, Some(path), Cause::Nested(reason), false);
-                return;
+                return Placed::NotRead;
             };
             if self.depth >= self.limits.container_depth {
                 let cause = Cause::Limit("limits.container_depth".into());
                 self.unread(seq, Some(path), cause, false);
-                return;
+                return Placed::NotRead;
             }
             self.depth += 1;
             self.prefix.push(escape_name(&meta.name, seq));
             let r = ext.extract(&&bytes[..], bytes.len() as u64, self);
             self.prefix.pop();
             self.depth -= 1;
-            if let Err(ContainerError(e)) = r {
-                self.unread(seq, Some(path), Cause::Nested(e), false);
-            }
-            return;
+            return match r {
+                Ok(()) => {
+                    self.out.opened += 1;
+                    Placed::Opened
+                }
+                Err(ContainerError(e)) => {
+                    self.unread(seq, Some(path), Cause::Nested(e), false);
+                    Placed::NotRead
+                }
+            };
         }
         if matches!(class, FileClass::Image(_) | FileClass::UnknownBinary) {
             self.out.skipped += 1;
-            return;
+            return Placed::Skipped;
         }
-        self.keep(seq, path, &class, &bytes, truncated);
+        self.keep(seq, path, &class, &bytes, truncated)
     }
 
     /// Prepare a member's bytes for the scan as `class`, recording it as
@@ -754,17 +857,17 @@ impl Walker<'_> {
         class: &FileClass,
         bytes: &[u8],
         truncated: Option<Cause>,
-    ) {
+    ) -> Placed {
         let content = match classify::slice_for_scan(bytes, class, self.limits) {
             Ok(c) => c,
             Err(_) => {
                 self.unread(seq, Some(path), Cause::Corrupt, false);
-                return;
+                return Placed::NotRead;
             }
         };
         if let Some(reason) = &content.unscanned {
             self.unread(seq, Some(path), Cause::Nested(reason.clone()), false);
-            return;
+            return Placed::NotRead;
         }
         if let Some(t) = &truncated {
             self.unread(seq, Some(path.clone()), t.clone(), true);
@@ -772,7 +875,7 @@ impl Walker<'_> {
             let cause = if content.unseen {
                 Cause::Scan(p.clone())
             } else {
-                Cause::Scan(format!("sampled: {p}"))
+                Cause::Sampled(p.clone())
             };
             self.unread(seq, Some(path.clone()), cause, true);
         }
@@ -784,6 +887,7 @@ impl Walker<'_> {
             text,
             truncated,
         });
+        Placed::Kept
     }
 }
 

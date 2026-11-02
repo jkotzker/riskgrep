@@ -174,6 +174,16 @@ fn describe(ranges: &[(u32, u32)]) -> String {
     )
 }
 
+/// Make `reason`, when it holds anything, ready for another sentence.
+fn end_sentence(reason: &mut String) {
+    if !reason.is_empty() {
+        if !reason.ends_with('.') {
+            reason.push('.');
+        }
+        reason.push(' ');
+    }
+}
+
 /// What the agent may do instead, for the category findings listed.
 fn guidance(listed: &[&Item]) -> Option<String> {
     let mut files: Vec<(usize, bool)> = listed.iter().filter_map(|i| i.finding).collect();
@@ -240,14 +250,28 @@ fn decide_targets(
         // Part of what the call would read was never scanned.
         if let Some(not_read) = t.unseen_part() {
             if let Some(sev) = severity(cfg.on_partial.action(cfg.on_error)) {
-                let what = match &t.container {
-                    Some(c) => format!("{} of {} members of {}", c.not_read, c.members, t.target),
-                    None => format!("part of {}", t.target),
+                let target = &t.target;
+                let what = match t
+                    .container
+                    .as_ref()
+                    .map(|c| (c.not_read, c.read_in_part, c))
+                {
+                    Some((0, 0, _)) | None => format!("could not scan part of {target}"),
+                    Some((n, 0, c)) => {
+                        format!("could not scan {n} of {} members of {target}", c.members)
+                    }
+                    Some((0, k, c)) => {
+                        format!("read only part of {k} of {} members of {target}", c.members)
+                    }
+                    Some((n, k, c)) => format!(
+                        "could not scan {n} and read only part of {k} of {} members of {target}",
+                        c.members
+                    ),
                 };
                 items.push(Item {
                     sev,
                     score: -1.0,
-                    text: format!("RiskGrep: could not scan {what} ({not_read})"),
+                    text: format!("RiskGrep: {what} ({not_read})"),
                     finding: None,
                 });
             }
@@ -329,11 +353,11 @@ fn decide_targets(
     chosen.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.text.cmp(&b.text)));
     let more = chosen.len().saturating_sub(LISTED);
     chosen.truncate(LISTED);
-    let mut reason = chosen
-        .iter()
-        .map(|i| i.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut reason = String::new();
+    for text in chosen.iter().map(|i| i.text.as_str()) {
+        end_sentence(&mut reason);
+        reason.push_str(text);
+    }
     if more > 0 {
         if reason.ends_with('.') {
             reason.pop();
@@ -341,7 +365,7 @@ fn decide_targets(
         reason.push_str(&format!(", and {more} more."));
     }
     if let Some(g) = guidance(&chosen) {
-        reason.push(' ');
+        end_sentence(&mut reason);
         reason.push_str(&g);
     }
     match top {
@@ -834,8 +858,10 @@ mod tests {
             format: "zip".into(),
             members: 12,
             scanned: 10,
+            read_in_part: 0,
             skipped: 0,
             not_read: 2,
+            opened: 0,
             listed: members
                 .iter()
                 .map(|(m, score)| MemberReport {
@@ -871,6 +897,67 @@ mod tests {
             reason.contains(
                 "(aws_access_token in /w/backup.zip!/inner.zip!/b.env, and 2 more members)"
             ),
+            "{reason}"
+        );
+    }
+
+    /// A partial zip target with these (not read, read in part) counts.
+    fn counted(not_read: u64, read_in_part: u64) -> TargetReport {
+        let mut t = zip_target(
+            &[],
+            TargetStatus::Partial {
+                not_read: "what".into(),
+            },
+        );
+        t.scores.clear();
+        let c = t.container.as_mut().unwrap();
+        (c.not_read, c.read_in_part) = (not_read, read_in_part);
+        t
+    }
+
+    #[test]
+    fn a_partial_container_says_what_happened_to_its_members() {
+        let cfg = Config::default().claude_code;
+        let text = |t: TargetReport| match decide(&report(vec![t]), false, &cfg, None) {
+            Decision::Ask(s) => s,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            text(counted(2, 0)),
+            "RiskGrep: could not scan 2 of 12 members of /w/backup.zip (what)"
+        );
+        assert_eq!(
+            text(counted(0, 1)),
+            "RiskGrep: read only part of 1 of 12 members of /w/backup.zip (what)"
+        );
+        assert_eq!(
+            text(counted(2, 1)),
+            "RiskGrep: could not scan 2 and read only part of 1 of 12 members of \
+             /w/backup.zip (what)"
+        );
+        assert_eq!(
+            text(counted(0, 0)),
+            "RiskGrep: could not scan part of /w/backup.zip (what)"
+        );
+    }
+
+    #[test]
+    fn a_partial_reason_ends_its_sentence_before_what_follows() {
+        let cfg = Config::default().claude_code;
+        let mut t = zip_target(
+            &[("a.env", 95.0)],
+            TargetStatus::Partial {
+                not_read: "member 2 sampled (bytes 1..2 not read)".into(),
+            },
+        );
+        t.scores.insert(Category("secret".into()), 85.0);
+        let c = t.container.as_mut().unwrap();
+        (c.not_read, c.read_in_part) = (0, 1);
+        let Decision::Ask(reason) = decide(&report(vec![t]), false, &cfg, None) else {
+            panic!("expected ask");
+        };
+        assert!(
+            reason.contains("(member 2 sampled (bytes 1..2 not read)). Do not read"),
             "{reason}"
         );
     }

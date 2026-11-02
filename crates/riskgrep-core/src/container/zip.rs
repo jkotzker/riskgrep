@@ -1,7 +1,7 @@
 //! Zip archives, and the formats built on them (jar, docx, xlsx, wheels).
 //! Every use of the `zip` crate's API is in this module.
 
-use super::{ContainerError, Extractor, Flow, MemberMeta, NotRead, Walk};
+use super::{ContainerError, Extractor, Flow, Hidden, MemberMeta, NotRead, Walk};
 use crate::classify::{Budgeted, Source};
 use std::cell::Cell;
 use std::io::BufReader;
@@ -35,11 +35,55 @@ struct Entry {
     size: u64,
     compressed: u64,
     encrypted: bool,
-    /// Bytes a directory entry holds that are not an empty stream: no member
-    /// is offered for it, so they are not read.
+    /// Bytes a directory entry holds that are not an empty stream, and a
+    /// local name that differs: no member is offered for it, so they are not
+    /// read.
     stray: u64,
+    /// Where its data starts.
+    data_start: u64,
+    /// Its data is a deflate stream that can be read without a password.
+    deflated: bool,
+    /// Its local header names it differently from the directory.
+    local_name_differs: bool,
     /// The entry's comment; empty when it has none.
     comment: Vec<u8>,
+}
+
+/// The length of the name in the local header at `at` when it is not `name`,
+/// or could not be read to tell.
+pub(super) fn differing_local_name(src: &dyn Source, at: u64, name: &[u8]) -> Option<u64> {
+    let Ok(head) = src.range(at, 30) else {
+        return Some(0);
+    };
+    let len = u64::from(u16::from_le_bytes([head[26], head[27]]));
+    let same = len == name.len() as u64 && src.range(at + 30, len).is_ok_and(|n| n == name);
+    (!same).then_some(len)
+}
+
+/// Bytes of the `compressed` deflated bytes at `start` after the end of their
+/// stream, or not reached when the check cannot finish. Inflates again what the
+/// member's reader inflated, which does not report where the stream ended;
+/// `size` bounds it, as the reader was bounded, in case the file changed since.
+/// A stored entry needs no check: the reader refuses one whose data runs past
+/// its size.
+pub(super) fn past_stream(src: &dyn Source, start: u64, compressed: u64, size: u64) -> u64 {
+    const STEP: u64 = 65536;
+    let mut inflate = flate2::Decompress::new(false);
+    let mut out = [0u8; STEP as usize];
+    while inflate.total_out() <= size {
+        let (used, made) = (inflate.total_in(), inflate.total_out());
+        let want = (compressed - used).min(STEP);
+        let Ok(data) = src.range(start + used, want) else {
+            break;
+        };
+        let flush = flate2::FlushDecompress::None;
+        match inflate.decompress(&data, &mut out, flush) {
+            Ok(flate2::Status::StreamEnd) => break,
+            Ok(_) if inflate.total_in() > used || inflate.total_out() > made => {}
+            _ => break,
+        }
+    }
+    compressed - inflate.total_in()
 }
 
 /// The comment bytes stored in the central header at `at`, undecoded, so a
@@ -175,7 +219,7 @@ impl Extractor for Zip {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn extract(
@@ -232,11 +276,13 @@ impl Extractor for Zip {
                 let is_dir = name.ends_with('/') && f.size() == 0;
                 let deflated =
                     f.compression() == zip::CompressionMethod::Deflated && !f.encrypted();
+                let local_name = differing_local_name(src, f.header_start(), f.name_raw());
                 let stray = if is_dir && !holds_nothing(src, deflated, data_start, compressed) {
                     compressed.min(size.saturating_sub(data_start))
                 } else {
                     0
                 };
+                let stray = stray + if is_dir { local_name.unwrap_or(0) } else { 0 };
                 let comment = match f.comment() {
                     "" => Vec::new(),
                     decoded => stored_comment(src, f.central_header_start())
@@ -252,6 +298,9 @@ impl Extractor for Zip {
                     compressed,
                     encrypted: f.encrypted(),
                     stray,
+                    data_start,
+                    deflated,
+                    local_name_differs: local_name.is_some(),
                     comment,
                 })
             })
@@ -302,7 +351,19 @@ impl Extractor for Zip {
                             walk.not_read(meta, NotRead::Encrypted)
                         } else {
                             match zip.by_index(i) {
-                                Ok(mut f) => walk.member(meta, &mut f),
+                                Ok(mut f) => {
+                                    let flow = walk.member(meta, &mut f);
+                                    if e.local_name_differs {
+                                        walk.hidden(Hidden::LocalName);
+                                    }
+                                    if e.deflated && walk.read_to_end() {
+                                        match past_stream(src, e.data_start, e.compressed, e.size) {
+                                            0 => {}
+                                            past => walk.hidden(Hidden::PastData(past)),
+                                        }
+                                    }
+                                    flow
+                                }
                                 Err(zip::result::ZipError::UnsupportedArchive(m))
                                     if m == zip::result::ZipError::PASSWORD_REQUIRED =>
                                 {

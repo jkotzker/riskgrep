@@ -893,3 +893,31 @@ fn an_unreadable_npz_member_follows_on_partial() {
     run(&["--fail-at", "secret=80"]).code(2);
     run(&["--fail-at", "secret=80", "--on-partial", "allow"]).code(0);
 }
+
+#[test]
+fn a_sampled_file_passes_but_the_same_file_in_an_archive_follows_on_partial() {
+    let repo = tempfile::tempdir().unwrap();
+    fs::create_dir_all(repo.path().join(".git")).unwrap();
+    fs::write(
+        repo.path().join(".riskgrep.toml"),
+        "[limits]\ntext_max = 1024\nsample = 256\n",
+    )
+    .unwrap();
+    let body = vec![b'c'; 4096];
+    fs::write(repo.path().join("big.txt"), &body).unwrap();
+    fs::write(
+        repo.path().join("big.zip"),
+        synth::zip(&[("big.txt", body)]),
+    )
+    .unwrap();
+    let run = |target: &str| {
+        let mut c = riskgrep(repo.path());
+        c.env("GIT_CEILING_DIRECTORIES", repo.path().parent().unwrap())
+            .args(["scan", target, "--fail-at", "secret=80"]);
+        c.assert()
+    };
+    run("big.txt").code(0);
+    run("big.zip").code(2).stdout(predicate::str::contains(
+        "member 1 sampled (bytes 256..3840 not read)",
+    ));
+}

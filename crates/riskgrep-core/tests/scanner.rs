@@ -930,15 +930,34 @@ fn npz_unreadable_member_keeps_the_score_of_readable_ones() {
 }
 
 #[test]
-fn npz_unreadable_member_that_is_not_npy_changes_nothing() {
+fn npz_unreadable_member_that_is_not_npy_is_reported_as_in_any_zip() {
     for large in [false, true] {
         for damage in [wrong_crc as Damage, understated_size] {
             let data = damaged_npz(&["alice.npy", "notes.txt"], "notes.txt", damage, large);
             let (status, score) = scan_npz(large, data);
-            assert_eq!(status, TargetStatus::Scanned, "large {large}");
+            assert_eq!(
+                status,
+                TargetStatus::Partial {
+                    not_read: "member 2 unreadable".into()
+                },
+                "large {large}"
+            );
             assert_eq!(score, 70.0, "large {large}");
         }
     }
+}
+
+#[test]
+fn npz_wrong_checksum_on_a_member_past_the_bytes_read_is_not_noticed() {
+    // Only the first 4,096 bytes of a member are read, so its checksum is not
+    // checked; the documentation says so.
+    let mut data = synth::npz(&[("big.npy", synth::npy("<f4", &[40, 128]))]);
+    let (cd, local) = member_headers(&data, "big.npy");
+    wrong_crc(&mut data, cd, local);
+    assert!(data.len() > 4096);
+    let (status, score) = scan_npz(false, data);
+    assert_eq!(status, TargetStatus::Scanned);
+    assert_eq!(score, 70.0);
 }
 
 #[test]

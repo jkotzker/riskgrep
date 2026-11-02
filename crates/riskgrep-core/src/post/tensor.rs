@@ -149,8 +149,8 @@ impl Post for NpzMembers {
         let mut banks: BTreeMap<Vec<u64>, (u64, usize, ShapeFacts)> = BTreeMap::new();
         // Without a bank requirement, the first qualifying member decides.
         let mut first: Option<ShapeFacts> = None;
-        // The first `.npy` member that could not be read.
-        let mut unread: Option<usize> = None;
+        // The first `.npy` member that could not be read, or is no npy file.
+        let mut unread: Option<String> = None;
         for i in 0..zip.len().min(NPZ_MAX_MEMBERS) {
             // A member is in scope when its stored name ends in `.npy`; that
             // comes from the directory, so it holds when the data is damaged.
@@ -161,8 +161,9 @@ impl Post for NpzMembers {
             if !in_scope {
                 continue;
             }
+            let cannot_read = || format!("npz member {i} could not be read");
             let Ok(file) = zip.by_index(i) else {
-                unread.get_or_insert(i);
+                unread.get_or_insert_with(cannot_read);
                 continue;
             };
             let Some(name) = file
@@ -174,7 +175,11 @@ impl Post for NpzMembers {
             };
             let mut head = Vec::new();
             if file.take(NPZ_MEMBER_BYTES).read_to_end(&mut head).is_err() {
-                unread.get_or_insert(i);
+                unread.get_or_insert_with(cannot_read);
+                continue;
+            }
+            if !head.starts_with(NPY_MAGIC) {
+                unread.get_or_insert_with(|| format!("npz member {i} is not an npy file"));
                 continue;
             }
             let Some((dtype, shape)) = npy_float(&head) else {
@@ -211,10 +216,7 @@ impl Post for NpzMembers {
                 }),
         };
         match unread {
-            Some(i) => PostResult::Incomplete(
-                Box::new(verdict),
-                format!("npz member {i} could not be read"),
-            ),
+            Some(note) => PostResult::Incomplete(Box::new(verdict), note),
             None => verdict,
         }
     }
