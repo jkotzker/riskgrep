@@ -38,6 +38,19 @@ struct Entry {
     /// Bytes a directory entry holds that are not an empty stream: no member
     /// is offered for it, so they are not read.
     stray: u64,
+    /// The entry's comment; empty when it has none.
+    comment: Vec<u8>,
+}
+
+/// The comment bytes stored in the central header at `at`, undecoded, so a
+/// comment is read like an archive comment whatever encoding it claims.
+fn stored_comment(src: &dyn Source, at: u64) -> Option<Vec<u8>> {
+    let head = src.range(at, 46).ok()?;
+    if !head.starts_with(b"PK\x01\x02") {
+        return None;
+    }
+    let le16 = |i: usize| u64::from(u16::from_le_bytes([head[i], head[i + 1]]));
+    src.range(at + 46 + le16(28) + le16(30), le16(32)).ok()
 }
 
 /// Whether the `compressed` bytes at `start` hold nothing: there are none, or
@@ -224,6 +237,11 @@ impl Extractor for Zip {
                 } else {
                     0
                 };
+                let comment = match f.comment() {
+                    "" => Vec::new(),
+                    decoded => stored_comment(src, f.central_header_start())
+                        .unwrap_or_else(|| decoded.as_bytes().to_vec()),
+                };
                 Some(Entry {
                     is_dir,
                     name,
@@ -234,14 +252,23 @@ impl Extractor for Zip {
                     compressed,
                     encrypted: f.encrypted(),
                     stray,
+                    comment,
                 })
             })
             .collect();
+        let archive_comment = u64::from(!zip.comment().is_empty());
+        let comments = entries
+            .iter()
+            .flatten()
+            .filter(|e| !e.comment.is_empty())
+            .count() as u64;
         if !complete {
-            let files = (0..n)
-                .filter(|&i| !entry_name(&zip, i).ends_with('/'))
-                .count();
-            walk.rest(files as u64 + u64::from(!zip.comment().is_empty()));
+            // A directory entry not examined may hold a comment, like a
+            // file: both count, so the archive is not reported whole.
+            let unknown = (0..n)
+                .filter(|&i| !entry_name(&zip, i).ends_with('/') || entries[i].is_none())
+                .count() as u64;
+            walk.rest(unknown + comments + archive_comment);
             return Ok(());
         }
         let directory = zip.central_directory_start();
@@ -249,51 +276,61 @@ impl Extractor for Zip {
             unaccounted(src, &entries, directory) + after_directory(src, size, directory, n),
         );
         let comment = zip.comment().to_vec();
-        let offered: Vec<usize> = (0..n)
-            .filter(|&i| !entries[i].as_ref().is_some_and(|e| e.is_dir))
-            .collect();
-        for (k, &i) in offered.iter().enumerate() {
-            let flow = match &entries[i] {
-                None => walk.not_read(
-                    MemberMeta {
-                        name: entry_name(&zip, i),
-                        declared_size: None,
-                        compressed_size: None,
-                    },
-                    NotRead::Corrupt,
-                ),
-                Some(e) => {
-                    let meta = MemberMeta {
-                        name: e.name.clone(),
-                        declared_size: Some(e.size),
-                        compressed_size: Some(e.compressed),
-                    };
-                    if e.encrypted {
-                        walk.not_read(meta, NotRead::Encrypted)
-                    } else {
-                        match zip.by_index(i) {
-                            Ok(mut f) => walk.member(meta, &mut f),
-                            Err(zip::result::ZipError::UnsupportedArchive(m))
-                                if m == zip::result::ZipError::PASSWORD_REQUIRED =>
-                            {
-                                walk.not_read(meta, NotRead::Encrypted)
+        let is_member = |e: &Option<Entry>| !e.as_ref().is_some_and(|e| e.is_dir);
+        // Members and comments not offered yet.
+        let mut left =
+            entries.iter().filter(|e| is_member(e)).count() as u64 + comments + archive_comment;
+        for (i, entry) in entries.iter().enumerate() {
+            if is_member(entry) {
+                left -= 1;
+                let flow = match entry {
+                    None => walk.not_read(
+                        MemberMeta {
+                            name: entry_name(&zip, i),
+                            declared_size: None,
+                            compressed_size: None,
+                        },
+                        NotRead::Corrupt,
+                    ),
+                    Some(e) => {
+                        let meta = MemberMeta {
+                            name: e.name.clone(),
+                            declared_size: Some(e.size),
+                            compressed_size: Some(e.compressed),
+                        };
+                        if e.encrypted {
+                            walk.not_read(meta, NotRead::Encrypted)
+                        } else {
+                            match zip.by_index(i) {
+                                Ok(mut f) => walk.member(meta, &mut f),
+                                Err(zip::result::ZipError::UnsupportedArchive(m))
+                                    if m == zip::result::ZipError::PASSWORD_REQUIRED =>
+                                {
+                                    walk.not_read(meta, NotRead::Encrypted)
+                                }
+                                Err(zip::result::ZipError::UnsupportedArchive(_)) => {
+                                    walk.not_read(meta, NotRead::Unsupported)
+                                }
+                                Err(_) => walk.not_read(meta, NotRead::Corrupt),
                             }
-                            Err(zip::result::ZipError::UnsupportedArchive(_)) => {
-                                walk.not_read(meta, NotRead::Unsupported)
-                            }
-                            Err(_) => walk.not_read(meta, NotRead::Corrupt),
                         }
                     }
+                };
+                if flow == Flow::Stop {
+                    walk.rest(left);
+                    return Ok(());
                 }
-            };
-            if flow == Flow::Stop {
-                let unread_comment = u64::from(!comment.is_empty());
-                walk.rest((offered.len() - k - 1) as u64 + unread_comment);
-                return Ok(());
+            }
+            if let Some(e) = entry.as_ref().filter(|e| !e.comment.is_empty()) {
+                left -= 1;
+                if walk.comment(Some(&e.name), &mut &e.comment[..]) == Flow::Stop {
+                    walk.rest(left);
+                    return Ok(());
+                }
             }
         }
         if !comment.is_empty() {
-            walk.comment(&mut &comment[..]);
+            walk.comment(None, &mut &comment[..]);
         }
         Ok(())
     }

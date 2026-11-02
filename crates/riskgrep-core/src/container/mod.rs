@@ -124,9 +124,11 @@ pub trait Walk {
     fn member(&mut self, meta: MemberMeta, data: &mut dyn Read) -> Flow;
     /// A member that could not be read.
     fn not_read(&mut self, meta: MemberMeta, why: NotRead) -> Flow;
-    /// The container's comment, scanned as text under [`COMMENT_MEMBER`]
-    /// with the same limits as a member.
-    fn comment(&mut self, data: &mut dyn Read) -> Flow;
+    /// A comment, scanned as text with the same limits as a member: the
+    /// comment of the entry named `owner` as stored, under that name and
+    /// [`ENTRY_COMMENT`], or with no owner the container's own, under
+    /// [`COMMENT_MEMBER`].
+    fn comment(&mut self, owner: Option<&str>, data: &mut dyn Read) -> Flow;
     /// The number of members left unoffered after a `Flow::Stop`.
     fn rest(&mut self, n: u64);
     /// The deadline has passed: work done before offering members (such as
@@ -146,6 +148,11 @@ pub const RATIO_FLOOR: u64 = 1 << 20;
 /// single `!`, which [`escape_name`] never produces (a stored name ending
 /// in `!` gains one more), so no stored member can take it.
 pub const COMMENT_MEMBER: &str = "comment!";
+
+/// Added to an entry's escaped name to name its comment
+/// (`config/app.ini!comment!`). The result ends in a single `!`, so no stored
+/// member can take it, as for [`COMMENT_MEMBER`].
+pub const ENTRY_COMMENT: &str = "!comment!";
 
 /// Longest member path reported, in bytes; longer names are cut and marked.
 pub const NAME_MAX: usize = 1024;
@@ -606,7 +613,7 @@ impl Walk for Walker<'_> {
         Flow::Continue
     }
 
-    fn comment(&mut self, data: &mut dyn Read) -> Flow {
+    fn comment(&mut self, owner: Option<&str>, data: &mut dyn Read) -> Flow {
         let seq = match self.admit() {
             Ok(s) => s,
             Err(cause) => {
@@ -614,7 +621,10 @@ impl Walk for Walker<'_> {
                 return Flow::Stop;
             }
         };
-        let path = self.join(COMMENT_MEMBER.to_string());
+        let path = self.join(match owner {
+            Some(name) => format!("{}{ENTRY_COMMENT}", escape_name(name, seq)),
+            None => COMMENT_MEMBER.to_string(),
+        });
         if self.bytes_left == 0 {
             let cause = Cause::Limit("limits.container_bytes".into());
             self.unread(seq, Some(path), cause, false);

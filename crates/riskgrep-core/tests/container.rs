@@ -1063,3 +1063,177 @@ fn an_npz_member_over_the_text_limit_keeps_its_reason() {
         "member 1 not scanned (npz member 0 could not be read)"
     );
 }
+
+/// `z` with `comments[i]` as the comment of its central header `i`. The
+/// archive must have no entry comments yet, and no archive comment.
+fn with_entry_comments(z: &[u8], comments: &[&[u8]]) -> Vec<u8> {
+    let mut cds = headers(z, b"PK\x01\x02");
+    let end = headers(z, b"PK\x05\x06")[0];
+    assert_eq!(cds.len(), comments.len());
+    cds.push(end);
+    let mut out = z[..cds[0]].to_vec();
+    for (i, comment) in comments.iter().enumerate() {
+        let at = out.len();
+        out.extend_from_slice(&z[cds[i]..cds[i + 1]]);
+        out[at + 32..at + 34].copy_from_slice(&(comment.len() as u16).to_le_bytes());
+        out.extend_from_slice(comment);
+    }
+    let directory = out.len() - cds[0];
+    let mut record = z[end..].to_vec();
+    record[12..16].copy_from_slice(&(directory as u32).to_le_bytes());
+    [out, record].concat()
+}
+
+/// The members evidence names, in order, deduplicated.
+fn members_with_evidence(t: &TargetReport) -> Vec<String> {
+    let mut m: Vec<String> = t.evidence.iter().filter_map(|e| e.member.clone()).collect();
+    m.sort();
+    m.dedup();
+    m
+}
+
+#[test]
+fn an_entry_comment_is_scanned_under_a_reserved_name() {
+    let d = tempfile::tempdir().unwrap();
+    let z = with_entry_comments(
+        &synth::zip(&[("readme.txt", text("plain\n"))]),
+        &[&aws_file(42)],
+    );
+    let p = write(d.path(), "commented.zip", &z);
+    let first = scan(&mut scanner(), &p);
+    let t = only(&first).clone();
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert_eq!(members_with_evidence(&t), ["readme.txt!comment!"]);
+    let c = t.container.as_ref().unwrap();
+    assert_eq!((c.members, c.scanned), (2, 2));
+    // The comment's evidence comes back from the cache with its member.
+    let mut g = scanner();
+    assert_eq!(scan(&mut g, &p), first);
+    assert!(!g.bundle_loaded(), "a whole archive is cached");
+}
+
+#[test]
+fn an_entry_without_a_comment_adds_no_member() {
+    let d = tempfile::tempdir().unwrap();
+    let base = synth::zip(&[("a.txt", text("a\n")), ("b.txt", text("b\n"))]);
+    let p = write(d.path(), "plain.zip", &base);
+    let c = only(&scan(&mut scanner(), &p)).container.clone().unwrap();
+    assert_eq!((c.members, c.scanned), (2, 2));
+    let z = with_entry_comments(&base, &[b"note\n", b""]);
+    let p = write(d.path(), "one.zip", &z);
+    let c = only(&scan(&mut scanner(), &p)).container.clone().unwrap();
+    assert_eq!((c.members, c.scanned), (3, 3));
+}
+
+#[test]
+fn an_entry_comment_past_the_member_cap_makes_it_partial() {
+    let d = tempfile::tempdir().unwrap();
+    let z = with_entry_comments(&synth::zip(&[("a.txt", text("a\n"))]), &[&[b'x'; 64]]);
+    let p = write(d.path(), "long.zip", &z);
+    let mut cfg = Config::default();
+    cfg.limits.member_bytes = 16;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert_eq!(
+        partial(&t),
+        "member 2 read only in part (limits.member_bytes)"
+    );
+    assert_eq!(t.container.unwrap().listed[0].path, "a.txt!comment!");
+}
+
+#[test]
+fn entry_comments_count_against_the_shared_limits() {
+    let d = tempfile::tempdir().unwrap();
+    let z = with_entry_comments(
+        &synth::zip(&[("a.txt", text("a\n")), ("b.txt", text("b\n"))]),
+        &[b"note a\n", b"note b\n"],
+    );
+    let p = write(d.path(), "counted.zip", &z);
+    let mut cfg = Config::default();
+    cfg.limits.container_members = 1;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert_eq!(
+        partial(&t),
+        "members 2..4 not read (limits.container_members)"
+    );
+    let c = t.container.unwrap();
+    assert_eq!((c.members, c.scanned, c.not_read), (4, 1, 3));
+    let mut cfg = Config::default();
+    cfg.limits.container_bytes = "a\n".len() as u64;
+    let t = only(&scan(&mut scanner_with(cfg), &p)).clone();
+    assert!(
+        partial(&t).contains("not read (limits.container_bytes)"),
+        "{}",
+        partial(&t)
+    );
+}
+
+#[test]
+fn reserved_comment_names_do_not_collide_with_stored_names() {
+    let d = tempfile::tempdir().unwrap();
+    // A stored member spelled like the comment of `a.txt`, and one like the
+    // archive comment, each holding a key; `a.txt` and `b!` have comments
+    // holding one too.
+    let z = with_entry_comments(
+        &synth::zip(&[
+            ("a.txt", text("a\n")),
+            ("a.txt!comment!", aws_file(43)),
+            ("b!", text("b\n")),
+            ("comment!", aws_file(44)),
+        ]),
+        &[&aws_file(45), b"", &aws_file(46), b""],
+    );
+    let p = write(d.path(), "names.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(
+        members_with_evidence(&t),
+        [
+            "a.txt!comment!",
+            "a.txt!comment!!",
+            "b!!!comment!",
+            "comment!!"
+        ]
+    );
+}
+
+#[test]
+fn comments_of_directory_nested_and_encrypted_entries_are_scanned() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = with_entry_comments(&with_entry("docs/", 0, &[], false), &[&aws_file(47), b""]);
+    let p = write(d.path(), "dir.zip", &dir);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(members_with_evidence(&t), ["docs/!comment!"]);
+    let inner = with_entry_comments(&synth::zip(&[("x.txt", text("x\n"))]), &[&aws_file(48)]);
+    let p = write(d.path(), "nested.zip", &synth::zip(&[("inner.zip", inner)]));
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(members_with_evidence(&t), ["inner.zip!/x.txt!comment!"]);
+    let mut locked = with_entry_comments(&synth::zip(&[("s.txt", text("s\n"))]), &[&aws_file(49)]);
+    mark_encrypted(&mut locked, 0);
+    let p = write(d.path(), "locked.zip", &locked);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(partial(&t), "member 1 encrypted");
+    assert_eq!(members_with_evidence(&t), ["s.txt!comment!"]);
+}
+
+#[test]
+fn an_entry_comment_is_read_as_the_bytes_stored() {
+    let d = tempfile::tempdir().unwrap();
+    // UTF-16 with a byte-order mark, which the zip library's text decoding
+    // of a comment would turn into something else.
+    let utf16: Vec<u8> = [0xff, 0xfe]
+        .into_iter()
+        .chain(
+            String::from_utf8(aws_file(50))
+                .unwrap()
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
+        )
+        .collect();
+    let z = with_entry_comments(&synth::zip(&[("a.txt", text("a\n"))]), &[&utf16]);
+    let p = write(d.path(), "utf16.zip", &z);
+    let t = only(&scan(&mut scanner(), &p)).clone();
+    assert_eq!(t.scores[&secret()], 95.0);
+    assert_eq!(members_with_evidence(&t), ["a.txt!comment!"]);
+}
