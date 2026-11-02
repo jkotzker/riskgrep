@@ -124,6 +124,7 @@ fn run_with(entries: &[Entry], limits: &Limits, deadline: Instant) -> Extracted 
     extract_with(
         &Test,
         lookup,
+        "",
         &&bytes[..],
         bytes.len() as u64,
         limits,
@@ -323,6 +324,7 @@ fn an_unreadable_structure_is_unscanned() {
     let x = extract_with(
         &Test,
         lookup,
+        "",
         &&bytes[..],
         bytes.len() as u64,
         &Limits::default(),
@@ -503,6 +505,18 @@ impl Walk for Expiring {
         left == 0
     }
     fn unaccounted(&mut self, _: u64) {}
+    fn without_data(&mut self) -> Flow {
+        panic!("counted an entry past the deadline");
+    }
+    fn stream_limits(&self) -> StreamLimits {
+        StreamLimits {
+            bytes: u64::MAX,
+            ratio: u64::MAX,
+        }
+    }
+    fn own_name(&self) -> &str {
+        ""
+    }
 }
 
 fn left_at_deadline(z: &[u8], checks: u32) -> u64 {
@@ -522,6 +536,29 @@ fn entries_past_the_deadline_are_counted_as_not_read() {
     assert_eq!(left_at_deadline(&z, 0), 2);
     let z = crate::synth::zip(&[("docs/", empty())]);
     assert_eq!(left_at_deadline(&z, 0), 1);
+}
+
+#[test]
+fn tar_and_gzip_offer_nothing_past_the_deadline() {
+    let tar = crate::synth::tar(&[("a.txt", text("a\n"))]);
+    let gz = crate::synth::gzip(&tar);
+    let mut w = Expiring {
+        checks: 0.into(),
+        rest: 0,
+    };
+    let e = tar::TAR.extract(&&tar[..], tar.len() as u64, &mut w);
+    assert_eq!(e, Err(ContainerError("timeout".into())));
+    let mut w = Expiring {
+        checks: 0.into(),
+        rest: 0,
+    };
+    let e = gzip::GZIP.extract(&&gz[..], gz.len() as u64, &mut w);
+    assert_eq!(
+        e,
+        Err(ContainerError(
+            "gzip stream not read past limits.time_budget_ms".into()
+        ))
+    );
 }
 
 #[test]

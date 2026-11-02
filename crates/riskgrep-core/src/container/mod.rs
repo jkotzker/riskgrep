@@ -21,6 +21,8 @@ use std::fmt::Write as _;
 use std::io::Read;
 use std::time::Instant;
 
+pub mod gzip;
+pub mod tar;
 pub mod zip;
 
 /// A container format, as classification recognises it.
@@ -32,6 +34,9 @@ pub enum ContainerKind {
     SevenZ,
     Pdf,
     Sqlite,
+    /// A compressed stream of a format with no reader, by the name reasons
+    /// give it (`xz`).
+    Compressed(&'static str),
 }
 
 impl ContainerKind {
@@ -44,6 +49,7 @@ impl ContainerKind {
             ContainerKind::SevenZ => "7z",
             ContainerKind::Pdf => "pdf",
             ContainerKind::Sqlite => "sqlite",
+            ContainerKind::Compressed(name) => name,
         }
     }
 }
@@ -78,11 +84,12 @@ pub fn not_scanned_reason(kind: ContainerKind) -> String {
 pub fn extractor(kind: ContainerKind) -> Option<&'static dyn Extractor> {
     match kind {
         ContainerKind::Zip => Some(&zip::ZIP),
-        ContainerKind::Tar
-        | ContainerKind::Gzip
-        | ContainerKind::SevenZ
+        ContainerKind::Tar => Some(&tar::TAR),
+        ContainerKind::Gzip => Some(&gzip::GZIP),
+        ContainerKind::SevenZ
         | ContainerKind::Pdf
-        | ContainerKind::Sqlite => None,
+        | ContainerKind::Sqlite
+        | ContainerKind::Compressed(_) => None,
     }
 }
 
@@ -120,6 +127,8 @@ pub enum Hidden {
     LocalName,
     /// The local header could not be read to compare its name.
     LocalHeader,
+    /// Its data ends before it should, or a checksum over it does not hold.
+    Damaged,
 }
 
 impl Hidden {
@@ -129,8 +138,22 @@ impl Hidden {
             Hidden::PastData(n) => format!("{n} bytes after its data not read"),
             Hidden::LocalName => "local header name differs from the directory".into(),
             Hidden::LocalHeader => "local header not read".into(),
+            Hidden::Damaged => "its data ends early or is corrupt".into(),
         }
     }
+}
+
+/// What a stream wrapped around a container's members (gzip around a tar) may
+/// produce. The walk's limits count members, so the stream needs its own count
+/// to stop a bomb before any member is seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamLimits {
+    /// Bytes to produce at most: [`FRAMING`] for each member left, and one more
+    /// than the walk can still read, so a stream stopped here always runs over
+    /// the walk's own limit and is never taken for a whole member.
+    pub bytes: u64,
+    /// Bytes produced per byte consumed, past [`RATIO_FLOOR`].
+    pub ratio: u64,
 }
 
 /// Whether the extractor should go on offering members.
@@ -147,6 +170,9 @@ pub trait Walk {
     fn member(&mut self, meta: MemberMeta, data: &mut dyn Read) -> Flow;
     /// A member that could not be read.
     fn not_read(&mut self, meta: MemberMeta, why: NotRead) -> Flow;
+    /// An entry with nothing to read (a link or a device). It takes a position
+    /// and counts as skipped, so it counts toward the member limit.
+    fn without_data(&mut self) -> Flow;
     /// A comment, scanned as text with the same limits as a member: the
     /// comment of the entry named `owner` as stored, under that name and
     /// [`ENTRY_COMMENT`], or with no owner the container's own, under
@@ -169,11 +195,20 @@ pub trait Walk {
     /// (data before the first member or between members): they are not read,
     /// so the container is never reported whole.
     fn unaccounted(&mut self, bytes: u64);
+    /// What a stream wrapped around this container's members may produce now.
+    fn stream_limits(&self) -> StreamLimits;
+    /// The container's own name as stored (empty when not known), for a format
+    /// that names its one member after the container.
+    fn own_name(&self) -> &str;
 }
 
 /// Bytes a member may always produce whatever its compression ratio, so a
 /// small, very repetitive file is not mistaken for a decompression bomb.
 pub const RATIO_FLOOR: u64 = 1 << 20;
+
+/// Bytes a stream may produce for each member beyond its content: a tar header,
+/// its padding, and a PAX or GNU long-name header for it.
+pub const FRAMING: u64 = 4096;
 
 /// The member name an archive's comment is scanned under. It ends in a
 /// single `!`, which [`escape_name`] never produces (a stored name ending
@@ -464,6 +499,8 @@ struct Walker<'l> {
     depth: u32,
     /// Escaped paths of the nested containers being walked.
     prefix: Vec<String>,
+    /// The name of the container being walked, as stored.
+    own_name: String,
     /// Why the walk stopped offering members, once it has.
     stop: Option<Cause>,
     /// The member last offered, when any of it was read.
@@ -500,13 +537,27 @@ pub fn extract(
     limits: &Limits,
     deadline: Instant,
 ) -> Extracted {
-    extract_with(ext, extractor, src, size, limits, deadline)
+    extract_named(ext, "", src, size, limits, deadline)
+}
+
+/// [`extract`] for a container with a file name, which a format with no member
+/// names of its own (gzip) names its member after.
+pub fn extract_named(
+    ext: &dyn Extractor,
+    name: &str,
+    src: &dyn Source,
+    size: u64,
+    limits: &Limits,
+    deadline: Instant,
+) -> Extracted {
+    extract_with(ext, extractor, name, src, size, limits, deadline)
 }
 
 /// [`extract`] with nested containers opened by `lookup`'s extractors.
 fn extract_with(
     ext: &dyn Extractor,
     lookup: Lookup,
+    name: &str,
     src: &dyn Source,
     size: u64,
     limits: &Limits,
@@ -522,6 +573,7 @@ fn extract_with(
         seq: 0,
         depth: 1,
         prefix: Vec::new(),
+        own_name: name.to_string(),
         stop: None,
         last: None,
         out: Extracted {
@@ -707,6 +759,19 @@ impl Walk for Walker<'_> {
         Flow::Continue
     }
 
+    fn without_data(&mut self) -> Flow {
+        match self.admit() {
+            Ok(_) => {
+                self.out.skipped += 1;
+                Flow::Continue
+            }
+            Err(cause) => {
+                self.unread(self.seq, None, cause, false);
+                Flow::Stop
+            }
+        }
+    }
+
     fn comment(&mut self, owner: Option<&str>, data: &mut dyn Read) -> Flow {
         let seq = match self.admit() {
             Ok(s) => s,
@@ -781,6 +846,21 @@ impl Walk for Walker<'_> {
         self.out.uncovered = self.out.uncovered.saturating_add(bytes);
     }
 
+    fn stream_limits(&self) -> StreamLimits {
+        let members = u64::from(self.limits.container_members).saturating_sub(self.seq);
+        StreamLimits {
+            bytes: self
+                .bytes_left
+                .saturating_add(members.saturating_mul(FRAMING))
+                .saturating_add(1),
+            ratio: u64::from(self.limits.container_ratio),
+        }
+    }
+
+    fn own_name(&self) -> &str {
+        &self.own_name
+    }
+
     fn rest(&mut self, n: u64) {
         let cause = self.stop.clone().unwrap_or_else(|| {
             Cause::Limit(if self.expired() {
@@ -852,7 +932,9 @@ impl Walker<'_> {
             }
             self.depth += 1;
             self.prefix.push(escape_name(&meta.name, seq));
+            let outer = std::mem::replace(&mut self.own_name, meta.name.clone());
             let r = ext.extract(&&bytes[..], bytes.len() as u64, self);
+            self.own_name = outer;
             self.prefix.pop();
             self.depth -= 1;
             return match r {

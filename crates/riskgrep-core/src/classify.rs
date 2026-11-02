@@ -175,9 +175,29 @@ pub fn safetensors_header_fits(head: &[u8], size: u64) -> bool {
     }
 }
 
-fn ends_with_ignore_case(name: &str, suffix: &str) -> bool {
+pub(crate) fn ends_with_ignore_case(name: &str, suffix: &str) -> bool {
     name.len() >= suffix.len()
         && name.as_bytes()[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix.as_bytes())
+}
+
+/// The name of the compressed-stream format `head` starts with, among those
+/// with no reader whose magic is distinctive. Such a file holds content that is
+/// not read, so it must not pass as an unknown binary. `BZh` alone could start
+/// text: bzip2 needs its level digit and the magic of its first block, or of the
+/// end of the stream when it is empty. Formats with no magic of at least four
+/// bytes are not here: raw LZMA and brotli have none, and Unix compress has two.
+fn compressed_stream(head: &[u8]) -> Option<&'static str> {
+    match head {
+        [b'B', b'Z', b'h', b'1'..=b'9', 0x31, 0x41, 0x59, 0x26, 0x53, 0x59, ..]
+        | [b'B', b'Z', b'h', b'1'..=b'9', 0x17, 0x72, 0x45, 0x38, 0x50, 0x90, ..] => Some("bzip2"),
+        [0xFD, b'7', b'z', b'X', b'Z', 0, ..] => Some("xz"),
+        [0x28, 0xB5, 0x2F, 0xFD, ..] => Some("zstd"),
+        [b'L', b'Z', b'I', b'P', 1, ..] => Some("lzip"),
+        [0x04, 0x22, 0x4D, 0x18, ..] | [0x02, 0x21, 0x4C, 0x18, ..] => Some("lz4"),
+        [0x89, b'L', b'Z', b'O', 0, b'\r', b'\n', 0x1A, b'\n', ..] => Some("lzop"),
+        [0xFF, 0x06, 0, 0, b's', b'N', b'a', b'P', b'p', b'Y', ..] => Some("snappy"),
+        _ => None,
+    }
 }
 
 fn image_kind(head: &[u8]) -> Option<&'static str> {
@@ -297,8 +317,11 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
     if head.starts_with(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]) {
         return FileClass::Container(ContainerKind::SevenZ);
     }
-    if head.get(257..262) == Some(b"ustar") {
+    if crate::container::tar::is_tar(head) {
         return FileClass::Container(ContainerKind::Tar);
+    }
+    if let Some(format) = compressed_stream(head) {
+        return FileClass::Container(ContainerKind::Compressed(format));
     }
     if let Some(kind) = image_kind(head) {
         return FileClass::Image(kind);

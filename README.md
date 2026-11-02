@@ -94,7 +94,7 @@ walk_files = 20000
 
 `limits.walk_files` is the most files one directory walk visits (default 10,000); a directory with more is reported unscanned, and the Claude Code hook applies the same limit to the files a `Grep` would search, to directory walks, and to the names a `Glob` or a directory-listing MCP tool would reveal.
 
-Zip archives (and jar, docx, xlsx, and wheel files) are opened and their members scanned like files; findings name the member as `archive.zip!/path/in/archive`. The members of one archive, nested archives included, share these limits, shown with their defaults:
+Zip archives (and jar, docx, xlsx, and wheel files), tar archives, and gzip files (`.tar.gz`, `.tgz`, and `.gz`) are opened and their members scanned like files; findings name the member as `archive.zip!/path/in/archive`, `archive.tar.gz!/path/in/archive`, or `app.log.gz!/app.log`. The members of one archive, nested archives included, share these limits, shown with their defaults:
 
 ```toml
 [limits]
@@ -111,7 +111,7 @@ on_partial = "error"         # a target read in part: "error" follows on_error, 
 on_partial = "error"
 ```
 
-A target with content that was not read is reported `partial` and never passes silently: `on_partial` applies, and by default it follows `on_error`, so the Claude Code hook asks and the git hook blocks. That covers text over `limits.text_max` (8 MiB), which is sampled at its ends; a key store or `.npy` header over the text limit; a safetensors header over 100 MiB; standard input over 64 MiB; an archive with a member not read whole (a limit reached, an encrypted member, or a member sampled because it is over the text limit); and an `.npz` with a member named `.npy` that cannot be read or is not an npy file, or with members past the 1,024th (an `.npz` with any other member, or a comment, is read as a zip archive). A finding in the part read keeps its result, and `on_partial` never lowers a decision. `[ignore]` and baselines suppress findings, not this status. See [Files read in part](docs/known-limitations.md#files-read-in-part) and [Zip members are read within shared limits](docs/known-limitations.md#zip-members-are-read-within-shared-limits).
+A target with content that was not read is reported `partial` and never passes silently: `on_partial` applies, and by default it follows `on_error`, so the Claude Code hook asks and the git hook blocks. That covers text over `limits.text_max` (8 MiB), which is sampled at its ends; a key store or `.npy` header over the text limit; a safetensors header over 100 MiB; standard input over 64 MiB; an archive with a member not read whole (a limit reached, an encrypted member, or a member sampled because it is over the text limit); and an `.npz` with a member named `.npy` that cannot be read or is not an npy file, or with members past the 1,024th (an `.npz` with any other member, or a comment, is read as a zip archive). A finding in the part read keeps its result, and `on_partial` never lowers a decision. `[ignore]` and baselines suppress findings, not this status. See [Files read in part](docs/known-limitations.md#files-read-in-part), [Zip members are read within shared limits](docs/known-limitations.md#zip-members-are-read-within-shared-limits), and [the same for tar and gzip](docs/known-limitations.md#tar-and-gzip-members-are-read-within-the-same-limits).
 
 Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weights (`weight_overrides`), and list paths and rules to ignore (`[ignore]`).
 

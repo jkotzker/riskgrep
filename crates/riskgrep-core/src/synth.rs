@@ -136,6 +136,55 @@ pub fn zip(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
     w.finish().expect("zip finish").into_inner()
 }
 
+/// A ustar header block for an entry of `kind` (the type flag byte, `b'0'` for
+/// a regular file) declaring `size` bytes. `name` fits the 100-byte name field.
+pub fn tar_header(name: &str, kind: u8, size: u64) -> [u8; 512] {
+    let mut h = [0u8; 512];
+    h[..name.len()].copy_from_slice(name.as_bytes());
+    h[100..107].copy_from_slice(b"0000644");
+    h[108..115].copy_from_slice(b"0000000");
+    h[116..123].copy_from_slice(b"0000000");
+    h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+    h[136..147].copy_from_slice(b"00000000000");
+    h[156] = kind;
+    h[257..263].copy_from_slice(b"ustar\0");
+    h[263..265].copy_from_slice(b"00");
+    tar_seal(&mut h);
+    h
+}
+
+/// Write the checksum of a tar header block.
+pub fn tar_seal(h: &mut [u8; 512]) {
+    h[148..156].fill(b' ');
+    let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+    h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+}
+
+/// One tar entry: its header, `data`, and zero padding to a whole block.
+pub fn tar_entry(name: &str, kind: u8, data: &[u8]) -> Vec<u8> {
+    let mut out = tar_header(name, kind, data.len() as u64).to_vec();
+    out.extend_from_slice(data);
+    out.resize(out.len().div_ceil(512) * 512, 0);
+    out
+}
+
+/// A tar archive of `(member name, bytes)` pairs, with its end marker.
+pub fn tar(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut out: Vec<u8> = members
+        .iter()
+        .flat_map(|(name, data)| tar_entry(name, b'0', data))
+        .collect();
+    out.resize(out.len() + 1024, 0);
+    out
+}
+
+/// `data` as one gzip stream, with no name in its header.
+pub fn gzip(data: &[u8]) -> Vec<u8> {
+    let mut w = flate2::GzBuilder::new().write(Vec::new(), flate2::Compression::default());
+    w.write_all(data).expect("gzip data");
+    w.finish().expect("gzip finish")
+}
+
 /// A safetensors file from `(name, dtype, shape)` triples, with random data.
 /// `dtype` uses safetensors names (`F32`, `I64`, ...).
 pub fn safetensors(tensors: &[(&str, &str, &[u64])]) -> Vec<u8> {
