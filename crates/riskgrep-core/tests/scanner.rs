@@ -977,6 +977,75 @@ fn npz_with_unreadable_member_is_never_cached_as_scanned() {
     }
 }
 
+/// An `.npz` of `count` members named `.npy`, small integer arrays except an
+/// embedding-shaped float array at index `tensor_at`.
+fn npz_with_a_tensor_at(count: usize, tensor_at: usize) -> Vec<u8> {
+    let names: Vec<String> = (0..count).map(|i| format!("m{i:05}.npy")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let npy = if i == tensor_at {
+                synth::npy("<f4", &[1, 512])
+            } else {
+                synth::npy("<i4", &[4])
+            };
+            (n.as_str(), npy)
+        })
+        .collect();
+    synth::npz(&members)
+}
+
+fn past_the_cap(count: usize) -> TargetStatus {
+    TargetStatus::Partial {
+        not_read: format!("npz members past the first 1024 not read ({count} members)"),
+    }
+}
+
+#[test]
+fn npz_with_members_past_the_cap_is_partial() {
+    // Read whole and over the text limit, the tensor in the last member read
+    // and in the first one not read.
+    for large in [false, true] {
+        let (status, score) = scan_npz(large, npz_with_a_tensor_at(1024, 1023));
+        assert_eq!(status, TargetStatus::Scanned, "large {large}");
+        assert_eq!(score, 70.0, "large {large}");
+        let (status, score) = scan_npz(large, npz_with_a_tensor_at(1025, 1023));
+        assert_eq!(status, past_the_cap(1025), "large {large}");
+        assert_eq!(score, 70.0, "large {large}");
+        let (status, score) = scan_npz(large, npz_with_a_tensor_at(1025, 1024));
+        assert_eq!(status, past_the_cap(1025), "large {large}");
+        assert_eq!(score, 0.0, "large {large}");
+    }
+}
+
+#[test]
+fn npz_past_the_cap_follows_on_partial_and_is_never_cached_as_scanned() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("many.npz");
+    fs::write(&f, npz_with_a_tensor_at(1030, 1029)).unwrap();
+    age(&f);
+    for run in 0..2 {
+        let r = scanner().scan_paths(std::slice::from_ref(&f));
+        let t = only(&r);
+        assert_eq!(t.status, past_the_cap(1030), "run {run}");
+        assert!(t.unseen_part().is_some(), "run {run}");
+    }
+}
+
+#[test]
+fn npz_with_an_unreadable_member_names_that_before_the_cap() {
+    // Both apply: the first note stays, as for several unreadable members.
+    let mut data = npz_with_a_tensor_at(1030, 5);
+    let (cd, local) = member_headers(&data, "m00003.npy");
+    wrong_crc(&mut data, cd, local);
+    for large in [false, true] {
+        let (status, score) = scan_npz(large, data.clone());
+        assert_eq!(status, unread(3), "large {large}");
+        assert_eq!(score, 70.0, "large {large}");
+    }
+}
+
 #[test]
 fn npz_over_text_limit_bank_before_large_member() {
     let d = tempfile::tempdir().unwrap();

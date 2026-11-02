@@ -4,7 +4,7 @@
 
 use crate::container::ContainerKind;
 use crate::encoding::{self, Decoded, Encoding, Utf};
-use crate::post::{NPZ_MAX_MEMBERS, NPZ_MEMBER_BYTES};
+use crate::post::{npz_past_the_cap, NPZ_MAX_MEMBERS, NPZ_MEMBER_BYTES};
 use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
@@ -477,23 +477,25 @@ fn npz_member_headers<S: Source + ?Sized>(src: &S, size: u64) -> Content {
             return Content::unscanned("npz member headers could not be re-encoded".into());
         }
     }
+    // The first unreadable member, else the members past the cap, which the
+    // post-processor cannot see: the re-encoded archive holds at most the cap.
+    let note = unread
+        .map(|i| format!("npz member {i} could not be read"))
+        .or_else(|| npz_past_the_cap(zip.len()));
     match out.finish() {
         Ok(c) => Content {
-            read_failed: unread.is_some(),
-            ..Content::whole(
-                c.into_inner(),
-                unread.map(|i| format!("npz member {i} could not be read")),
-            )
+            read_failed: note.is_some(),
+            ..Content::whole(c.into_inner(), note)
         },
         Err(_) => Content::unscanned("npz member headers could not be re-encoded".into()),
     }
 }
 
 /// `class`, unless it is an `.npz` that the tensor path would not read in
-/// full: one with a member not named `.npy`, or one whose directory does not
-/// parse from offset 0, is a zip like any other. A directory over its budget
-/// stays as it is, as does an unparseable one over the text limit, which is
-/// reported unscanned.
+/// full: one with a member not named `.npy`, with an archive or entry comment,
+/// or whose directory does not parse from offset 0, is a zip like any other.
+/// A directory over its budget stays as it is, as does an unparseable one over
+/// the text limit, which is reported unscanned.
 pub fn settle_npz<S: Source + ?Sized>(
     class: FileClass,
     src: &S,
@@ -510,11 +512,18 @@ pub fn settle_npz<S: Source + ?Sized>(
         archive_offset: zip::read::ArchiveOffset::Known(0),
     };
     let tensors = match zip::ZipArchive::with_config(config, reader) {
-        Ok(zip) if !over.get() => (0..zip.len()).all(|i| {
-            zip.name_for_index(i)
-                .and_then(Result::ok)
-                .is_some_and(|n| n.ends_with(".npy"))
-        }),
+        // The comments come from the directory read above, so they cost no
+        // more reads: the tensor path reads none of them.
+        Ok(zip) if !over.get() => {
+            zip.comment().is_empty()
+                && (0..zip.len()).all(|i| {
+                    let npy = zip
+                        .name_for_index(i)
+                        .and_then(Result::ok)
+                        .is_some_and(|n| n.ends_with(".npy"));
+                    npy && zip.by_index_data(i).is_ok_and(|e| e.comment().is_empty())
+                })
+        }
         _ => over.get() || size > limits.text_max,
     };
     if tensors {
