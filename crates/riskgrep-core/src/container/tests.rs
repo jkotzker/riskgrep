@@ -466,7 +466,7 @@ fn describe_merges_positions_into_ranges() {
         .chain([u(40, Cause::Corrupt), u(41, Cause::Corrupt)])
         .collect();
     assert_eq!(
-        describe(&unread, 0, Some("truncated")),
+        describe(&unread, 0, &BTreeMap::new(), Some("truncated")),
         "members 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, … encrypted; \
          members 40..41 unreadable; container structure: truncated"
     );
@@ -484,6 +484,7 @@ impl Walk for Expiring {
         false
     }
     fn hidden(&mut self, _: Hidden) {}
+    fn directory_entry(&mut self, _: Hidden) {}
     fn member(&mut self, _: MemberMeta, _: &mut dyn Read) -> Flow {
         panic!("offered a member past the deadline");
     }
@@ -543,6 +544,95 @@ fn comments_found_before_the_deadline_are_counted_as_not_read() {
     assert_eq!(left_at_deadline(&out, 1), 257 + 1);
 }
 
+/// `bytes`, except that a read starting at `gone` fails when it is for `len`.
+struct Holed<'a> {
+    bytes: &'a [u8],
+    gone: u64,
+    len: u64,
+}
+
+impl Source for Holed<'_> {
+    fn range(&self, at: u64, len: u64) -> std::io::Result<Vec<u8>> {
+        if (at, len) == (self.gone, self.len) {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        (&self.bytes).range(at, len)
+    }
+}
+
+fn extract_holed(z: &[u8], gone: u64, len: u64) -> Extracted {
+    let src = Holed {
+        bytes: z,
+        gone,
+        len,
+    };
+    extract(
+        &zip::ZIP,
+        &src,
+        z.len() as u64,
+        &Limits::default(),
+        Instant::now() + Duration::from_secs(60),
+    )
+}
+
+#[test]
+fn a_directory_entry_whose_local_header_cannot_be_read_makes_it_partial() {
+    let z = crate::synth::zip(&[("docs/", Vec::new()), ("a.txt", b"a\n".to_vec())]);
+    assert_eq!(
+        extract_holed(&z, 0, 30).status(),
+        TargetStatus::Partial {
+            not_read: "1 directory entry: local header not read".into()
+        }
+    );
+    // Its name, which is as long as the directory says.
+    assert_eq!(
+        extract_holed(&z, 30, 5).status(),
+        TargetStatus::Partial {
+            not_read: "1 directory entry: local header not read".into()
+        }
+    );
+    assert_eq!(extract_holed(&z, 0, 31).status(), TargetStatus::Scanned);
+}
+
+#[test]
+fn a_member_whose_local_header_cannot_be_read_makes_it_partial() {
+    let z = crate::synth::zip(&[("a.txt", b"a\n".to_vec())]);
+    assert_eq!(
+        extract_holed(&z, 0, 30).status(),
+        TargetStatus::Partial {
+            not_read: "member 1 read only in part (local header not read)".into()
+        }
+    );
+}
+
+#[test]
+fn only_a_member_still_read_in_part_counts_as_something_read() {
+    let u = |partly, cause| Unread {
+        seq: 1,
+        last: 1,
+        path: None,
+        cause,
+        partly,
+    };
+    let hidden = || Cause::Hidden(Hidden::LocalName);
+    let none = BTreeMap::new();
+    let of = |unread: &[Unread]| status(false, unread, 0, &none, None);
+    assert!(matches!(
+        of(&[u(true, hidden())]),
+        TargetStatus::Partial { .. }
+    ));
+    // Read in part, then its scan did not finish, so nothing was seen.
+    let timed_out = Cause::Scan("timeout".into());
+    assert!(matches!(
+        of(&[u(true, hidden()), u(false, timed_out)]),
+        TargetStatus::Unscanned { .. }
+    ));
+    assert!(matches!(
+        of(&[u(false, Cause::Encrypted)]),
+        TargetStatus::Unscanned { .. }
+    ));
+}
+
 /// A source that cannot be read.
 struct NoBytes;
 
@@ -555,7 +645,10 @@ impl Source for NoBytes {
 #[test]
 fn bytes_that_could_not_be_checked_count_as_not_read() {
     assert_eq!(zip::past_stream(&NoBytes, 0, 40, 10), 40);
-    assert_eq!(zip::differing_local_name(&NoBytes, 0, b"a.txt"), Some(0));
+    assert_eq!(
+        zip::local_name_check(&NoBytes, 0, b"a.txt"),
+        Some(Hidden::LocalHeader)
+    );
     // A stream that makes more than the declared size is not followed further.
     let mut data = {
         let mut encode = flate2::Compress::new(flate2::Compression::none(), false);

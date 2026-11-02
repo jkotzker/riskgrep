@@ -35,29 +35,34 @@ struct Entry {
     size: u64,
     compressed: u64,
     encrypted: bool,
-    /// Bytes a directory entry holds that are not an empty stream, and a
-    /// local name that differs: no member is offered for it, so they are not
-    /// read.
+    /// Bytes a directory entry holds that are not an empty stream: no member
+    /// is offered for it, so they are not read.
     stray: u64,
     /// Where its data starts.
     data_start: u64,
     /// Its data is a deflate stream that can be read without a password.
     deflated: bool,
-    /// Its local header names it differently from the directory.
-    local_name_differs: bool,
+    /// What its local header's name does not confirm, if anything.
+    local_name: Option<Hidden>,
     /// The entry's comment; empty when it has none.
     comment: Vec<u8>,
 }
 
-/// The length of the name in the local header at `at` when it is not `name`,
-/// or could not be read to tell.
-pub(super) fn differing_local_name(src: &dyn Source, at: u64, name: &[u8]) -> Option<u64> {
+/// How the name in the local header at `at` falls short of `name`: it differs,
+/// or it could not be read to tell.
+pub(super) fn local_name_check(src: &dyn Source, at: u64, name: &[u8]) -> Option<Hidden> {
     let Ok(head) = src.range(at, 30) else {
-        return Some(0);
+        return Some(Hidden::LocalHeader);
     };
     let len = u64::from(u16::from_le_bytes([head[26], head[27]]));
-    let same = len == name.len() as u64 && src.range(at + 30, len).is_ok_and(|n| n == name);
-    (!same).then_some(len)
+    if len != name.len() as u64 {
+        return Some(Hidden::LocalName);
+    }
+    match src.range(at + 30, len) {
+        Ok(n) if n == name => None,
+        Ok(_) => Some(Hidden::LocalName),
+        Err(_) => Some(Hidden::LocalHeader),
+    }
 }
 
 /// Bytes of the `compressed` deflated bytes at `start` after the end of their
@@ -219,7 +224,7 @@ impl Extractor for Zip {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn extract(
@@ -276,13 +281,11 @@ impl Extractor for Zip {
                 let is_dir = name.ends_with('/') && f.size() == 0;
                 let deflated =
                     f.compression() == zip::CompressionMethod::Deflated && !f.encrypted();
-                let local_name = differing_local_name(src, f.header_start(), f.name_raw());
                 let stray = if is_dir && !holds_nothing(src, deflated, data_start, compressed) {
                     compressed.min(size.saturating_sub(data_start))
                 } else {
                     0
                 };
-                let stray = stray + if is_dir { local_name.unwrap_or(0) } else { 0 };
                 let comment = match f.comment() {
                     "" => Vec::new(),
                     decoded => stored_comment(src, f.central_header_start())
@@ -300,7 +303,7 @@ impl Extractor for Zip {
                     stray,
                     data_start,
                     deflated,
-                    local_name_differs: local_name.is_some(),
+                    local_name: local_name_check(src, f.header_start(), f.name_raw()),
                     comment,
                 })
             })
@@ -324,6 +327,11 @@ impl Extractor for Zip {
         walk.unaccounted(
             unaccounted(src, &entries, directory) + after_directory(src, size, directory, n),
         );
+        for e in entries.iter().flatten().filter(|e| e.is_dir) {
+            if let Some(what) = e.local_name {
+                walk.directory_entry(what);
+            }
+        }
         let comment = zip.comment().to_vec();
         let is_member = |e: &Option<Entry>| !e.as_ref().is_some_and(|e| e.is_dir);
         // Members and comments not offered yet.
@@ -353,8 +361,8 @@ impl Extractor for Zip {
                             match zip.by_index(i) {
                                 Ok(mut f) => {
                                     let flow = walk.member(meta, &mut f);
-                                    if e.local_name_differs {
-                                        walk.hidden(Hidden::LocalName);
+                                    if let Some(what) = e.local_name {
+                                        walk.hidden(what);
                                     }
                                     if e.deflated && walk.read_to_end() {
                                         match past_stream(src, e.data_start, e.compressed, e.size) {
