@@ -137,6 +137,23 @@ pub fn generate(spec: &str) -> Result<Vec<u8>, String> {
             Ok(synth::credential_file(name, seed))
         }
         "text" => Ok(rest.replace("\\n", "\n").replace("\\t", "\t").into_bytes()),
+        "zip" => {
+            let (member, inner) = rest
+                .split_once('=')
+                .filter(|(m, i)| !m.is_empty() && !i.is_empty())
+                .ok_or_else(|| bad("want zip:MEMBER=SPEC"))?;
+            Ok(synth::zip(&[(member, generate(inner)?)]))
+        }
+        "sqlite" => {
+            let parts = rest
+                .split_once('=')
+                .and_then(|(place, inner)| Some((place.split_once('.')?, inner)))
+                .filter(|((t, c), i)| !t.is_empty() && !c.is_empty() && !i.is_empty());
+            let Some(((table, column), inner)) = parts else {
+                return Err(bad("want sqlite:TABLE.COLUMN=SPEC"));
+            };
+            Ok(synth::sqlite(table, column, &generate(inner)?))
+        }
         other => Err(format!("synth `{spec}`: unknown generator `{other}`")),
     }
 }
@@ -211,6 +228,8 @@ mod tests {
             "text:a\\nb",
             "file:lastpass_csv",
             "file:recovery_github:3",
+            "zip:config/.env=secret:aws_access_key",
+            "zip:inner.zip=zip:a.npy=npy:<f4:2x64",
         ] {
             assert_eq!(generate(spec), generate(spec), "{spec}");
             assert!(!generate(spec).unwrap().is_empty(), "{spec}");
@@ -230,6 +249,46 @@ mod tests {
             assert_eq!(generate(&spec), generate(&spec), "{spec}");
         }
         assert!(generate("file:nonsense").is_err());
+    }
+
+    #[test]
+    fn sqlite_holds_the_inner_sample_in_its_column() {
+        let db = generate("sqlite:t.c=text:A=1\\n").unwrap();
+        assert!(db.starts_with(b"SQLite format 3\0"));
+        let x = riskgrep_core::container::extract(
+            &riskgrep_core::container::sqlite::SQLITE,
+            &db.as_slice(),
+            db.len() as u64,
+            &riskgrep_core::classify::Limits::default(),
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+        assert!(x.members.iter().any(|m| m.path == "t/c"));
+        for spec in [
+            "sqlite:",
+            "sqlite:t=text:x",
+            "sqlite:t.c",
+            "sqlite:.c=text:x",
+            "sqlite:t.=text:x",
+            "sqlite:t.c=",
+        ] {
+            assert!(generate(spec).is_err(), "{spec}");
+        }
+    }
+
+    #[test]
+    fn zip_holds_the_inner_sample_as_its_member() {
+        let z = generate("zip:config/.env=text:A=1\\n").unwrap();
+        assert_eq!(&z[..4], b"PK\x03\x04");
+        let x = riskgrep_core::container::extract(
+            &riskgrep_core::container::zip::ZIP,
+            &&z[..],
+            z.len() as u64,
+            &riskgrep_core::classify::Limits::default(),
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+        assert_eq!(x.members.len(), 1);
+        assert_eq!(x.members[0].path, "config/.env");
+        assert_eq!(x.members[0].content.bytes, b"A=1\n");
     }
 
     #[test]
@@ -255,6 +314,11 @@ mod tests {
             "keyed:",
             "keyed:bad name",
             "keyed:x:y",
+            "zip:",
+            "zip:a.txt",
+            "zip:=text:x",
+            "zip:a.txt=",
+            "zip:a.txt=nope:1",
         ] {
             assert!(generate(spec).is_err(), "{spec:?}");
         }

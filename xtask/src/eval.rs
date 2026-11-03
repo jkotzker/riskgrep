@@ -104,6 +104,64 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "keychain",
     "password_safe",
     "opvault",
+    "onepassword_1pif",
+    "firefox_csv",
+    "keepass_xml",
+    "keepass_csv",
+    "keepassxc_csv",
+    "dashlane_csv",
+    "dashlane_json",
+    "keeper_json",
+    "protonpass_csv",
+    "protonpass_json",
+    "otpauth_encoded",
+    "keepass_key_file",
+    "password_safe_layout",
+    "key_file_names",
+];
+
+/// Well-known key-file and credential-file names that `paths.yar` weighs at
+/// the flag threshold; the sample content is a placeholder line.
+const KEY_FILE_NAMES: &[&str] = &[
+    "home/.ssh/id_rsa",
+    "home/.ssh/id_ed25519",
+    "home/.ssh/id_ecdsa",
+    "app/.env",
+    "app/.env.production",
+    "app/.env.local",
+    "home/.aws/credentials",
+    "home/.netrc",
+    "home/.pgpass",
+    "repo/.git-credentials",
+    "site/.htpasswd",
+    "release.jks",
+    "app/debug.keystore",
+    "keys/server.ppk",
+    "home/.gnupg/secring.gpg",
+];
+
+/// Credentials in configuration files, recognised by the name of the XML
+/// element, JSON object, or YAML mapping that holds them (`config.yar`):
+/// `(eval kind, synth::credential_file kind, file name)`. Gated with the
+/// generic secrets.
+pub const CONFIG_CREDENTIAL_KINDS: &[(&str, &str, &str)] = &[
+    ("config_xml", "config_xml_credential", "config.xml"),
+    (
+        "config_json_object",
+        "config_json_credential_object",
+        "settings.json",
+    ),
+    (
+        "config_yaml_mapping",
+        "config_yaml_credential_mapping",
+        "settings.yaml",
+    ),
+    ("config_dotnet", "config_dotnet_app_settings", "web.config"),
+    (
+        "config_key_hex",
+        "config_key_hex_low_entropy",
+        "settings.conf",
+    ),
 ];
 
 /// Probe sets (reported, not gated).
@@ -464,6 +522,49 @@ fn credential_files(out: &mut Vec<Sample>) {
             &format!("My.opvault/default/{band}.js"),
             text.into_bytes(),
         );
+        // Further password-manager exports, an encoded seed, key files, and
+        // key-file names.
+        push(
+            "onepassword_1pif",
+            "export.1pif",
+            file("onepassword_1pif", i),
+        );
+        push("firefox_csv", "logins.csv", file("firefox_csv", i));
+        push("keepass_xml", "Database.xml", file("keepass_xml", i));
+        push("keepass_csv", "Database.csv", file("keepass_csv", i));
+        push("keepassxc_csv", "Database.csv", file("keepassxc_csv", i));
+        push("dashlane_csv", "credentials.csv", file("dashlane_csv", i));
+        push(
+            "dashlane_json",
+            "Dashlane Export.json",
+            file("dashlane_json", i),
+        );
+        push("keeper_json", "keeper_export.json", file("keeper_json", i));
+        push(
+            "protonpass_csv",
+            "Proton Pass.csv",
+            file("protonpass_csv", i),
+        );
+        push("protonpass_json", "data.json", file("protonpass_json", i));
+        push("otpauth_encoded", "qr.html", file("otpauth_encoded", i));
+        let (k, name) = if i % 2 == 0 {
+            ("keepass_key_file_v1", "Database.keyx")
+        } else {
+            ("keepass_key_file_v2", "backup")
+        };
+        push("keepass_key_file", name, file(k, i));
+        let name = if i % 2 == 0 { "backup" } else { "vault.dat" };
+        push(
+            "password_safe_layout",
+            name,
+            file("password_safe_structural", i),
+        );
+        let name = KEY_FILE_NAMES[i % KEY_FILE_NAMES.len()];
+        push(
+            "key_file_names",
+            name,
+            format!("placeholder {i}\n").into_bytes(),
+        );
     }
     let near_misses = [
         ("otpauth_no_secret", "seeds.txt"),
@@ -478,6 +579,22 @@ fn credential_files(out: &mut Vec<Sample>) {
         ("recovery_few_codes", "recovery-codes.txt"),
         ("recovery_large_document", "notes.md"),
         ("recovery_source_like", "backup_codes.py"),
+        ("config_xml_non_secret", "config.xml"),
+        ("config_json_non_secret", "settings.json"),
+        ("config_yaml_non_secret", "settings.yaml"),
+        ("config_dotnet_non_secret", "web.config"),
+        ("config_key_hex_non_secret", "settings.yaml"),
+        ("otpauth_encoded_example_secret", "README.md"),
+        ("otpauth_encoded_no_secret", "qr.html"),
+        ("onepassword_1pif_no_password", "export.1pif"),
+        ("firefox_csv_header_only", "logins.csv"),
+        ("keepass_xml_no_password", "Database.xml"),
+        ("keepass_csv_header_only", "Database.csv"),
+        ("dashlane_json_no_password", "Dashlane Export.json"),
+        ("keeper_json_unrelated", "records.json"),
+        ("protonpass_csv_header_only", "Proton Pass.csv"),
+        ("protonpass_json_encrypted", "data.json"),
+        ("keepass_key_file_lookalike", "settings.xml"),
     ];
     for (k, name) in near_misses {
         for i in 0..3 {
@@ -488,6 +605,25 @@ fn credential_files(out: &mut Vec<Sample>) {
                 file(k, 100 + i),
             ));
         }
+    }
+    // Names that are not key files or credential stores.
+    for name in [
+        "home/.ssh/id_rsa.pub",
+        "docs/id_rsa_guide.md",
+        "app/.env.example",
+        "app/.env.sample",
+        "config/credentials",
+        "certs/server.pem",
+        "docs/netrc.md",
+        "docs/keystore.md",
+        "home/.gnupg/pubring.gpg",
+    ] {
+        out.push(sample(
+            Group::Negative,
+            "credential_near_miss",
+            name.into(),
+            &b"placeholder\n"[..],
+        ));
     }
     out.push(sample(
         Group::Negative,
@@ -536,6 +672,12 @@ fn generic_secrets(out: &mut Vec<Sample>) {
             ),
         };
         out.push(sample(Group::Generic, "generic_api_key", name, text));
+    }
+    for (kind, file, name) in CONFIG_CREDENTIAL_KINDS {
+        for i in 0..PER_FORMAT {
+            let bytes = synth::credential_file(file, 4100 + i as u64);
+            out.push(sample(Group::Generic, kind, name.to_string(), bytes));
+        }
     }
 }
 
@@ -609,6 +751,7 @@ fn biometric(out: &mut Vec<Sample>) {
                     format!("out_{i}.json"),
                     floats.replacen("{\n", &format!("{{\n  \"id\": {i},\n"), 1),
                 ),
+                _ => unreachable!("the styles are listed above"),
             };
             out.push(sample(Group::Biometric, kind, name, text));
         }
@@ -826,7 +969,9 @@ fn probes(out: &mut Vec<Sample>) {
         out.push(sample(
             Group::ProbeSecret,
             "probe_generic_env_key",
-            ".env".into(),
+            // Not `.env`: the name alone scores 80 (`dotenv_file_name`) and
+            // would hide what the content rule finds.
+            "app.env".into(),
             text,
         ));
     }
@@ -1656,6 +1801,9 @@ pub fn shortfalls(c: &[Sample]) -> Vec<String> {
         n(Group::Generic, "generic_api_key"),
         GENERIC,
     );
+    for (k, _, _) in CONFIG_CREDENTIAL_KINDS {
+        need(format!("generic {k}"), n(Group::Generic, k), PER_FORMAT);
+    }
     for k in BIOMETRIC_KINDS {
         need(format!("biometric {k}"), n(Group::Biometric, k), PER_FORMAT);
     }

@@ -657,7 +657,8 @@ fn grep_searches_hidden_files() {
         .run("Grep", json!({ "pattern": "x", "path": e.dir().join("h") }))
         .decision();
     assert_eq!(d, "deny");
-    assert!(reason.contains("h/.env scored secret 95.0"), "{reason}");
+    // 95 for the key, combined with 80 for the name (`dotenv_file_name`).
+    assert!(reason.contains("h/.env scored secret 99.0"), "{reason}");
 
     e.write("k/.aws/credentials", aws_file().as_bytes());
     let (d, reason) = e
@@ -665,7 +666,7 @@ fn grep_searches_hidden_files() {
         .decision();
     assert_eq!(d, "deny");
     assert!(
-        reason.contains("k/.aws/credentials scored secret 95.0"),
+        reason.contains("k/.aws/credentials scored secret 99.0"),
         "{reason}"
     );
 }
@@ -1159,6 +1160,38 @@ fn glob_revealing_a_flagged_name_asks() {
         .silent();
 }
 
+/// The path-only rules for well-known key-file and credential-file names
+/// (`secrets-core/paths.yar`): names that exist to hold a secret reach the
+/// ask threshold, the public half and template names do not, and a name that
+/// is a certificate as often as a key stays below it.
+#[test]
+fn glob_revealing_a_key_or_credential_file_name_asks() {
+    for (name, rule) in [
+        (".ssh/id_ed25519", "ssh_private_key_name"),
+        ("app/.env", "dotenv_file_name"),
+        (".aws/credentials", "aws_credentials_file_name"),
+        ("home/.netrc", "credential_store_file_name"),
+        ("release.jks", "java_keystore_name"),
+    ] {
+        let e = Env::new();
+        e.write(name, b"x");
+        let (d, reason) = e.run("Glob", json!({ "pattern": "**/*" })).decision();
+        assert_eq!(d, "ask", "{name}");
+        assert!(reason.contains(rule), "{name}: {reason}");
+        assert!(reason.contains(name), "{name}: {reason}");
+    }
+    for name in [
+        ".ssh/id_ed25519.pub",
+        "app/.env.example",
+        "certs/server.pem",
+        "config/credentials",
+    ] {
+        let e = Env::new();
+        e.write(name, b"x");
+        e.run("Glob", json!({ "pattern": "**/*" })).silent();
+    }
+}
+
 #[test]
 fn glob_judges_names_not_content() {
     let e = Env::new();
@@ -1289,4 +1322,128 @@ fn no_partial_read_for_utf16_be_text() {
     assert_eq!(d, "deny");
     assert!(!reason.contains(" on line"), "{reason}");
     assert_eq!(read_decision(&e, &f, Some(20), Some(5)).0, "deny");
+}
+
+#[test]
+fn an_unreadable_npz_member_follows_on_partial() {
+    let e = Env::new();
+    e.user_config("[claude_code]\ntime_budget_ms = 600000\n");
+    let f = e.write("m.npz", &synth::npz_with_unreadable_member());
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "ask");
+    assert!(
+        reason.contains("could not scan part of ")
+            && reason.contains("npz member 0 could not be read"),
+        "{reason}"
+    );
+    e.user_config("[claude_code]\ntime_budget_ms = 600000\non_partial = \"allow\"\n");
+    e.run("Read", json!({ "file_path": f })).silent();
+}
+
+/// A hook configuration of [`synth::PART_LIMITS`] plus `claude_code` keys.
+fn part_config(extra: &str) -> String {
+    format!(
+        "{}[claude_code]\ntime_budget_ms = 600000\n{extra}",
+        synth::PART_LIMITS
+    )
+}
+
+#[test]
+fn a_file_read_in_part_follows_on_partial() {
+    let e = Env::new();
+    for p in synth::partly_read_files(false) {
+        let f = e.write(p.name, &p.bytes);
+        e.user_config(&part_config(""));
+        let (d, reason) = read_decision(&e, &f, None, None);
+        assert_eq!(d, "ask", "{}: {reason}", p.kind);
+        assert!(
+            reason.contains("read only part of ") && reason.contains(&p.not_read),
+            "{}: {reason}",
+            p.kind
+        );
+        assert!(!reason.contains("could not"), "{}: {reason}", p.kind);
+        // A partial `Read` gets no allowance: its lines may be in the part not read.
+        assert_eq!(
+            read_decision(&e, &f, Some(1), Some(2)).0,
+            "ask",
+            "{}",
+            p.kind
+        );
+        e.user_config(&part_config("on_partial = \"deny\"\n"));
+        assert_eq!(read_decision(&e, &f, None, None).0, "deny", "{}", p.kind);
+        e.user_config(&part_config("on_partial = \"allow\"\n"));
+        assert_eq!(read_decision(&e, &f, None, None).0, "none", "{}", p.kind);
+        e.user_config(&part_config("on_error = \"allow\"\n"));
+        assert_eq!(read_decision(&e, &f, None, None).0, "none", "{}", p.kind);
+    }
+}
+
+#[test]
+fn a_finding_in_the_part_read_keeps_its_decision() {
+    let e = Env::new();
+    for p in synth::partly_read_files(true) {
+        let f = e.write(p.name, &p.bytes);
+        e.user_config(&part_config("on_partial = \"allow\"\n"));
+        let (allowed, reason) = read_decision(&e, &f, None, None);
+        assert_ne!(allowed, "none", "{}: {reason}", p.kind);
+        assert!(reason.contains(" scored secret "), "{}: {reason}", p.kind);
+        // on_partial may raise the decision and never lowers it.
+        e.user_config(&part_config(""));
+        assert_eq!(read_decision(&e, &f, None, None).0, allowed, "{}", p.kind);
+        e.user_config(&part_config("on_partial = \"deny\"\n"));
+        assert_eq!(read_decision(&e, &f, None, None).0, "deny", "{}", p.kind);
+    }
+}
+
+#[test]
+fn a_safetensors_file_past_its_cap_follows_on_partial() {
+    let e = Env::new();
+    // A debug build can take longer than the default budget over 100 MiB.
+    let budget = "[limits]\ntime_budget_ms = 600000\n[claude_code]\ntime_budget_ms = 600000\n";
+    e.user_config(budget);
+    let s = synth::safetensors_past_cap(false);
+    let f = e.work.path().join("big.safetensors");
+    s.write_to(&f).unwrap();
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "ask", "{reason}");
+    assert!(
+        reason.contains("read only part of ") && reason.contains(&s.not_read()),
+        "{reason}"
+    );
+    e.user_config(&format!("{budget}on_partial = \"allow\"\n"));
+    synth::safetensors_past_cap(true).write_to(&f).unwrap();
+    assert_ne!(read_decision(&e, &f, None, None).0, "none");
+}
+
+#[test]
+fn a_file_read_whole_or_for_its_header_alone_gets_no_partial_decision() {
+    let e = Env::new();
+    e.user_config(&part_config(""));
+    let mut vault = b"kych\0\x01\0\0".to_vec();
+    vault.resize(4096, 0);
+    for (name, data) in [
+        ("small.txt", b"plain text\n".to_vec()),
+        ("data.npy", synth::npy("<f4", &[1024, 16])),
+        ("login.keychain-db", vault),
+    ] {
+        let f = e.write(name, &data);
+        // A vault file has a finding of its own; only the wording is at issue.
+        let (_, reason) = read_decision(&e, &f, None, None);
+        assert!(!reason.contains("read only part"), "{name}: {reason}");
+        assert!(!reason.contains("could not scan"), "{name}: {reason}");
+    }
+}
+
+#[test]
+fn an_archive_of_only_unknown_binaries_follows_on_skipped() {
+    let e = Env::new();
+    let f = e.write(
+        "b.zip",
+        &synth::zip(&[("blob", vec![0u8, 1, 2, 3, 0xff, 0xfe])]),
+    );
+    assert_eq!(read_decision(&e, &f, None, None).0, "none");
+    e.user_config("[claude_code]\non_skipped = \"ask\"\n");
+    let (d, reason) = read_decision(&e, &f, None, None);
+    assert_eq!(d, "ask", "{reason}");
+    assert!(reason.contains("unknown format"), "{reason}");
 }

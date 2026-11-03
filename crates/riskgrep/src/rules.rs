@@ -331,10 +331,13 @@ mod tests {
                     shape: vec![],
                     fingerprints: vec![],
                     line_complete: false,
+                    member: None,
                 })
                 .collect(),
             suppressed: 0,
             text: true,
+            container: None,
+            read_failed: false,
         }
     }
 

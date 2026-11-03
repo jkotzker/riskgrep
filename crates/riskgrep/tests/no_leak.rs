@@ -205,6 +205,22 @@ fn world() -> &'static World {
         let p = work.join("emb.safetensors");
         fs::write(&p, &st).unwrap();
         files.push(p);
+        // A zip whose members, one of them in a nested zip, hold secrets:
+        // member names may be reported, member contents never.
+        let (pat, aws) = (
+            synth::fake_secret("github_pat", 2000),
+            synth::fake_secret("aws_access_key", 2001),
+        );
+        needles.extend(needles_for("github_pat", &pat));
+        needles.extend(needles_for("aws_access_key", &aws));
+        let inner = synth::zip(&[("deep.txt", format!("x\n{aws}\n").into_bytes())]);
+        let z = synth::zip(&[
+            ("config/.env", format!("one\n{pat}\n").into_bytes()),
+            ("nested.zip", inner),
+        ]);
+        let p = work.join("bundle.zip");
+        fs::write(&p, &z).unwrap();
+        files.push(p);
 
         let w = World {
             home,

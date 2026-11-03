@@ -1,6 +1,6 @@
 //! The `scan` and `baseline` commands.
 
-use crate::cli::{threshold_map, BaselineArgs, Format, OnError, ScanArgs};
+use crate::cli::{threshold_map, BaselineArgs, Format, OnError, OnPartial, ScanArgs};
 use crate::{text, CliError};
 use riskgrep_core::config::{self, Config, Mode, Overrides};
 use riskgrep_core::model::meets_threshold;
@@ -97,6 +97,26 @@ fn read_stdin() -> io::Result<(Vec<u8>, bool)> {
     Ok((buf, truncated))
 }
 
+/// Say that standard input went on past [`STDIN_MAX`]: the limit cuts the
+/// input before the text limits sample it, so a sampled target's note covers
+/// only the bytes that reached the scan.
+fn note_stdin_cut(r: &mut Report) {
+    let beyond = format!("standard input beyond {STDIN_MAX} bytes not read");
+    let Some(t) = r.targets.first_mut() else {
+        return;
+    };
+    match &mut t.status {
+        TargetStatus::Scanned => {
+            t.status = TargetStatus::Partial { not_read: beyond };
+            r.summary.scanned -= 1;
+            r.summary.partial += 1;
+        }
+        TargetStatus::Partial { not_read } => *not_read = format!("{not_read}, {beyond}"),
+        // `skipped` and `unscanned` already say the content was not read.
+        _ => {}
+    }
+}
+
 pub fn scan(a: ScanArgs) -> Result<i32, CliError> {
     let thresholds = threshold_map(&a.fail_at);
     let on_error = a.on_error.unwrap_or(if thresholds.is_empty() {
@@ -131,15 +151,7 @@ pub fn scan(a: ScanArgs) -> Result<i32, CliError> {
         let (bytes, truncated) = read_stdin()?;
         let mut r = rg.scan_bytes(STDIN_NAME, &bytes);
         if truncated {
-            if let Some(t) = r.targets.first_mut() {
-                if t.status == TargetStatus::Scanned {
-                    t.status = TargetStatus::Partial {
-                        not_read: format!("standard input beyond {STDIN_MAX} bytes"),
-                    };
-                    r.summary.scanned -= 1;
-                    r.summary.partial += 1;
-                }
-            }
+            note_stdin_cut(&mut r);
         }
         parts.push(r);
     }
@@ -155,7 +167,12 @@ pub fn scan(a: ScanArgs) -> Result<i32, CliError> {
             .and_then(|()| writeln!(stdout)),
         Format::Text => stdout.write_all(text::render(&report).as_bytes()),
     };
-    let code = exit_code(&report, &thresholds, on_error);
+    let on_partial = match a.on_partial {
+        OnPartial::Error => on_error,
+        OnPartial::Allow => OnError::Allow,
+        OnPartial::Block => OnError::Block,
+    };
+    let code = exit_code(&report, &thresholds, on_error, on_partial);
     match written.and_then(|()| stdout.flush()) {
         // The reader closed the pipe on purpose: no message, and the exit
         // code the scan computed still applies (a gate must not pass).
@@ -178,8 +195,14 @@ fn merge(mut parts: Vec<Report>) -> Report {
 }
 
 /// 1 when a score meets its threshold (`meets_threshold`), else 2 when a target is
-/// unscanned and `on_error` blocks, else 0.
-pub fn exit_code(report: &Report, thresholds: &BTreeMap<String, f64>, on_error: OnError) -> i32 {
+/// unscanned and `on_error` blocks or part of a target's content was not read
+/// ([`riskgrep_core::TargetReport::unseen_part`]) and `on_partial` blocks, else 0.
+pub fn exit_code(
+    report: &Report,
+    thresholds: &BTreeMap<String, f64>,
+    on_error: OnError,
+    on_partial: OnError,
+) -> i32 {
     let exceeded = report.targets.iter().any(|t| {
         thresholds.iter().any(|(cat, n)| {
             t.scores
@@ -191,6 +214,9 @@ pub fn exit_code(report: &Report, thresholds: &BTreeMap<String, f64>, on_error: 
         return EXIT_THRESHOLD;
     }
     if on_error == OnError::Block && report.summary.unscanned > 0 {
+        return EXIT_UNSCANNED;
+    }
+    if on_partial == OnError::Block && report.summary.partial > 0 {
         return EXIT_UNSCANNED;
     }
     EXIT_OK
@@ -268,6 +294,8 @@ mod tests {
             evidence: vec![],
             suppressed: 0,
             text: true,
+            container: None,
+            read_failed: false,
         }
     }
 
@@ -279,23 +307,90 @@ mod tests {
     fn exit_codes() {
         let un = TargetStatus::Unscanned { reason: "r".into() };
         let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 80.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 1);
-        assert_eq!(exit_code(&r, &th(80.1), OnError::Block), 0);
-        assert_eq!(exit_code(&r, &BTreeMap::new(), OnError::Block), 0);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 1);
+        assert_eq!(exit_code(&r, &th(80.1), OnError::Block, OnError::Allow), 0);
+        assert_eq!(
+            exit_code(&r, &BTreeMap::new(), OnError::Block, OnError::Allow),
+            0
+        );
         let r = Report::from_targets("0", "b", vec![t(un.clone(), 0.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 2);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow), 0);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 2);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Allow), 0);
         let r = Report::from_targets("0", "b", vec![t(un, 0.0), t(TargetStatus::Scanned, 90.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 1);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 1);
+    }
+
+    #[test]
+    fn partial_targets_follow_on_partial() {
+        let p = TargetStatus::Partial {
+            not_read: "member 2 encrypted".into(),
+        };
+        let mut c = t(p.clone(), 0.0);
+        c.container = Some(riskgrep_core::model::ContainerReport {
+            format: "zip".into(),
+            members: 2,
+            scanned: 1,
+            read_in_part: 0,
+            skipped: 0,
+            not_read: 1,
+            opened: 0,
+            listed: vec![],
+        });
+        let r = Report::from_targets("0", "b", vec![c]);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Block), 2);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
+        // So is a file with content that could not be read, such as an `.npz`.
+        let mut gap = t(p.clone(), 0.0);
+        gap.read_failed = true;
+        let r = Report::from_targets("0", "b", vec![gap]);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Block), 2);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
+        // So is a file read in part, such as sampled text.
+        let r = Report::from_targets("0", "b", vec![t(p.clone(), 0.0)]);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Block), 2);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
+        // A score at its threshold keeps its status either way.
+        let r = Report::from_targets("0", "b", vec![t(p, 90.0)]);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Block), 1);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 1);
+    }
+
+    #[test]
+    fn a_cut_in_standard_input_is_noted_on_any_target_it_reached() {
+        let beyond = "standard input beyond 67108864 bytes not read";
+        let cut = |status| {
+            let mut r = Report::from_targets("0", "b", vec![t(status, 0.0)]);
+            note_stdin_cut(&mut r);
+            r
+        };
+        // Limits raised past the cut: the input was otherwise read whole.
+        let r = cut(TargetStatus::Scanned);
+        let want = TargetStatus::Partial {
+            not_read: beyond.into(),
+        };
+        assert_eq!(r.targets[0].status, want);
+        assert_eq!((r.summary.scanned, r.summary.partial), (0, 1));
+        // Default limits: the input was already sampled.
+        let r = cut(TargetStatus::Partial {
+            not_read: "bytes 1..2 not read".into(),
+        });
+        let want = format!("bytes 1..2 not read, {beyond}");
+        assert_eq!(r.targets[0].unseen_part(), Some(want.as_str()));
+        assert_eq!((r.summary.scanned, r.summary.partial), (0, 1));
+        // A target that was not scanned keeps its own reason.
+        let un = TargetStatus::Unscanned { reason: "r".into() };
+        let r = cut(un.clone());
+        assert_eq!(r.targets[0].status, un);
+        assert_eq!(r.summary.unscanned, 1);
     }
 
     #[test]
     fn exit_code_uses_the_rounded_score() {
         let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 79.96)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 1);
-        assert_eq!(exit_code(&r, &th(80.1), OnError::Block), 0);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 1);
+        assert_eq!(exit_code(&r, &th(80.1), OnError::Block, OnError::Allow), 0);
         let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 79.94)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block), 0);
+        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
     }
 
     #[test]

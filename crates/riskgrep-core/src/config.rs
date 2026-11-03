@@ -29,11 +29,45 @@ pub const BASELINE_FILE: &str = ".riskgrep-baseline.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Action {
     Allow,
     Ask,
     Deny,
     Block,
+}
+
+/// What a target does when part of its content was not read, as with text
+/// sampled at its ends, a key store or tensor header past its limit, a
+/// container's members not read whole, or an `.npz`'s unreadable member
+/// (`on_partial`; a file read for its header alone by design is `scanned` and
+/// not affected): `error` applies the integration's `on_error` action, as for
+/// a target that could not be scanned; the other values are actions of their
+/// own. It adds to what the part read scores and never lowers that decision.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum OnPartial {
+    #[default]
+    Error,
+    Allow,
+    Ask,
+    Deny,
+    Block,
+}
+
+impl OnPartial {
+    /// The action for a target with content that was not read, given
+    /// `on_error`.
+    pub fn action(self, on_error: Action) -> Action {
+        match self {
+            OnPartial::Error => on_error,
+            OnPartial::Allow => Action::Allow,
+            OnPartial::Ask => Action::Ask,
+            OnPartial::Deny => Action::Deny,
+            OnPartial::Block => Action::Block,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -48,6 +82,8 @@ pub struct ClaudeCodeConfig {
     pub thresholds: BTreeMap<Category, Threshold>,
     pub on_error: Action,
     pub on_skipped: Action,
+    /// A target with content that was not read (see [`OnPartial`]).
+    pub on_partial: OnPartial,
     pub on_unresolved: Action,
     pub time_budget_ms: u64,
     /// MCP tools whose input names files, keyed by tool name (see
@@ -60,6 +96,8 @@ pub struct GitConfig {
     pub block_at: BTreeMap<Category, f64>,
     pub on_error: Action,
     pub on_skipped: Action,
+    /// A target with content that was not read (see [`OnPartial`]).
+    pub on_partial: OnPartial,
     pub full_files: bool,
 }
 
@@ -113,6 +151,7 @@ pub struct Overrides {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Mode {
     Cli,
     Git,
@@ -151,6 +190,7 @@ impl Default for Config {
                 ]),
                 on_error: Action::Ask,
                 on_skipped: Action::Allow,
+                on_partial: OnPartial::Error,
                 on_unresolved: Action::Allow,
                 time_budget_ms: 2000,
                 mcp_tools: default_mcp_tools(),
@@ -159,6 +199,7 @@ impl Default for Config {
                 block_at: BTreeMap::from([(cat("secret"), 80.0), (cat("biometric"), 75.0)]),
                 on_error: Action::Block,
                 on_skipped: Action::Allow,
+                on_partial: OnPartial::Error,
                 full_files: false,
             },
             trusted_repos: Vec::new(),
@@ -182,6 +223,11 @@ struct LimitsLayer {
     sniff: Option<usize>,
     walk_files: Option<usize>,
     time_budget_ms: Option<u64>,
+    container_bytes: Option<u64>,
+    member_bytes: Option<u64>,
+    container_members: Option<u32>,
+    container_depth: Option<u32>,
+    container_ratio: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -190,6 +236,7 @@ struct ClaudeLayer {
     thresholds: Option<BTreeMap<Category, Threshold>>,
     on_error: Option<Action>,
     on_skipped: Option<Action>,
+    on_partial: Option<OnPartial>,
     on_unresolved: Option<Action>,
     time_budget_ms: Option<u64>,
     mcp_tools: Option<BTreeMap<String, McpTool>>,
@@ -201,6 +248,7 @@ struct GitLayer {
     block_at: Option<BTreeMap<Category, f64>>,
     on_error: Option<Action>,
     on_skipped: Option<Action>,
+    on_partial: Option<OnPartial>,
     full_files: Option<bool>,
 }
 
@@ -306,6 +354,21 @@ impl Config {
             if let Some(v) = x.time_budget_ms {
                 self.limits.time_budget = Duration::from_millis(v);
             }
+            if let Some(v) = x.container_bytes {
+                self.limits.container_bytes = v;
+            }
+            if let Some(v) = x.member_bytes {
+                self.limits.member_bytes = v;
+            }
+            if let Some(v) = x.container_members {
+                self.limits.container_members = v;
+            }
+            if let Some(v) = x.container_depth {
+                self.limits.container_depth = v;
+            }
+            if let Some(v) = x.container_ratio {
+                self.limits.container_ratio = v;
+            }
         }
         if let Some(x) = l.ignore {
             if let Some(v) = x.paths {
@@ -332,6 +395,9 @@ impl Config {
             }
             if let Some(v) = x.on_skipped {
                 self.claude_code.on_skipped = v;
+            }
+            if let Some(v) = x.on_partial {
+                self.claude_code.on_partial = v;
             }
             if let Some(v) = x.on_unresolved {
                 self.claude_code.on_unresolved = v;
@@ -360,6 +426,9 @@ impl Config {
             }
             if let Some(v) = x.on_skipped {
                 self.git.on_skipped = v;
+            }
+            if let Some(v) = x.on_partial {
+                self.git.on_partial = v;
             }
             if let Some(v) = x.full_files {
                 self.git.full_files = v;
@@ -505,6 +574,7 @@ pub fn baseline_path(mode: Mode, repo_root: Option<&Path>, cfg: &Config) -> Opti
 /// What an MCP tool does with the paths its input names.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum McpKind {
     /// Reads each named file; a directory or missing path reads nothing.
     #[default]

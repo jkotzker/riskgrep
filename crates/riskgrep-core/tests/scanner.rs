@@ -456,13 +456,13 @@ fn stat_entry_time_is_taken_before_the_read() {
 #[test]
 fn archive_unscanned() {
     let d = tempfile::tempdir().unwrap();
-    let f = d.path().join("a.zip");
-    fs::write(&f, b"PK\x03\x04rest of a zip").unwrap();
+    let f = d.path().join("a.7z");
+    fs::write(&f, b"7z\xbc\xaf\x27\x1crest of a 7z archive").unwrap();
     let r = scanner().scan_paths(&[f]);
     assert_eq!(
         only(&r).status,
         TargetStatus::Unscanned {
-            reason: "zip not scanned in v1".into()
+            reason: "7z not scanned in v1".into()
         }
     );
     assert_eq!(r.summary.unscanned, 1);
@@ -816,6 +816,237 @@ fn npz_over_text_limit_scores_like_small() {
 }
 
 #[test]
+fn npz_over_text_limit_with_a_thousand_members_scores_like_small() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("manymembers.npz");
+    let names: Vec<String> = (0..1000).map(|i| format!("m{i:05}.npy")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|n| (n.as_str(), synth::npy("<f4", &[5, 512])))
+        .collect();
+    let big = synth::npz(&members);
+    assert!(big.len() > 8 << 20, "{}", big.len());
+    fs::write(&f, big).unwrap();
+    let r = scanner().scan_paths(&[f]);
+    let t = only(&r);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert_eq!(t.scores[&biometric()], 94.0);
+}
+
+/// Offsets of the central and local headers of the member called `name`.
+fn member_headers(data: &[u8], name: &str) -> (usize, usize) {
+    let mut at = 0;
+    while let Some(i) = data[at..].windows(4).position(|w| w == b"PK\x01\x02") {
+        let cd = at + i;
+        let len = u16::from_le_bytes([data[cd + 28], data[cd + 29]]) as usize;
+        if &data[cd + 46..cd + 46 + len] == name.as_bytes() {
+            let local = u32::from_le_bytes(data[cd + 42..cd + 46].try_into().unwrap());
+            return (cd, local as usize);
+        }
+        at = cd + 4;
+    }
+    panic!("no member {name}");
+}
+
+fn put_u32(data: &mut [u8], at: usize, v: u32) {
+    data[at..at + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+type Damage = fn(&mut [u8], usize, usize);
+
+fn wrong_crc(data: &mut [u8], cd: usize, local: usize) {
+    put_u32(data, cd + 16, 0);
+    put_u32(data, local + 14, 0);
+}
+
+fn understated_size(data: &mut [u8], cd: usize, local: usize) {
+    put_u32(data, cd + 24, 64);
+    put_u32(data, local + 22, 64);
+}
+
+/// An `.npz` of 128-wide embeddings named `names`, with member `damaged`
+/// damaged; with `large` a trailing member makes it exceed the 1 KiB limit of
+/// [`small_limits`].
+fn damaged_npz(names: &[&str], damaged: &str, damage: Damage, large: bool) -> Vec<u8> {
+    let mut members: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|n| (*n, synth::npy("<f4", &[1, 128])))
+        .collect();
+    if large {
+        members.push(("zz_noise.npy", synth::npy("<i4", &[5000])));
+    }
+    let mut data = synth::npz(&members);
+    let (cd, local) = member_headers(&data, damaged);
+    damage(&mut data, cd, local);
+    data
+}
+
+fn scan_npz(large: bool, data: Vec<u8>) -> (TargetStatus, f64) {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("m.npz");
+    assert!(!large || data.len() > 1024, "{}", data.len());
+    fs::write(&f, data).unwrap();
+    age(&f);
+    let mut g = if large { small_limits() } else { scanner() };
+    let r = g.scan_paths(&[f]);
+    let t = only(&r);
+    (t.status.clone(), t.scores[&biometric()])
+}
+
+fn unread(i: usize) -> TargetStatus {
+    TargetStatus::Partial {
+        not_read: format!("npz member {i} could not be read"),
+    }
+}
+
+#[test]
+fn npz_with_unreadable_npy_member_is_partial() {
+    for large in [false, true] {
+        for damage in [wrong_crc as Damage, understated_size] {
+            let data = damaged_npz(&["bad.npy"], "bad.npy", damage, large);
+            let (status, score) = scan_npz(large, data);
+            assert_eq!(status, unread(0), "large {large}");
+            assert_eq!(score, 0.0);
+        }
+    }
+}
+
+#[test]
+fn npz_unreadable_member_keeps_the_score_of_readable_ones() {
+    // One qualifying readable member and one unreadable, in either order,
+    // read whole and over the limit: the score of the readable one is kept
+    // and the file is partial in both.
+    for large in [false, true] {
+        for (names, bad, index) in [
+            (["alice.npy", "bad.npy"], "bad.npy", 1),
+            (["bad.npy", "alice.npy"], "bad.npy", 0),
+        ] {
+            let data = damaged_npz(&names, bad, wrong_crc, large);
+            let (status, score) = scan_npz(large, data);
+            assert_eq!(status, unread(index), "large {large}");
+            assert_eq!(score, 70.0, "large {large}");
+        }
+    }
+}
+
+#[test]
+fn npz_unreadable_member_that_is_not_npy_is_reported_as_in_any_zip() {
+    for large in [false, true] {
+        for damage in [wrong_crc as Damage, understated_size] {
+            let data = damaged_npz(&["alice.npy", "notes.txt"], "notes.txt", damage, large);
+            let (status, score) = scan_npz(large, data);
+            assert_eq!(
+                status,
+                TargetStatus::Partial {
+                    not_read: "member 2 unreadable".into()
+                },
+                "large {large}"
+            );
+            assert_eq!(score, 70.0, "large {large}");
+        }
+    }
+}
+
+#[test]
+fn npz_wrong_checksum_on_a_member_past_the_bytes_read_is_not_noticed() {
+    // Only the first 4,096 bytes of a member are read, so its checksum is not
+    // checked; the documentation says so.
+    let mut data = synth::npz(&[("big.npy", synth::npy("<f4", &[40, 128]))]);
+    let (cd, local) = member_headers(&data, "big.npy");
+    wrong_crc(&mut data, cd, local);
+    assert!(data.len() > 4096);
+    let (status, score) = scan_npz(false, data);
+    assert_eq!(status, TargetStatus::Scanned);
+    assert_eq!(score, 70.0);
+}
+
+#[test]
+fn npz_with_unreadable_member_is_never_cached_as_scanned() {
+    let data = damaged_npz(&["alice.npy", "bad.npy"], "bad.npy", wrong_crc, false);
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("cached.npz");
+    fs::write(&f, data).unwrap();
+    age(&f);
+    // Separate scanners over one cache directory: the second run would read
+    // the first run's row if one were written.
+    for run in 0..2 {
+        let r = scanner().scan_paths(std::slice::from_ref(&f));
+        let t = only(&r);
+        assert_eq!(t.status, unread(1), "run {run}");
+        assert_eq!(t.scores[&biometric()], 70.0, "run {run}");
+    }
+}
+
+/// An `.npz` of `count` members named `.npy`, small integer arrays except an
+/// embedding-shaped float array at index `tensor_at`.
+fn npz_with_a_tensor_at(count: usize, tensor_at: usize) -> Vec<u8> {
+    let names: Vec<String> = (0..count).map(|i| format!("m{i:05}.npy")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let npy = if i == tensor_at {
+                synth::npy("<f4", &[1, 512])
+            } else {
+                synth::npy("<i4", &[4])
+            };
+            (n.as_str(), npy)
+        })
+        .collect();
+    synth::npz(&members)
+}
+
+fn past_the_cap(count: usize) -> TargetStatus {
+    TargetStatus::Partial {
+        not_read: format!("npz members past the first 1024 not read ({count} members)"),
+    }
+}
+
+#[test]
+fn npz_with_members_past_the_cap_is_partial() {
+    // Read whole and over the text limit, the tensor in the last member read
+    // and in the first one not read.
+    for large in [false, true] {
+        let (status, score) = scan_npz(large, npz_with_a_tensor_at(1024, 1023));
+        assert_eq!(status, TargetStatus::Scanned, "large {large}");
+        assert_eq!(score, 70.0, "large {large}");
+        let (status, score) = scan_npz(large, npz_with_a_tensor_at(1025, 1023));
+        assert_eq!(status, past_the_cap(1025), "large {large}");
+        assert_eq!(score, 70.0, "large {large}");
+        let (status, score) = scan_npz(large, npz_with_a_tensor_at(1025, 1024));
+        assert_eq!(status, past_the_cap(1025), "large {large}");
+        assert_eq!(score, 0.0, "large {large}");
+    }
+}
+
+#[test]
+fn npz_past_the_cap_follows_on_partial_and_is_never_cached_as_scanned() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("many.npz");
+    fs::write(&f, npz_with_a_tensor_at(1030, 1029)).unwrap();
+    age(&f);
+    for run in 0..2 {
+        let r = scanner().scan_paths(std::slice::from_ref(&f));
+        let t = only(&r);
+        assert_eq!(t.status, past_the_cap(1030), "run {run}");
+        assert!(t.unseen_part().is_some(), "run {run}");
+    }
+}
+
+#[test]
+fn npz_with_an_unreadable_member_names_that_before_the_cap() {
+    // Both apply: the first note stays, as for several unreadable members.
+    let mut data = npz_with_a_tensor_at(1030, 5);
+    let (cd, local) = member_headers(&data, "m00003.npy");
+    wrong_crc(&mut data, cd, local);
+    for large in [false, true] {
+        let (status, score) = scan_npz(large, data.clone());
+        assert_eq!(status, unread(3), "large {large}");
+        assert_eq!(score, 70.0, "large {large}");
+    }
+}
+
+#[test]
 fn npz_over_text_limit_bank_before_large_member() {
     let d = tempfile::tempdir().unwrap();
     let f = d.path().join("largebank.npz");
@@ -1010,4 +1241,91 @@ fn stopword_change_invalidates_cached_evidence() {
     assert_eq!(score("unrelated\n"), 60.0, "cached");
     assert_eq!(score("example\n"), 0.0, "stopword added");
     assert_eq!(score("unrelated\n"), 60.0, "stopword removed");
+}
+
+#[test]
+fn an_unreadable_npz_member_is_a_read_failure_and_a_sample_is_not() {
+    let note = Some("npz member 0 could not be read");
+    let d = tempfile::tempdir().unwrap();
+    for (large, data) in [
+        (false, synth::npz_with_unreadable_member()),
+        (true, damaged_npz(&["bad.npy"], "bad.npy", wrong_crc, true)),
+    ] {
+        let f = d.path().join("m.npz");
+        fs::write(&f, &data).unwrap();
+        age(&f);
+        let mut g = if large { small_limits() } else { scanner() };
+        let r = g.scan_paths(&[f]);
+        assert_eq!(only(&r).unseen_part(), note, "file, large {large}");
+        assert!(only(&r).read_failed, "file, large {large}");
+        let t = g.scan_blob("m.npz", b"blob", &data, None);
+        assert_eq!(t.unseen_part(), note, "blob, large {large}");
+        assert!(t.read_failed, "blob, large {large}");
+    }
+}
+
+#[test]
+fn every_file_read_in_part_has_an_unseen_part() {
+    let d = tempfile::tempdir().unwrap();
+    for secret_read in [false, true] {
+        for p in synth::partly_read_files(secret_read) {
+            let f = d.path().join(p.name);
+            fs::write(&f, &p.bytes).unwrap();
+            age(&f);
+            let mut g = small_limits();
+            let want = TargetStatus::Partial {
+                not_read: p.not_read.clone(),
+            };
+            let r = g.scan_paths(std::slice::from_ref(&f));
+            let t = only(&r);
+            assert_eq!(t.status, want, "{}", p.kind);
+            assert_eq!(t.unseen_part(), Some(p.not_read.as_str()), "{}", p.kind);
+            assert!(!t.read_failed, "{}", p.kind);
+            let found = t.scores.get(&secret()).copied().unwrap_or(0.0) >= 80.0;
+            assert_eq!(found, secret_read, "{}: score", p.kind);
+            let t = g.scan_blob(p.name, p.name.as_bytes(), &p.bytes, None);
+            assert_eq!(t.unseen_part(), Some(p.not_read.as_str()), "{}", p.kind);
+            assert!(!t.read_failed, "{}", p.kind);
+        }
+    }
+}
+
+#[test]
+fn a_safetensors_file_past_its_cap_has_an_unseen_part() {
+    let d = tempfile::tempdir().unwrap();
+    for secret_read in [false, true] {
+        let s = synth::safetensors_past_cap(secret_read);
+        let f = d.path().join("big.safetensors");
+        s.write_to(&f).unwrap();
+        age(&f);
+        // 100 MiB takes an unoptimized build longer than the default budget.
+        let mut cfg = Config::default();
+        cfg.limits.time_budget = Duration::from_secs(600);
+        let mut g = RiskGrep::with_cache_dir(cfg, None, Some(shared_cache())).unwrap();
+        let r = g.scan_paths(&[f]);
+        let t = only(&r);
+        assert_eq!(t.unseen_part(), Some(s.not_read().as_str()));
+        assert!(!t.read_failed);
+        let found = t.scores.get(&secret()).copied().unwrap_or(0.0) >= 80.0;
+        assert_eq!(found, secret_read);
+    }
+}
+
+#[test]
+fn a_file_read_whole_or_for_its_header_alone_has_no_unseen_part() {
+    let d = tempfile::tempdir().unwrap();
+    let mut vault = b"kych\0\x01\0\0".to_vec();
+    vault.resize(4096, 0);
+    for (name, data) in [
+        ("small.txt", b"plain text\n".to_vec()),
+        ("data.npy", synth::npy("<f4", &[1024, 16])),
+        ("login.keychain-db", vault),
+    ] {
+        let f = d.path().join(name);
+        fs::write(&f, &data).unwrap();
+        age(&f);
+        let r = small_limits().scan_paths(&[f]);
+        assert_eq!(only(&r).status, TargetStatus::Scanned, "{name}");
+        assert_eq!(only(&r).unseen_part(), None, "{name}");
+    }
 }

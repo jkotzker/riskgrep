@@ -52,7 +52,7 @@ riskgrep rules test                             # run the rulesets' own test cas
 riskgrep cache prune --dry-run                  # what pruning the cache would remove
 ```
 
-`--fail-at CATEGORY=N[,CATEGORY=N…]` makes the exit status 1 when a target's score for that category is at or above `N`. A target meets a threshold when its score rounded to one decimal, the number every output shows, is at least the threshold; `--fail-at`, the git hook's `block_at`, and the Claude Code hook's `ask` and `deny` thresholds all use that one rule (`cargo test -p riskgrep --test cli fail_at_is_inclusive`). Exit status 2 means a target could not be scanned and `--on-error block` applies; 3 is a usage or configuration error. When standard output is closed early (`riskgrep scan … | head -1`), the command stops writing without a message and keeps the exit status the scan computed, so a gate in a pipeline with `set -o pipefail` still fails on 1 or 2; a scan that passed exits 0 (`cargo test -p riskgrep --test epipe`). `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
+`--fail-at CATEGORY=N[,CATEGORY=N…]` makes the exit status 1 when a target's score for that category is at or above `N`. A target meets a threshold when its score rounded to one decimal, the number every output shows, is at least the threshold; `--fail-at`, the git hook's `block_at`, and the Claude Code hook's `ask` and `deny` thresholds all use that one rule (`cargo test -p riskgrep --test cli fail_at_is_inclusive`). Exit status 2 means a target could not be scanned and `--on-error block` applies, or part of a target's content was not read (text sampled at its ends; a key store, a tensor header, or standard input past its limit; a zip archive's member not read whole, a sampled member included; or an `.npz` member that cannot be read) and `--on-partial` blocks (`--on-partial error`, the default, follows `--on-error`; a score at its threshold exits 1 either way); 3 is a usage or configuration error. When standard output is closed early (`riskgrep scan … | head -1`), the command stops writing without a message and keeps the exit status the scan computed, so a gate in a pipeline with `set -o pipefail` still fails on 1 or 2; a scan that passed exits 0 (`cargo test -p riskgrep --test epipe`). `--category` and `--ruleset` narrow what runs, and `--no-cache` skips the evidence cache. Findings recorded by `riskgrep baseline` go to `.riskgrep-baseline.json` in the repository root; later scans treat them as known. Run `riskgrep --help` and `riskgrep <command> --help` for every option.
 
 ## Git hook
 
@@ -61,7 +61,7 @@ riskgrep git install-hook          # writes the pre-commit hook (honours core.ho
 riskgrep git pre-commit            # what the hook runs; also usable by hand
 ```
 
-The hook scores the lines added by the staged changes (`--full-files` or `git.full_files = true` scores whole files; renamed and copied files, binary files such as key stores and tensor files, and partly read files are always scored whole) and exits 1 when a category reaches its `git.block_at` threshold: 80 for `secret` and 75 for `biometric` by default. It prints the path, rule identifiers, score, and line numbers, never the matched text.
+The hook scores the lines added by the staged changes (`--full-files` or `git.full_files = true` scores whole files; renamed and copied files, binary files such as key stores and tensor files, and partly read files are always scored whole) and exits 1 when a category reaches its `git.block_at` threshold: 80 for `secret` and 75 for `biometric` by default. It also exits 1 by default for a staged file it could not scan or read only in part, such as a text file over 8 MiB (`git.on_error`, `git.on_partial`). It prints the path, rule identifiers, score, and line numbers, never the matched text.
 
 ## Claude Code hook
 
@@ -76,7 +76,7 @@ Merge the printed fragment into `~/.claude/settings.json` by hand: a `PreToolUse
 
 ## Configuration
 
-Settings are layered: built-in defaults, then `~/.config/riskgrep/config.toml` (both platforms), then the repository's `.riskgrep.toml`, then command-line options. Example:
+Settings are layered: built-in defaults, then `~/.config/riskgrep/config.toml` (both platforms), then the repository's `.riskgrep.toml`, then command-line options. `[ignore]` `paths` and `rules` in a later layer replace the earlier layer's lists rather than adding to them. The user configuration is read from `$HOME/.config/riskgrep/config.toml` on both macOS and Linux; `XDG_CONFIG_HOME` is not consulted. Example:
 
 ```toml
 trusted_repos = ["/Users/me/work/project"]
@@ -91,6 +91,29 @@ secret = 85
 [limits]
 walk_files = 20000
 ```
+
+`limits.walk_files` is the most files one directory walk visits (default 10,000); a directory with more is reported unscanned, and the Claude Code hook applies the same limit to the files a `Grep` would search, to directory walks, and to the names a `Glob` or a directory-listing MCP tool would reveal.
+
+Zip archives (and jar, docx, xlsx, and wheel files), tar archives, and gzip files (`.tar.gz`, `.tgz`, and `.gz`) are opened and their members scanned like files; findings name the member as `archive.zip!/path/in/archive`, `archive.tar.gz!/path/in/archive`, or `app.log.gz!/app.log`. The members of one archive, nested archives included, share these limits, shown with their defaults:
+
+```toml
+[limits]
+container_bytes = 8388608    # uncompressed bytes read from all members
+member_bytes = 8388608       # bytes read from one member
+container_members = 1000     # members examined
+container_depth = 3          # nesting depth; the archive itself is depth 1
+container_ratio = 100        # uncompressed-to-compressed ratio, per member and overall, checked past 1 MiB
+
+[claude_code]
+on_partial = "error"         # a target read in part: "error" follows on_error, or allow, ask, deny, block
+
+[git]
+on_partial = "error"
+```
+
+A target with content that was not read is reported `partial` and never passes silently: `on_partial` applies, and by default it follows `on_error`, so the Claude Code hook asks and the git hook blocks. That covers text over `limits.text_max` (8 MiB), which is sampled at its ends; a key store or `.npy` header over the text limit; a safetensors header over 100 MiB; standard input over 64 MiB; an archive with a member not read whole (a limit reached, an encrypted member, or a member sampled because it is over the text limit); and an `.npz` with a member named `.npy` that cannot be read or is not an npy file, or with members past the 1,024th (an `.npz` with any other member, or a comment, is read as a zip archive). A finding in the part read keeps its result, and `on_partial` never lowers a decision. `on_partial = "allow"` accepts all of these, including an archive that holds a member it cannot open, such as a bzip2 stream, next to members it read; the same stream on its own follows `on_error`. `[ignore]` and baselines suppress findings, not this status. See [Files read in part](docs/known-limitations.md#files-read-in-part), [Zip members are read within shared limits](docs/known-limitations.md#zip-members-are-read-within-shared-limits), and [the same for tar and gzip](docs/known-limitations.md#tar-and-gzip-members-are-read-within-the-same-limits).
+
+SQLite databases are read under the same limits, through the file format rather than the SQLite library, so a scan never writes to a database, checkpoints it, or locks it. Each column with text or BLOB cells is a member: findings name it as `app.db!/table/column`, with lines and offsets in the column's cells joined by line feeds. A table that does not fit is read from both ends and the database is `partial`, as it is when a write-ahead log or rollback journal lies beside it, since those are not read. Encrypted databases are `unscanned`. See [Known limitations](docs/known-limitations.md#sqlite-databases-are-read-in-part-past-the-shared-limits-and-their-logs-are-not-read).
 
 Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weights (`weight_overrides`), and list paths and rules to ignore (`[ignore]`).
 

@@ -26,7 +26,8 @@ fn ser_scores<S: Serializer>(m: &BTreeMap<Category, f64>, s: S) -> Result<S::Ok,
 pub struct Category(pub String);
 
 /// Byte offsets into the file (for formats read selectively, such as tensor
-/// headers, into the bytes read); lines are 1-based, and 0 when unknown:
+/// headers, into the bytes read; for evidence in a container member, into
+/// the member's uncompressed bytes); lines are 1-based, and 0 when unknown:
 /// evidence in the tail sample of a partly read text file has file offsets
 /// but no line numbers, because the lines it skipped were not counted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +40,7 @@ pub struct Location {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum ShapeFacts {
     Tensor {
         dtype: String,
@@ -70,10 +72,17 @@ pub struct Evidence {
     /// rule metadata when the target is scored; never stored.
     #[serde(skip)]
     pub line_complete: bool,
+    /// For evidence found in a container member: the member's path inside
+    /// the container (`config/.env`, nested `inner.zip!/x`). Its locations
+    /// are offsets and lines in that member. Absent for evidence about the
+    /// file itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TargetStatus {
     Scanned,
     Partial { not_read: String },
@@ -99,6 +108,67 @@ pub struct TargetReport {
     /// UTF-32 git blob, whose lines git numbers at 0x0A bytes.
     #[serde(skip)]
     pub text: bool,
+    /// Set for a container whose members were read (an archive).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<ContainerReport>,
+    /// The `partial` status is content that could not be read (an `.npz`
+    /// member that does not read), not a part left unread by a read limit.
+    /// Only the wording of the hooks' messages depends on it: `on_partial`
+    /// applies to both (see [`TargetReport::unseen_part`]).
+    #[serde(skip)]
+    pub read_failed: bool,
+}
+
+impl TargetReport {
+    /// What was not read, when `on_partial` applies: part of the content was
+    /// never seen, as with every `partial` target: a container with a member
+    /// not read whole, text sampled at its ends, a key store, a tensor header,
+    /// or standard input past its limit, or an `.npz`'s unreadable member.
+    /// `None` for a file read whole, and for one whose format is read for its
+    /// header alone (`.npy` and vault files), which is `scanned`.
+    pub fn unseen_part(&self) -> Option<&str> {
+        match &self.status {
+            TargetStatus::Partial { not_read } => Some(not_read),
+            _ => None,
+        }
+    }
+}
+
+/// What a container's members held.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ContainerReport {
+    /// The extractor that read it, e.g. `zip`.
+    pub format: String,
+    /// Members examined or counted, nested members included. Each is in
+    /// exactly one of the counts below, which add up to this.
+    pub members: u64,
+    /// Members read whole and scanned.
+    pub scanned: u64,
+    /// Members read and scanned only in part: sampled, cut at a limit, or
+    /// holding bytes their stream does not show.
+    pub read_in_part: u64,
+    /// Members of formats that are not scanned (images, binary files of
+    /// unknown format).
+    pub skipped: u64,
+    /// Members not read or not scanned at all.
+    pub not_read: u64,
+    /// Nested containers opened; what they hold is counted as members.
+    pub opened: u64,
+    /// Members with evidence, then members not read whole, at most
+    /// [`crate::container::LISTED_MAX`].
+    pub listed: Vec<MemberReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MemberReport {
+    /// Path inside the container, as in [`Evidence::member`].
+    pub path: String,
+    #[serde(flatten)]
+    pub status: TargetStatus,
+    /// The member's own scores, for display; the container's scores cover
+    /// all of its members together.
+    #[serde(serialize_with = "ser_scores")]
+    pub scores: BTreeMap<Category, f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

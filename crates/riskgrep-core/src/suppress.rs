@@ -132,6 +132,16 @@ pub fn fingerprint(
     hex(blake3::keyed_hash(key, &buf).as_bytes())
 }
 
+/// The path a finding is suppressed and baselined under: the target's
+/// path, joined with `!/` to the member's path for evidence found in a
+/// container member (`backup.zip!/config/.env`).
+pub fn evidence_path(target_path: &str, ev: &crate::model::Evidence) -> String {
+    match &ev.member {
+        Some(m) => format!("{target_path}!/{m}"),
+        None => target_path.to_string(),
+    }
+}
+
 /// Fingerprint inputs of one evidence item: one digest per location when
 /// the evidence is location-addressable, otherwise a single unit carrying
 /// the content digest of location-free evidence.
@@ -181,6 +191,7 @@ impl Baseline {
         for t in targets {
             let path = rel(&t.target);
             for ev in &t.evidence {
+                let path = evidence_path(&path, ev);
                 for u in units(ev) {
                     fingerprints.insert(fingerprint(&key, &ev.rule, &path, u));
                 }
@@ -248,6 +259,9 @@ impl Baseline {
 
 /// Remove ignored and baselined findings. Multi-location evidence loses
 /// only the suppressed locations; evidence left with none is dropped.
+/// Evidence in a container member is ignored by a glob matching either the
+/// container's path or the joined member path, and baselined under the
+/// joined member path.
 /// `suppressed` grows by the locations removed (1 for a whole item).
 /// Scores are not recomputed.
 pub fn apply(
@@ -261,9 +275,11 @@ pub fn apply(
         let mut removed = 0u32;
         let mut kept = Vec::with_capacity(t.evidence.len());
         for mut ev in std::mem::take(&mut t.evidence) {
-            let ignored = ignore.ignores(&path, &ev.rule);
+            let ev_path = evidence_path(&path, &ev);
+            let ignored = ignore.ignores(&path, &ev.rule)
+                || (ev.member.is_some() && ignore.ignores(&ev_path, &ev.rule));
             let suppress = |digest: Option<&[u8; 32]>| {
-                ignored || baseline.is_some_and(|b| b.contains(&ev.rule, &path, digest))
+                ignored || baseline.is_some_and(|b| b.contains(&ev.rule, &ev_path, digest))
             };
             if ev.locations.is_empty() || ev.fingerprints.len() != ev.locations.len() {
                 if suppress(whole_unit(&ev)) {

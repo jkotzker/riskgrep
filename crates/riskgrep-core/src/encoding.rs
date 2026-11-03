@@ -8,6 +8,7 @@ use crate::model::Evidence;
 
 /// A Unicode encoding form other than UTF-8, with its byte order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Utf {
     Utf16Le,
     Utf16Be,

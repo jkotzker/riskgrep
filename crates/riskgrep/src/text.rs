@@ -54,6 +54,9 @@ fn target_line(t: &TargetReport) -> Option<String> {
 
 fn evidence_text(e: &Evidence) -> String {
     let mut s = format!("{} ×{}", e.rule, e.count);
+    if let Some(m) = &e.member {
+        let _ = write!(s, " in {m}");
+    }
     let mut lines: Vec<(u32, u32)> = e
         .locations
         .iter()
@@ -128,6 +131,7 @@ mod tests {
             shape: vec![],
             fingerprints: vec![],
             line_complete: false,
+            member: None,
         }
     }
 
@@ -144,6 +148,8 @@ mod tests {
             evidence,
             suppressed: 0,
             text: true,
+            container: None,
+            read_failed: false,
         }
     }
 
@@ -154,6 +160,13 @@ mod tests {
         assert_eq!(evidence_text(&ev("path_rule", vec![])), "path_rule ×1");
         let many = ev("m", (1..=8).map(|n| loc(n, n)).collect());
         assert_eq!(evidence_text(&many), "m ×8, lines 1,2,3,4,5,…");
+    }
+
+    #[test]
+    fn evidence_in_a_member_names_it() {
+        let mut e = ev("r", vec![loc(4, 4)]);
+        e.member = Some("inner.zip!/config/.env".into());
+        assert_eq!(evidence_text(&e), "r ×1 in inner.zip!/config/.env, lines 4");
     }
 
     #[test]

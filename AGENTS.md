@@ -2,6 +2,11 @@
 
 RiskGrep is a local scanner that scores files from 0 to 100 per sensitive-data category (`secret`, `biometric`) with YARA-X rules and structural checks. Read [`README.md`](README.md) for what it does and [`docs/known-limitations.md`](docs/known-limitations.md) for what it does not.
 
+## Priorities
+
+- **General purpose.** RiskGrep is not tied to any one agent, system, or use case. What is specific to one agent harness belongs in that harness's adapter and everything else in shared code, and a new setting goes under an agent's section only if it concerns only that agent. Check each design, issue, and change for assumptions about one agent, one system, or one user.
+- **No assumptions from one setup.** Do not infer anything about the world or about the project's users from one contributor's machine, tools, configuration, or session. A tool being present on one machine is not evidence that it is common. Establish such claims from a neutral source and say what was measured, or mark them unverified.
+
 ## Layout
 
 - `crates/riskgrep-core`: the library (classification, rules bundle, scanning, scoring, cache, configuration, baselines). The built-in rulesets live in `crates/riskgrep-core/rulesets/` and are embedded at build time; their format is in [`crates/riskgrep-core/rulesets/README.md`](crates/riskgrep-core/rulesets/README.md).

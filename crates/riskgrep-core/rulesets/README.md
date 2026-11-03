@@ -56,6 +56,8 @@ Header conditions that read integers (`uint32(0)`, `uint32(4)`) must guard again
 
 Regexes are compiled without Unicode, so use `(?i)` for ASCII case folding; YARA-X regexes have no lookaround.
 
+A regex in a condition (`path matches /…/`) is compiled by each scanner on its first use, so a scanner that handles one file, as `riskgrep git pre-commit` does, pays about 1M to 3M instructions per regex for every file, whether or not the name matches (`eval/README.md`, round 9). In a path rule, prefer the string operators (`iequals`, `iendswith`, `icontains`), or put a string prefilter before the regex.
+
 UTF-16 and UTF-32 text reaches the rules transcoded to UTF-8, without its byte-order mark, so text patterns need no `wide` modifier, and `filesize` and offsets in conditions refer to the transcoded text. Evidence locations are moved back to byte offsets in the file after the scan.
 
 ## Rule tests (`tests.toml`)
@@ -86,3 +88,5 @@ Samples are generated at run time from fixed seeds, so nothing sensitive is stor
 | `prices:N`, `log:N` | N lines of price-list CSV or log text with small decimals (hard negatives for float rules) |
 | `file:KIND[:SEED]` | Whole-file text from `riskgrep_core::synth::credential_file`: one-time-password URIs, password-manager exports, and two-factor recovery codes, each with a hard-negative variant (kinds in `synth::CREDENTIAL_FILE_KINDS`) |
 | `text:LITERAL` | The literal text; `\n` and `\t` are escapes |
+| `zip:MEMBER=SPEC` | A deflated zip archive whose one member, named `MEMBER`, holds the sample `SPEC` generates (which may be another `zip:`), e.g. `zip:config/.env=secret:aws_access_key`; give the case a `path` ending in `.zip` |
+| `sqlite:TABLE.COLUMN=SPEC` | A SQLite database with one row, holding the sample `SPEC` generates as text in that column (`sqlite:notes.body=secret:aws_access_key`); give the case a `path` that says it is a database, such as `app.db` |

@@ -290,6 +290,8 @@ fn mcp_job(hook: &HookInput, cc: &config::ClaudeCodeConfig, cwd: &Path) -> Resul
             glob: None,
             max_depth: tool.max_depth,
         },
+        // A kind this build does not know cannot be resolved to paths.
+        _ => return Err(()),
     }))
 }
 
@@ -384,6 +386,8 @@ fn scan(
             evidence: Vec::new(),
             suppressed: 0,
             text: false,
+            container: None,
+            read_failed: false,
         });
         report = Report::from_targets(&report.riskgrep_version, &report.rules_bundle, targets);
     }

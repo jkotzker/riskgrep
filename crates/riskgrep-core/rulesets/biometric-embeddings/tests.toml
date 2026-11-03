@@ -14,6 +14,13 @@ path = "a.npy"
 expect = 70
 
 [[case]]
+# The same file as a member of a nested zip.
+rule = "npy_embedding_tensor"
+synth = "zip:inner.zip=zip:a.npy=npy:<f4:10x192"
+path = "data.zip"
+expect = 70
+
+[[case]]
 # A float array that is not embedding-shaped (last dimension 7).
 rule = "npy_float_tensor"
 synth = "npy:<f8:500x7"

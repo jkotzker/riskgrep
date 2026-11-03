@@ -11,8 +11,17 @@ use std::ops::Range;
 const NPY_MAGIC: &[u8] = b"\x93NUMPY";
 /// Bytes read from each `.npy` member of an archive.
 pub(crate) const NPZ_MEMBER_BYTES: u64 = 4096;
-/// Archive members examined per file.
+/// Archive members examined per file, counted by position.
 pub(crate) const NPZ_MAX_MEMBERS: usize = 1024;
+
+/// What an `.npz` of `members` members leaves unread past the
+/// [`NPZ_MAX_MEMBERS`] cap, for the reason of a partial result. Counts only:
+/// no member name is ever put in a reason.
+pub(crate) fn npz_past_the_cap(members: usize) -> Option<String> {
+    (members > NPZ_MAX_MEMBERS).then(|| {
+        format!("npz members past the first {NPZ_MAX_MEMBERS} not read ({members} members)")
+    })
+}
 /// Largest safetensors JSON header accepted.
 const SAFETENSORS_HEADER_MAX: u64 = 104_857_600;
 
@@ -44,11 +53,19 @@ fn value_after<'a>(header: &'a str, key: &str) -> Option<&'a str> {
     Some(rest.trim_start())
 }
 
-fn parse_npy_header(header: &str) -> Option<(String, Vec<u64>)> {
+/// Dtype (when it is a plain string) and shape of an npy header: a dictionary
+/// with a `descr` and a `shape` tuple. A structured dtype has a list for its
+/// `descr`, so it has no plain dtype.
+fn parse_npy_header(header: &str) -> Option<(Option<String>, Vec<u64>)> {
     let descr = value_after(header, "'descr'")?;
-    let quote = descr.chars().next().filter(|c| *c == '\'' || *c == '"')?;
-    let body = &descr[1..];
-    let descr = &body[..body.find(quote)?];
+    let dtype = descr
+        .chars()
+        .next()
+        .filter(|c| *c == '\'' || *c == '"')
+        .and_then(|quote| {
+            let body = &descr[1..];
+            body.find(quote).map(|end| body[..end].to_string())
+        });
 
     let shape = value_after(header, "'shape'")?.strip_prefix('(')?;
     let shape = &shape[..shape.find(')')?];
@@ -58,29 +75,65 @@ fn parse_npy_header(header: &str) -> Option<(String, Vec<u64>)> {
         .filter(|s| !s.is_empty())
         .map(|s| s.trim_end_matches(['L', 'l']).parse::<u64>().ok())
         .collect::<Option<Vec<u64>>>()?;
-    Some((descr.to_string(), dims))
+    Some((dtype, dims))
+}
+
+/// What the start of an `.npy` file says about the array.
+enum Npy {
+    Float(String, Vec<u64>),
+    /// An npy header for an array that is not a float array.
+    Other,
+    /// Starts with the magic bytes but has no npy header. A header that runs
+    /// past `data` is this only when `complete` (`data` is the whole file);
+    /// otherwise the rest of it was not read, so nothing is known.
+    NoHeader,
+}
+
+fn npy_kind(data: &[u8], complete: bool) -> Npy {
+    let past = if complete { Npy::NoHeader } else { Npy::Other };
+    let (len, start): (usize, usize) = match data.get(6) {
+        Some(1) => match data.get(8..10) {
+            Some(b) => (usize::from(u16::from_le_bytes([b[0], b[1]])), 10),
+            None => return past,
+        },
+        Some(2 | 3) => match data.get(8..12) {
+            Some(b) => (u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize, 12),
+            None => return past,
+        },
+        Some(_) => return Npy::NoHeader,
+        None => return past,
+    };
+    let Some(header) = start.checked_add(len).and_then(|end| data.get(start..end)) else {
+        return past;
+    };
+    // Versions 1 and 2 write the header in latin-1, version 3 in UTF-8.
+    let text = std::str::from_utf8(header)
+        .map(std::borrow::Cow::Borrowed)
+        .unwrap_or_else(|_| {
+            header
+                .iter()
+                .map(|&b| char::from(b))
+                .collect::<String>()
+                .into()
+        });
+    match parse_npy_header(&text) {
+        None => Npy::NoHeader,
+        Some((Some(dtype), shape)) if is_float(dtype.trim_start_matches(['<', '>', '|', '='])) => {
+            Npy::Float(dtype, shape)
+        }
+        Some(_) => Npy::Other,
+    }
 }
 
 /// Dtype and shape of an `.npy` buffer holding a float array.
 fn npy_float(data: &[u8]) -> Option<(String, Vec<u64>)> {
-    if data.get(..6)? != NPY_MAGIC {
+    if !data.starts_with(NPY_MAGIC) {
         return None;
     }
-    let (len, start): (usize, usize) = match *data.get(6)? {
-        1 => (
-            u16::from_le_bytes(data.get(8..10)?.try_into().ok()?) as usize,
-            10usize,
-        ),
-        2 | 3 => (
-            u32::from_le_bytes(data.get(8..12)?.try_into().ok()?) as usize,
-            12,
-        ),
-        _ => return None,
-    };
-    let header = data.get(start..start.checked_add(len)?)?;
-    let (dtype, shape) = parse_npy_header(std::str::from_utf8(header).ok()?)?;
-    let kind = dtype.trim_start_matches(['<', '>', '|', '=']);
-    is_float(kind).then_some((dtype, shape))
+    match npy_kind(data, false) {
+        Npy::Float(dtype, shape) => Some((dtype, shape)),
+        Npy::Other | Npy::NoHeader => None,
+    }
 }
 
 /// A bank of `count` identically shaped tensors qualifies when it has at
@@ -147,17 +200,52 @@ impl Post for NpzMembers {
         let mut floats = 0u64;
         // Per shape: member count, archive index of the first member, facts.
         let mut banks: BTreeMap<Vec<u64>, (u64, usize, ShapeFacts)> = BTreeMap::new();
+        // Without a bank requirement, the first qualifying member decides.
+        let mut first: Option<ShapeFacts> = None;
+        // The first `.npy` member that could not be read, or is no npy file;
+        // without one, the note for members past the cap is used.
+        let mut unread: Option<String> = None;
         for i in 0..zip.len().min(NPZ_MAX_MEMBERS) {
-            let Ok(file) = zip.by_index(i) else { continue };
-            let Some(name) = file.name().strip_suffix(".npy").map(str::to_string) else {
+            // A member is in scope when its stored name ends in `.npy`; that
+            // comes from the directory, so it holds when the data is damaged.
+            let in_scope = zip
+                .name_for_index(i)
+                .and_then(Result::ok)
+                .is_some_and(|n| n.ends_with(".npy"));
+            if !in_scope {
+                continue;
+            }
+            let cannot_read = || format!("npz member {i} could not be read");
+            let Ok(file) = zip.by_index(i) else {
+                unread.get_or_insert_with(cannot_read);
+                continue;
+            };
+            let Some(name) = file
+                .name()
+                .ok()
+                .and_then(|n| n.strip_suffix(".npy").map(str::to_string))
+            else {
                 continue;
             };
             let mut head = Vec::new();
             if file.take(NPZ_MEMBER_BYTES).read_to_end(&mut head).is_err() {
+                unread.get_or_insert_with(cannot_read);
                 continue;
             }
-            let Some((dtype, shape)) = npy_float(&head) else {
+            let not_npy = || format!("npz member {i} is not an npy file");
+            if !head.starts_with(NPY_MAGIC) {
+                unread.get_or_insert_with(not_npy);
                 continue;
+            }
+            // A head shorter than the bytes asked for is the whole member.
+            let complete = (head.len() as u64) < NPZ_MEMBER_BYTES;
+            let (dtype, shape) = match npy_kind(&head, complete) {
+                Npy::Float(dtype, shape) => (dtype, shape),
+                Npy::Other => continue,
+                Npy::NoHeader => {
+                    unread.get_or_insert_with(not_npy);
+                    continue;
+                }
             };
             floats += 1;
             if excluded(self.exclude_name_regex.as_ref(), &name)
@@ -171,21 +259,28 @@ impl Post for NpzMembers {
                 name: Some(name),
             };
             if self.min_bank.is_none() {
-                return PostResult::KeepWithShape(m, facts);
+                first.get_or_insert(facts);
+                continue;
             }
             banks.entry(shape).or_insert((0, i, facts)).0 += 1;
         }
-        let Some(min) = self.min_bank else {
-            return PostResult::Drop;
-        };
-        // Archive order: the first member of the earliest qualifying bank.
-        banks
-            .into_values()
-            .filter(|(n, _, _)| bank_qualifies(*n, floats, min, self.min_bank_share))
-            .min_by_key(|(_, first, _)| *first)
-            .map_or(PostResult::Drop, |(_, _, facts)| {
+        let verdict = match self.min_bank {
+            None => first.map_or(PostResult::Drop, |facts| {
                 PostResult::KeepWithShape(m, facts)
-            })
+            }),
+            // Archive order: the first member of the earliest qualifying bank.
+            Some(min) => banks
+                .into_values()
+                .filter(|(n, _, _)| bank_qualifies(*n, floats, min, self.min_bank_share))
+                .min_by_key(|(_, first, _)| *first)
+                .map_or(PostResult::Drop, |(_, _, facts)| {
+                    PostResult::KeepWithShape(m, facts)
+                }),
+        };
+        match unread.or_else(|| npz_past_the_cap(zip.len())) {
+            Some(note) => PostResult::Incomplete(Box::new(verdict), note),
+            None => verdict,
+        }
     }
 }
 

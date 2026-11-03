@@ -10,7 +10,7 @@ use crate::CliError;
 use riskgrep_core::config::{self, Action, GitConfig, Mode, Overrides};
 use riskgrep_core::model::{meets_threshold, round1};
 use riskgrep_core::{RiskGrep, TargetReport, TargetStatus};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::ops::RangeInclusive;
@@ -22,6 +22,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 const BLOB_MAX: u64 = 128 << 20;
 /// At most this many line numbers are listed per finding.
 const MAX_LINES: usize = 5;
+/// Members of a container named per category; the rest are counted.
+const MAX_MEMBERS: usize = 5;
 const HOOK_BODY: &str = "#!/bin/sh\nexec riskgrep git pre-commit \"$@\"\n";
 const GITLINK_MODE: &[u8] = b"160000";
 const SYMLINK_MODE: &[u8] = b"120000";
@@ -322,24 +324,38 @@ fn offences(path: &str, t: &TargetReport, git_cfg: &GitConfig) -> Vec<String> {
         if !meets_threshold(score, *limit) {
             continue;
         }
-        let mut rules = BTreeSet::new();
-        let mut at = BTreeSet::new();
+        // Evidence grouped by member (`None`: the file itself); a container
+        // names each member, with its lines when the member is text.
+        let mut groups: BTreeMap<Option<&str>, (BTreeSet<&str>, BTreeSet<u32>)> = BTreeMap::new();
         for e in t.evidence.iter().filter(|e| &e.category == cat) {
-            rules.insert(e.rule.as_str());
-            at.extend(e.locations.iter().map(|l| l.line_start));
+            let g = groups.entry(e.member.as_deref()).or_default();
+            g.0.insert(e.rule.as_str());
+            g.1.extend(e.locations.iter().map(|l| l.line_start));
         }
-        let mut detail = rules.into_iter().collect::<Vec<_>>().join(", ");
-        // Line 0: a finding in the tail sample of a partly read file, whose
-        // line is not known.
-        let unknown = at.remove(&0);
-        if !at.is_empty() {
-            let shown: Vec<String> = at.iter().take(MAX_LINES).map(u32::to_string).collect();
-            let more = if at.len() > MAX_LINES { ", …" } else { "" };
-            let _ = write!(detail, ", line {}{more}", shown.join(", "));
+        let more_members = groups.len().saturating_sub(MAX_MEMBERS);
+        let mut parts: Vec<String> = Vec::new();
+        for (member, (rules, mut at)) in groups.into_iter().take(MAX_MEMBERS) {
+            let mut detail = rules.into_iter().collect::<Vec<_>>().join(", ");
+            if let Some(m) = member {
+                let _ = write!(detail, " in {m}");
+            }
+            // Line 0: a finding in the tail sample of a partly read file,
+            // whose line is not known, or in a member that is not text.
+            let unknown = at.remove(&0);
+            if !at.is_empty() {
+                let shown: Vec<String> = at.iter().take(MAX_LINES).map(u32::to_string).collect();
+                let more = if at.len() > MAX_LINES { ", …" } else { "" };
+                let _ = write!(detail, ", line {}{more}", shown.join(", "));
+            }
+            if unknown && member.is_none() {
+                detail.push_str(", line unknown");
+            }
+            parts.push(detail);
         }
-        if unknown {
-            detail.push_str(", line unknown");
+        if more_members > 0 {
+            parts.push(format!("and {more_members} more members"));
         }
+        let detail = parts.join("; ");
         lines.push(format!(
             "riskgrep: {path}: {} {:.1} ({detail})",
             cat.0,
@@ -382,6 +398,7 @@ fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
     let mut batch = Batch::spawn(&root)?;
     let mut messages: Vec<String> = Vec::new();
     let mut offended = false;
+    let mut read_in_part = false;
 
     let result = (|| -> Result<(), CliError> {
         for (f, only) in staged.iter().zip(&ranges) {
@@ -431,6 +448,18 @@ fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
                 }
                 _ => {}
             }
+            if let Some(not_read) = t.unseen_part() {
+                if blocks(git_cfg.on_partial.action(git_cfg.on_error)) {
+                    // A read limit left the part unread; nothing failed.
+                    let status = if t.read_failed || t.container.is_some() {
+                        "partial"
+                    } else {
+                        "read only in part"
+                    };
+                    messages.push(unscanned_line(&shown, status, not_read));
+                    read_in_part = true;
+                }
+            }
             let lines = offences(&shown, &t, &git_cfg);
             offended |= !lines.is_empty();
             messages.extend(lines);
@@ -455,6 +484,12 @@ fn pre_commit(a: PreCommitArgs) -> Result<i32, CliError> {
         writeln!(
             err,
             "To ignore a path: add it to [ignore] in .riskgrep.toml"
+        )?;
+    }
+    if read_in_part {
+        writeln!(
+            err,
+            "To accept every target read in part: set on_partial = \"allow\" under [git] in .riskgrep.toml"
         )?;
     }
     Ok(EXIT_THRESHOLD)
@@ -560,9 +595,57 @@ mod tests {
             evidence: vec![],
             suppressed: 0,
             text: true,
+            container: None,
+            read_failed: false,
         };
         assert_eq!(offences("x", &t(79.96), &cfg).len(), 1);
         assert!(offences("x", &t(79.94), &cfg).is_empty());
+    }
+
+    #[test]
+    fn offences_in_members_name_them() {
+        let cat = riskgrep_core::Category("secret".into());
+        let cfg = GitConfig {
+            block_at: [(cat.clone(), 80.0)].into(),
+            ..riskgrep_core::config::Config::default().git
+        };
+        let ev = |member: &str, line: u32| riskgrep_core::Evidence {
+            rule: "aws_access_token".into(),
+            category: cat.clone(),
+            weight: 95.0,
+            count: 1,
+            locations: vec![riskgrep_core::Location {
+                start: 0,
+                end: 20,
+                line_start: line,
+                line_end: line,
+            }],
+            shape: vec![],
+            fingerprints: vec![],
+            line_complete: true,
+            member: Some(member.into()),
+        };
+        let mut evidence = vec![ev("config/.env", 4), ev("key.der", 0)];
+        evidence.extend((0..6).map(|i| ev(&format!("m{i}.txt"), 1)));
+        let t = TargetReport {
+            target: "backup.zip".into(),
+            status: TargetStatus::Scanned,
+            scores: [(cat.clone(), 95.0)].into(),
+            evidence,
+            suppressed: 0,
+            text: false,
+            container: None,
+            read_failed: false,
+        };
+        assert_eq!(
+            offences("backup.zip", &t, &cfg),
+            [
+                "riskgrep: backup.zip: secret 95.0 (aws_access_token in config/.env, line 4; \
+              aws_access_token in key.der; aws_access_token in m0.txt, line 1; \
+              aws_access_token in m1.txt, line 1; aws_access_token in m2.txt, line 1; \
+              and 3 more members)"
+            ]
+        );
     }
 
     #[test]

@@ -6,14 +6,17 @@
 //! scoring cached evidence reads the rule-metadata sidecar instead.
 
 use crate::bundle::{self, Sidecar};
-use crate::cache::{Cache, StatKey};
-use crate::classify::{self, Content, FileClass, Known, Tail};
+use crate::cache::{Cache, ContainerRow, Entry, StatKey};
+use crate::classify::{self, Content, FileClass, Known, Source, Tail};
 use crate::config::{self, Config};
+use crate::container::{self, Cause, Extracted, Extractor, Unread};
 use crate::engine::{Engine, ScanError};
 use crate::meta::RuleMeta;
-use crate::model::{Category, Evidence, Report, TargetReport, TargetStatus};
+use crate::model::{
+    Category, ContainerReport, Evidence, MemberReport, Report, TargetReport, TargetStatus,
+};
 use crate::ruleset::{builtin_rulesets, Ruleset};
-use crate::score::score_target;
+use crate::score::{score_container, score_target};
 use crate::suppress::{self, Baseline};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -23,7 +26,7 @@ use std::ops::RangeInclusive;
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 /// Test hook: called with the resolved path after a file's content has been
 /// read and before the file is re-examined for changes.
@@ -96,6 +99,43 @@ struct Raw {
     content: bool,
     /// The content was scanned as text (see [`TargetReport::text`]).
     text: bool,
+    /// Set for a container whose members were read.
+    container: Option<ContainerInfo>,
+    /// See [`TargetReport::read_failed`].
+    read_failed: bool,
+}
+
+/// What a container's walk and scan found besides evidence.
+struct ContainerInfo {
+    /// `scanned` counts members read whole and scanned.
+    counts: ContainerRow,
+    read_in_part: u64,
+    not_read: u64,
+    opened: u64,
+    /// Members not read whole (empty for a cached container).
+    unread: Vec<Unread>,
+}
+
+impl ContainerInfo {
+    /// Members were counted, none was scanned, and every one is a skipped
+    /// file or a nested container of them. Only meaningful for a container
+    /// with nothing unread.
+    fn all_skipped(&self) -> bool {
+        self.counts.scanned == 0 && self.read_in_part == 0 && self.counts.skipped > 0
+    }
+
+    fn report(self, listed: Vec<MemberReport>) -> ContainerReport {
+        ContainerReport {
+            format: self.counts.format,
+            members: self.counts.members,
+            scanned: self.counts.scanned,
+            read_in_part: self.read_in_part,
+            skipped: self.counts.skipped,
+            not_read: self.not_read,
+            opened: self.opened,
+            listed,
+        }
+    }
 }
 
 impl Raw {
@@ -107,6 +147,50 @@ impl Raw {
             evidence: Vec::new(),
             content: false,
             text: false,
+            container: None,
+            read_failed: false,
+        }
+    }
+
+    /// A container read whole with nothing in it scanned: it is what a lone
+    /// file of its members' kind would be, so `on_skipped` applies.
+    fn all_skipped(target: String, info: ContainerInfo) -> Raw {
+        let mut raw = Raw::status(
+            target,
+            TargetStatus::Skipped {
+                reason: container::ALL_SKIPPED.to_string(),
+            },
+        );
+        raw.container = Some(info);
+        raw
+    }
+
+    /// A target answered from the cache.
+    fn cached(target: String, rel: String, entry: Entry, text: bool) -> Raw {
+        // Only a container read whole is cached, and the row does not count
+        // the nested containers: they are the members left over.
+        let container = entry.container.map(|counts| ContainerInfo {
+            read_in_part: 0,
+            not_read: 0,
+            opened: counts
+                .members
+                .saturating_sub(counts.scanned + counts.skipped),
+            counts,
+            unread: Vec::new(),
+        });
+        let container = match container {
+            Some(info) if info.all_skipped() => return Raw::all_skipped(target, info),
+            other => other,
+        };
+        Raw {
+            target,
+            status: TargetStatus::Scanned,
+            evidence: entry.evidence,
+            rel,
+            content: true,
+            text: text && container.is_none(),
+            container,
+            read_failed: false,
         }
     }
 
@@ -124,6 +208,8 @@ impl Raw {
             rel,
             content: true,
             text,
+            container: None,
+            read_failed: false,
         }
     }
 }
@@ -143,6 +229,17 @@ struct Pending {
     /// before the read, so the racy-edit window measures from it); `None`
     /// when the file changed while being read.
     stat: Option<(StatKey, SystemTime)>,
+    /// Set for a container: its members, scanned in place of `content`.
+    container: Option<Box<Walked>>,
+}
+
+/// A container read and classified, waiting for its members' scans.
+struct Walked {
+    extracted: Extracted,
+    /// Time the walk took: the members' scans get the rest of the target's
+    /// time budget. Loading the rules between the walk and the scans is not
+    /// counted.
+    spent: Duration,
 }
 
 enum Step {
@@ -177,6 +274,32 @@ fn unscanned(reason: &str) -> TargetStatus {
     }
 }
 
+/// Classification of a container member, as for a file.
+pub(crate) fn classify_member(name: &str, head: &[u8], size: u64) -> FileClass {
+    classify(name, head, size)
+}
+
+/// The largest container file whose result is cached: such a file is read
+/// into memory whole, hashed, and walked from that copy.
+const CONTAINER_HASH_MAX: u64 = 64 << 20;
+
+/// The extractor that reads `class`, when it is a container with one.
+fn container_of(class: &FileClass) -> Option<&'static dyn Extractor> {
+    match class {
+        FileClass::Container(kind) => container::extractor(*kind),
+        _ => None,
+    }
+}
+
+/// The evidence-cache key of a target: the bundle key, the extractor and
+/// its version for a container, and the path the rules see.
+fn evidence_key(bundle: &str, ext: Option<&dyn Extractor>, path_ext: &str) -> String {
+    match ext {
+        Some(x) => format!("{bundle}:{}@{}:{path_ext}", x.id(), x.version()),
+        None => format!("{bundle}:{path_ext}"),
+    }
+}
+
 /// Classification with the safetensors size check applied.
 fn classify(name: &str, head: &[u8], size: u64) -> FileClass {
     match classify::classify_sized(name, head, size) {
@@ -192,7 +315,10 @@ fn classify(name: &str, head: &[u8], size: u64) -> FileClass {
 /// The status for classes v1 does not scan.
 fn not_scanned(class: &FileClass) -> Option<TargetStatus> {
     match class {
-        FileClass::Archive(kind) => Some(unscanned(&format!("{kind} not scanned in v1"))),
+        FileClass::Container(kind) if container::extractor(*kind).is_none() => {
+            Some(unscanned(&container::not_scanned_reason(*kind)))
+        }
+        FileClass::Container(_) => None,
         FileClass::Image(kind) => Some(skipped(&format!("{kind} image not scanned in v1"))),
         FileClass::UnknownBinary => Some(skipped("binary file of unknown format")),
         FileClass::Text | FileClass::EncodedText(_) | FileClass::KnownBinary(_) => None,
@@ -416,9 +542,18 @@ impl RiskGrep {
         self.report(targets)
     }
 
-    /// Scan raw text (stdin). Never cached; text limits apply.
+    /// Scan raw text (stdin). Never cached; text limits apply. UTF-16 and
+    /// UTF-32 text is recognised from the first bytes as for a file and
+    /// transcoded, with evidence offsets in the input's bytes. Any other
+    /// input is scanned as text, including bytes a file of that kind would
+    /// skip as binary of unknown format.
     pub fn scan_bytes(&mut self, name: &str, bytes: &[u8]) -> Report {
-        let raw = match classify::slice_for_scan(bytes, &FileClass::Text, &self.cfg.limits) {
+        let head = &bytes[..bytes.len().min(self.cfg.limits.sniff)];
+        let class = match classify(name, head, bytes.len() as u64) {
+            c @ FileClass::EncodedText(_) => c,
+            _ => FileClass::Text,
+        };
+        let raw = match classify::slice_for_scan(bytes, &class, &self.cfg.limits) {
             Err(e) => Raw::status(name.to_string(), unreadable(&e)),
             Ok(content) => self.scan_now(Pending {
                 target: name.to_string(),
@@ -426,9 +561,10 @@ impl RiskGrep {
                 path_ext: "<stdin>".into(),
                 ekey: String::new(),
                 content,
-                text: true,
+                text: class.is_text(),
                 hash: None,
                 stat: None,
+                container: None,
             }),
         };
         let targets = self.finalize(vec![raw]);
@@ -461,6 +597,7 @@ impl RiskGrep {
                         text: true,
                         hash: None,
                         stat: None,
+                        container: None,
                     },
                 ),
             };
@@ -495,7 +632,7 @@ impl RiskGrep {
     fn prepare_blob(&mut self, name: &str, blob_id: &[u8], bytes: &[u8]) -> Raw {
         let size = bytes.len() as u64;
         let head = &bytes[..bytes.len().min(self.cfg.limits.sniff)];
-        let class = classify(name, head, size);
+        let class = classify::settle_npz(classify(name, head, size), bytes, size, &self.cfg.limits);
         if let Some(s) = not_scanned(&class) {
             return Raw::status(name.to_string(), s);
         }
@@ -503,23 +640,42 @@ impl RiskGrep {
         // UTF-32 code unit other than LF can hold, so only UTF-8 text has
         // lines a diff's line ranges can be matched against.
         let blob_text = class == FileClass::Text;
-        let ekey = format!("{}:{name}", self.key);
+        let ext = container_of(&class);
+        let ekey = evidence_key(&self.key, ext, name);
         let mut h = blake3::Hasher::new();
         h.update(b"riskgrep-git-blob\0");
         h.update(blob_id);
         let blob_key = *h.finalize().as_bytes();
-        if let Some(ev) = self
-            .cache
-            .as_ref()
-            .and_then(|c| c.evidence(blob_key, &ekey))
-        {
-            return Raw::scanned(
-                name.into(),
-                name.into(),
-                TargetStatus::Scanned,
-                ev,
-                blob_text,
+        if let Some(entry) = self.cache.as_ref().and_then(|c| c.entry(blob_key, &ekey)) {
+            return Raw::cached(name.into(), name.into(), entry, blob_text);
+        }
+        if let Some(ext) = ext {
+            let start = Instant::now();
+            let x = container::extract_named(
+                ext,
+                name,
+                &bytes,
+                size,
+                &self.cfg.limits,
+                start + self.cfg.limits.time_budget,
             );
+            if let s @ TargetStatus::Unscanned { .. } = x.status() {
+                return Raw::status(name.to_string(), s);
+            }
+            return self.scan_now(Pending {
+                target: name.to_string(),
+                rel: name.to_string(),
+                path_ext: name.to_string(),
+                ekey,
+                hash: (x.status() == TargetStatus::Scanned).then_some(blob_key),
+                content: Content::default(),
+                text: false,
+                stat: None,
+                container: Some(Box::new(Walked {
+                    extracted: x,
+                    spent: start.elapsed(),
+                })),
+            });
         }
         match classify::slice_for_scan(bytes, &class, &self.cfg.limits) {
             Err(e) => Raw::status(name.to_string(), unreadable(&e)),
@@ -536,6 +692,7 @@ impl RiskGrep {
                 content,
                 text: blob_text,
                 stat: None,
+                container: None,
             }),
         }
     }
@@ -648,32 +805,104 @@ impl RiskGrep {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let class = classify(&name, &head, size);
+        let class =
+            classify::settle_npz(classify(&name, &head, size), &file, size, &self.cfg.limits);
         if let Some(s) = not_scanned(&class) {
             return done(s);
         }
 
         let path_ext = relative_to(self.cwd.as_deref(), &real);
-        let ekey = format!("{}:{path_ext}", self.key);
+        let ext = container_of(&class);
+        let ekey = evidence_key(&self.key, ext, &path_ext);
         let rel = relative_to(self.rel_base.as_deref(), &real);
-        let cache = self.cache.as_ref();
+        let beside = ext.map_or_else(Vec::new, |x| x.beside(&real));
+        let cache = self.cache.as_ref().filter(|_| beside.is_empty());
         let text = class.is_text();
-        let hit = |ev: Vec<Evidence>| {
-            Ok(Step::Done(Raw::scanned(
+        let hit = |entry: Entry| {
+            Ok(Step::Done(Raw::cached(
                 target.to_string(),
                 rel.clone(),
-                TargetStatus::Scanned,
-                ev,
+                entry,
                 text,
             )))
         };
         if let Some(c) = cache {
-            if let Some(ev) = c
+            if let Some(entry) = c
                 .content_hash_for(&key, now)
-                .and_then(|h| c.evidence(h, &ekey))
+                .and_then(|h| c.entry(h, &ekey))
             {
-                return hit(ev);
+                return hit(entry);
             }
+        }
+        if let Some(ext) = ext {
+            let start = Instant::now();
+            // A container small enough to cache is read once into memory,
+            // hashed, and walked from that copy, so the cache key is the
+            // hash of exactly the bytes whose members were scanned.
+            let whole = if size <= CONTAINER_HASH_MAX {
+                Some(file.range(0, size)?)
+            } else {
+                None
+            };
+            let hash = whole.as_deref().map(|b| *blake3::hash(b).as_bytes());
+            if let (Some(c), Some(h)) = (cache, hash) {
+                if let Some(entry) = c.entry(h, &ekey) {
+                    // As for other files: the stat row only when the file
+                    // did not change while it was read.
+                    let stable = fs::metadata(&real)
+                        .map(|m| StatKey::from_metadata(&real, &m) == key)
+                        .unwrap_or(false);
+                    if stable {
+                        c.put_stat(&key, h, now);
+                    }
+                    return hit(entry);
+                }
+            }
+            let deadline = start + self.cfg.limits.time_budget;
+            let mut x = match &whole {
+                Some(b) => container::extract_named(
+                    ext,
+                    &name,
+                    &b.as_slice(),
+                    size,
+                    &self.cfg.limits,
+                    deadline,
+                ),
+                None => {
+                    container::extract_named(ext, &name, &file, size, &self.cfg.limits, deadline)
+                }
+            };
+            drop(whole);
+            for (member, what) in beside {
+                x.beside_not_read(member, what);
+            }
+            if let Some(hook) = AFTER_READ.get() {
+                hook(&real);
+            }
+            let status = x.status();
+            if let TargetStatus::Unscanned { reason } = status {
+                return done(unscanned(&reason));
+            }
+            // As for other files, the content-addressed row is cached even
+            // if the file changed; the stat row only if it did not.
+            let stable = fs::metadata(&real)
+                .map(|m| StatKey::from_metadata(&real, &m) == key)
+                .unwrap_or(false);
+            let hash = hash.filter(|_| status == TargetStatus::Scanned);
+            return Ok(Step::Scan(Box::new(Pending {
+                target: target.to_string(),
+                rel,
+                path_ext,
+                ekey,
+                content: Content::default(),
+                text: false,
+                hash,
+                stat: stable.then_some((key, now)),
+                container: Some(Box::new(Walked {
+                    extracted: x,
+                    spent: start.elapsed(),
+                })),
+            })));
         }
 
         let content = classify::read_for_scan(&file, size, &class, &self.cfg.limits)?;
@@ -697,11 +926,11 @@ impl RiskGrep {
             .is_none()
             .then(|| *blake3::hash(content.cache_bytes()).as_bytes());
         if let (Some(c), Some(h)) = (cache, hash) {
-            if let Some(ev) = c.evidence(h, &ekey) {
+            if let Some(entry) = c.entry(h, &ekey) {
                 if stable {
                     c.put_stat(&key, h, now);
                 }
-                return hit(ev);
+                return hit(entry);
             }
         }
         Ok(Step::Scan(Box::new(Pending {
@@ -713,6 +942,7 @@ impl RiskGrep {
             text,
             hash,
             stat: stable.then_some((key, now)),
+            container: None,
         })))
     }
 
@@ -722,27 +952,140 @@ impl RiskGrep {
         let Some((engine, scanner)) = engine else {
             return Raw::status(p.target, unscanned("rule load failure"));
         };
-        let mut ev = match engine.scan_content(scanner, &p.path_ext, &p.content.bytes) {
-            Ok(ev) => ev,
+        if p.container.is_some() {
+            return self.finish_container(engine, scanner, p);
+        }
+        let scan = match engine.scan_content_checked(scanner, &p.path_ext, &p.content.bytes) {
+            Ok(scan) => scan,
             Err(ScanError::Timeout) => return Raw::status(p.target, unscanned("timeout")),
             Err(ScanError::Yara(_)) => return Raw::status(p.target, unscanned("scan error")),
         };
+        let (mut ev, engine_not_read) = (scan.evidence, scan.not_read);
         if let Some(d) = &p.content.decoded {
             d.place(&mut ev);
         } else if let Some(tail) = p.content.tail {
             place_tail(&mut ev, tail);
         }
-        if let (Some(c), Some(h)) = (self.cache.as_ref(), p.hash) {
+        // Evidence from content a processor could not fully inspect is not
+        // cached: a hit means a full scan, as with partial reads.
+        if let (Some(c), Some(h), None) = (self.cache.as_ref(), p.hash, &engine_not_read) {
             c.put_evidence(h, &p.ekey, &ev);
             if let Some((k, examined)) = &p.stat {
                 c.put_stat(k, h, *examined);
             }
         }
-        let status = match p.content.partial {
+        let read_failed = p.content.read_failed || engine_not_read.is_some();
+        let status = match p.content.partial.or(engine_not_read) {
             Some(not_read) => TargetStatus::Partial { not_read },
             None => TargetStatus::Scanned,
         };
-        Raw::scanned(p.target, p.rel, status, ev, p.text)
+        let mut raw = Raw::scanned(p.target, p.rel, status, ev, p.text);
+        raw.read_failed = read_failed;
+        raw
+    }
+
+    /// Scan each member of a walked container under the time left before
+    /// its deadline, attribute the evidence to its member, and record the
+    /// result in the cache when the container was read whole.
+    fn finish_container(
+        &self,
+        engine: &Engine,
+        scanner: &mut yara_x::Scanner<'_>,
+        mut p: Pending,
+    ) -> Raw {
+        let Walked {
+            extracted: x,
+            spent,
+        } = *p.container.take().expect("container");
+        let deadline = Instant::now() + self.cfg.limits.time_budget.saturating_sub(spent);
+        let mut unread = x.unread;
+        let mut ev_all: Vec<Evidence> = Vec::new();
+        let mut scanned: Vec<u64> = Vec::new();
+        for m in x.members {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let cause = if left.is_zero() {
+                Some(Cause::Limit("limits.time_budget_ms".into()))
+            } else {
+                scanner.set_timeout(left);
+                let path = format!("{}!/{}", p.path_ext, m.path);
+                match engine.scan_content_checked(scanner, &path, &m.content.bytes) {
+                    Ok(scan) => {
+                        let mut ev = scan.evidence;
+                        if let Some(note) = scan.not_read {
+                            unread.push(Unread {
+                                seq: m.seq,
+                                last: m.seq,
+                                path: Some(m.path.clone()),
+                                cause: Cause::Scan(note),
+                                partly: true,
+                            });
+                        }
+                        if let Some(d) = &m.content.decoded {
+                            d.place(&mut ev);
+                        } else if let Some(tail) = m.content.tail {
+                            place_tail(&mut ev, tail);
+                        }
+                        for e in &mut ev {
+                            e.member = Some(m.path.clone());
+                        }
+                        ev_all.extend(ev);
+                        scanned.push(m.seq);
+                        None
+                    }
+                    Err(ScanError::Timeout) => Some(Cause::Scan("timeout".into())),
+                    Err(ScanError::Yara(_)) => Some(Cause::Scan("scan error".into())),
+                }
+            };
+            if let Some(cause) = cause {
+                unread.push(Unread {
+                    seq: m.seq,
+                    last: m.seq,
+                    path: Some(m.path),
+                    cause,
+                    partly: false,
+                });
+            }
+        }
+        scanner.set_timeout(self.cfg.limits.time_budget);
+        let any = !scanned.is_empty();
+        let status = container::status(
+            any,
+            &unread,
+            x.uncovered,
+            &x.directories,
+            x.error.as_deref(),
+        );
+        if let TargetStatus::Unscanned { reason } = status {
+            return Raw::status(p.target, TargetStatus::Unscanned { reason });
+        }
+        let (not_read, in_part) = container::unread_counts(&unread);
+        let counts = ContainerRow {
+            format: x.format.to_string(),
+            members: x.total,
+            scanned: scanned.iter().filter(|s| !in_part.contains(s)).count() as u64,
+            skipped: x.skipped,
+        };
+        if status == TargetStatus::Scanned {
+            if let (Some(c), Some(h)) = (self.cache.as_ref(), p.hash) {
+                c.put_entry(h, &p.ekey, &ev_all, Some(&counts));
+                if let Some((k, examined)) = &p.stat {
+                    c.put_stat(k, h, *examined);
+                }
+            }
+        }
+        let info = ContainerInfo {
+            counts,
+            read_in_part: in_part.len() as u64,
+            not_read,
+            opened: x.opened,
+            unread,
+        };
+        if status == TargetStatus::Scanned && info.all_skipped() {
+            return Raw::all_skipped(p.target, info);
+        }
+        let mut raw = Raw::scanned(p.target, p.rel, status, ev_all, false);
+        raw.container = Some(info);
+        raw
     }
 
     fn load_engine(&mut self) {
@@ -843,8 +1186,13 @@ impl RiskGrep {
             evidence: raw.evidence,
             suppressed: 0,
             text: raw.text,
+            container: None,
+            read_failed: raw.read_failed,
         };
+        let info = raw.container;
         if !raw.content {
+            // A skipped container keeps its counts; it has nothing to list.
+            t.container = info.map(|i| i.report(Vec::new()));
             return t;
         }
         let sm = match &self.meta {
@@ -871,11 +1219,74 @@ impl RiskGrep {
             self.baseline.as_ref(),
             |_| rel.clone(),
         );
-        t.scores = score_target(&t.evidence, &sm.meta);
-        for c in &self.categories {
-            t.scores.entry(c.clone()).or_insert(0.0);
+        let zero = |mut s: BTreeMap<Category, f64>| {
+            for c in &self.categories {
+                s.entry(c.clone()).or_insert(0.0);
+            }
+            s
+        };
+        match info {
+            Some(info) => {
+                t.scores = zero(score_container(&t.evidence, &sm.meta));
+                t.container = Some(self.container_report(&t.evidence, info, &sm.meta, zero));
+            }
+            None => t.scores = zero(score_target(&t.evidence, &sm.meta)),
         }
         t
+    }
+
+    /// The member table of a container target: members with evidence
+    /// (their own scores) in path order, then members not read whole.
+    fn container_report(
+        &self,
+        evidence: &[Evidence],
+        info: ContainerInfo,
+        meta: &HashMap<String, RuleMeta>,
+        zero: impl Fn(BTreeMap<Category, f64>) -> BTreeMap<Category, f64>,
+    ) -> ContainerReport {
+        let mut by_member: BTreeMap<&str, Vec<Evidence>> = BTreeMap::new();
+        for e in evidence {
+            if let Some(m) = &e.member {
+                by_member.entry(m).or_default().push(e.clone());
+            }
+        }
+        let unread_status = |u: &Unread| {
+            if u.partly {
+                TargetStatus::Partial {
+                    not_read: u.cause.truncated_phrase(),
+                }
+            } else {
+                TargetStatus::Unscanned {
+                    reason: u.cause.phrase(),
+                }
+            }
+        };
+        let mut listed: Vec<MemberReport> = Vec::new();
+        for (path, ev) in &by_member {
+            let status = info
+                .unread
+                .iter()
+                .find(|u| u.path.as_deref() == Some(*path))
+                .map_or(TargetStatus::Scanned, unread_status);
+            listed.push(MemberReport {
+                path: path.to_string(),
+                status,
+                scores: zero(score_target(ev, meta)),
+            });
+        }
+        for u in &info.unread {
+            let Some(path) = &u.path else { continue };
+            if listed.iter().any(|l| &l.path == path) {
+                continue;
+            }
+            listed.push(MemberReport {
+                path: path.clone(),
+                status: unread_status(u),
+                scores: zero(BTreeMap::new()),
+            });
+        }
+        listed.truncate(container::LISTED_MAX);
+        info.report(listed)
     }
 }
 
@@ -923,4 +1334,38 @@ fn walk(dir: &Path, jobs: &mut Vec<Job>, budget: &mut usize) -> bool {
         });
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Versioned(u32);
+
+    impl Extractor for Versioned {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+
+        fn version(&self) -> u32 {
+            self.0
+        }
+
+        fn extract(
+            &self,
+            _: &dyn Source,
+            _: u64,
+            _: &mut dyn container::Walk,
+        ) -> Result<(), container::ContainerError> {
+            Ok(())
+        }
+    }
+
+    /// Evidence cached from an older extractor's output must not be used.
+    #[test]
+    fn evidence_key_changes_with_the_extractor_version() {
+        let key = |v| evidence_key("bundle", Some(&Versioned(v)), "a.zip");
+        assert_ne!(key(1), key(2));
+        assert_ne!(key(1), evidence_key("bundle", None, "a.zip"));
+    }
 }
