@@ -4,6 +4,8 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [1.2.0] – 2026-11-02
+
 ### Upgrading
 
 These defaults can change what a gate does after upgrading from 1.1.0. Each has a setting that keeps the earlier result, except where noted.
@@ -125,6 +127,8 @@ p95 latency targets, checked by `cargo xtask bench` on the release build with a 
 | `riskgrep scan -`, 1 MB | 50 ms | 17.05 ms |
 | `riskgrep git pre-commit`, 20 staged text files, uncached | 100 ms | 90.15 ms |
 
-[Unreleased]: https://github.com/jkotzker/riskgrep/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/jkotzker/riskgrep/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/jkotzker/riskgrep/releases/tag/v1.2.0
+[1.1.0]: https://github.com/jkotzker/riskgrep/releases/tag/v1.1.0
 [1.0.1]: https://github.com/jkotzker/riskgrep/releases/tag/v1.0.1
 [1.0.0]: https://github.com/jkotzker/riskgrep/releases/tag/v1.0.0
