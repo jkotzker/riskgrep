@@ -406,7 +406,8 @@ impl Extracted {
 
 /// Why a container is `skipped`: all of its members were, and nothing in it
 /// went unread for any other reason.
-pub const ALL_SKIPPED: &str = "every member is an image or a binary of unknown format";
+pub const ALL_SKIPPED: &str =
+    "every member is an image, a binary of unknown format, or an archive of them";
 
 /// A container's status: `unscanned` when no member in scope was read, whole
 /// (`read_any`) or in part (listed in `unread` as such), but something was not,

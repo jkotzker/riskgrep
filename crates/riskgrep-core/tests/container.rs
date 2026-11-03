@@ -2024,7 +2024,8 @@ fn an_integer_npy_member_is_not_mistaken_for_one_without_the_magic() {
     );
 }
 
-const ALL_SKIPPED: &str = "every member is an image or a binary of unknown format";
+const ALL_SKIPPED: &str =
+    "every member is an image, a binary of unknown format, or an archive of them";
 
 #[test]
 fn a_container_of_only_skipped_members_is_skipped_and_keeps_its_counts() {
