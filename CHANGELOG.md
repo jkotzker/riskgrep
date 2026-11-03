@@ -10,7 +10,7 @@ These defaults can change what a gate does after upgrading from 1.1.0. Each has 
 
 - A file over `limits.text_max` (8 MiB) is read in part, and that now follows `on_partial`. The git hook blocks when such a file is added, and when a tracked one is edited, even if the added lines are clean, because the unread middle may hold them. The Claude Code hook asks, and `riskgrep scan --fail-at` exits 2. Set `on_partial = "allow"` under `[git]` or `[claude_code]`, or pass `--on-partial allow`.
 - Files compressed with bzip2, xz, zstd, lzip, lz4, lzop, or snappy follow `on_error` rather than `on_skipped`, so by default the git hook blocks them and the Claude Code hook asks. Set `on_error`, or ignore the paths.
-- zip, tar, gzip, and SQLite files are read instead of following `on_error`. A file that used to block or ask for being unread now passes when its contents are clean, and is flagged by what it holds. An archive with nothing but images or unknown binaries is `skipped`, so `on_skipped` applies: allow by default. There is no setting for the earlier result.
+- zip, tar, gzip, and SQLite files are read instead of following `on_error`. A file that used to block or ask for being unread now passes when its contents are clean, and is flagged by what it holds. An archive with nothing but images or unknown binaries is `skipped`, like a lone file of that kind: the hooks apply `on_skipped`, allow by default, and `riskgrep scan` exits 0, since it has no such setting. There is no setting for the earlier result.
 - File names such as `.env`, `.netrc`, and private-key names score 80 (`secrets-core/paths.yar`), which meets the default `ask` threshold and the git hook's `secret` threshold. Add deliberate files to `[ignore]`.
 
 ### Added
