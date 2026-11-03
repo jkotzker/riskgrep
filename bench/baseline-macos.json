@@ -1,6 +1,8 @@
 {
   "claude_read_cached": 4.2,
+  "claude_read_tar_gz_uncached": 18.45,
   "claude_read_uncached": 11.58,
+  "claude_read_zip_uncached": 19.49,
   "git_pre_commit_20_files": 89.36,
   "scan_stdin_1mb": 16.04,
   "scan_stdin_4kb": 9.06
