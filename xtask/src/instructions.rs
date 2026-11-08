@@ -28,7 +28,8 @@ use std::process::{Command, Stdio};
 const USAGE: &str = "usage: cargo xtask instructions [--counter auto|perf|callgrind|time] [--runs N] [--no-build] [--json FILE] [--write-baseline] [--check]";
 const DEFAULT_RUNS: u32 = 5;
 /// A case whose smallest count is more than this fraction above its baseline
-/// is a regression. Callgrind counts of one commit on 10 hosted Ubuntu runner
+/// is a regression, and one more than this fraction below it fails until the
+/// baseline is rewritten (see [`judge`]). Callgrind counts of one commit on 10 hosted Ubuntu runner
 /// virtual machines (four CPU models) differed by at most 0.18% per case.
 pub const THRESHOLD: f64 = 0.01;
 

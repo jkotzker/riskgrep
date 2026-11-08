@@ -110,8 +110,8 @@ jobs:
       - name: Build release binaries
         run: cargo build --release -p riskgrep -p riskgrep-claude
 
-      # Fails when a case's smallest count of 3 runs is more than 1% over the
-      # baseline. The artifact's `baseline` object is the file to commit when
+      # Fails when a case's smallest count of 3 runs is more than 1% over or
+      # under the baseline. The artifact's `baseline` object is the file to commit when
       # an increase is deliberate.
       - name: Instruction counts
         run: cargo xtask instructions --no-build --counter callgrind --runs 3 --check --json "$RUNNER_TEMP/instruction-counts.json"
