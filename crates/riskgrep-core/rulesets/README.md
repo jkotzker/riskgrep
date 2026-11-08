@@ -31,7 +31,7 @@ Post-processors and their arguments:
 |---|---|
 | `span` | `span_regex` (required), `secret_group` (a capture group index, default 0 for the whole match, or `"first_nonempty"`: the first group that took part in the match and is non-empty, else the whole match, as gitleaks does without `secretGroup`): narrows the match to that part |
 | `entropy` | `min_entropy` (required): drops matches below the Shannon entropy |
-| `stopwords` | `stopwords` (required): list name; drops matches containing a listed word (anywhere inside, ASCII case-insensitive). `stopwords_skip_hex` (optional, default false): keep a match made only of hex digits without checking the list |
+| `stopwords` | `stopwords` (required): list name; drops matches containing a listed word (anywhere inside, ASCII case-insensitive). `stopwords_hex_min_len` (optional uint, needs `stopwords`): for a match made only of hex digits, only listed words of at least that many characters count |
 | `allow_regex` | `allow_regex` (required): drops matches the regex accepts |
 | `float_run` | `min_floats` (required): finds maximal runs of at least that many printed floats (separators: commas, whitespace, brackets) in one linear pass. It supplies the evidence ranges itself, so the rule's patterns (any name) are only a cheap trigger |
 | `code_lines` | `min_codes` (required): finds lines shaped like two-factor recovery codes (two groups of five lowercase hex characters joined by `-`, two groups of four digits joined by a space, or ten letters and digits with at least one digit; each after optional indentation and a list number or bullet) and keeps the lines of the most common shape when at least `min_codes` have it. It supplies its own evidence ranges, like `float_run` |

@@ -38,9 +38,10 @@ pub enum PostSpec {
     },
     Stopwords {
         list: String,
-        /// Keep a match made only of hex digits without checking the list.
+        /// For a match made only of hex digits, only listed words of at least
+        /// this length count.
         #[serde(default)]
-        skip_hex: bool,
+        hex_min_len: Option<u64>,
     },
     AllowRegex {
         regex: String,
@@ -230,6 +231,12 @@ impl RuleMeta {
             }
         }
 
+        if raw.uint("stopwords_hex_min_len")?.is_some()
+            && !post.iter().any(|p| matches!(p, PostSpec::Stopwords { .. }))
+        {
+            return Err(raw.err("`stopwords_hex_min_len` requires post `stopwords`"));
+        }
+
         Ok(RuleMeta {
             category: Category(category),
             weight,
@@ -252,7 +259,7 @@ impl RuleMeta {
             },
             "stopwords" => PostSpec::Stopwords {
                 list: raw.need(raw.string("stopwords")?, "stopwords", name)?,
-                skip_hex: raw.boolean("stopwords_skip_hex")?.unwrap_or(false),
+                hex_min_len: raw.uint("stopwords_hex_min_len")?,
             },
             "allow_regex" => PostSpec::AllowRegex {
                 regex: raw.need(raw.string("allow_regex")?, "allow_regex", name)?,

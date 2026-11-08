@@ -40,7 +40,7 @@ name_regex = "weight$""#,
             PostSpec::Entropy { min: 3.5 },
             PostSpec::Stopwords {
                 list: "common".into(),
-                skip_hex: false
+                hex_min_len: None
             },
             PostSpec::AllowRegex { regex: "^x".into() },
             PostSpec::NpyHeader {
@@ -225,19 +225,22 @@ fn meta_rejects_non_utf8_string() {
 }
 
 #[test]
-fn stopwords_skip_hex_is_an_optional_boolean() {
-    let with = |extra: &str| {
+fn stopwords_hex_min_len_is_an_optional_number_that_needs_stopwords() {
+    let with = |post: &str, extra: &str| {
         parse(&format!(
-            "category = \"secrets\"\nweight = 1\npost = \"stopwords\"\nstopwords = \"common\"\n{extra}"
+            "category = \"secrets\"\nweight = 1\npost = \"{post}\"\nstopwords = \"common\"\nmin_entropy = 3.0\n{extra}"
         ))
     };
-    let skip = |m: RuleMeta| match &m.post[..] {
-        [PostSpec::Stopwords { skip_hex, .. }] => *skip_hex,
+    let min_len = |m: RuleMeta| match &m.post[..] {
+        [PostSpec::Stopwords { hex_min_len, .. }] => *hex_min_len,
         other => panic!("unexpected post {other:?}"),
     };
-    assert!(skip(with("stopwords_skip_hex = true").unwrap()));
-    assert!(!skip(with("stopwords_skip_hex = false").unwrap()));
-    assert!(!skip(with("").unwrap()));
-    let e = with("stopwords_skip_hex = \"yes\"").unwrap_err();
-    assert!(e.to_string().contains("stopwords_skip_hex"), "{e}");
+    assert_eq!(
+        min_len(with("stopwords", "stopwords_hex_min_len = 8").unwrap()),
+        Some(8)
+    );
+    assert_eq!(min_len(with("stopwords", "").unwrap()), None);
+    assert!(with("stopwords", "stopwords_hex_min_len = \"yes\"").is_err());
+    let e = with("entropy", "stopwords_hex_min_len = 8").unwrap_err();
+    assert!(e.to_string().contains("stopwords_hex_min_len"), "{e}");
 }

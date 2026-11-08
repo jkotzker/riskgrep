@@ -1681,8 +1681,8 @@ fn shipped_rule_sources_do_not_trip_the_rules() {
 // ---- hex credential values and word stopwords (#116) --------------------------
 
 /// A random hex value of `len` digits from the seeded generator: entropy at
-/// least 3.4 and none of the words the stopword list holds that are made of
-/// hex digits, so that a test adds exactly the word it is about.
+/// least 3.4 and none of the listed words that are short and made of hex
+/// digits (`dead`, `feed`), so that a test adds exactly the word it is about.
 fn hex_value(len: usize, seed: u64) -> String {
     for attempt in 0..1000 {
         let mut rng = synth::Rng::new(seed * 1000 + attempt);
@@ -1757,6 +1757,24 @@ fn hex_value_holding_a_stopword_is_found() {
                 assert_eq!(score, Some(80.0), "{len} digits, {name}, {path}");
                 assert!(found, "{len} digits, {name}, {path}: rule");
             }
+        }
+    }
+}
+
+#[test]
+fn hex_value_listed_as_a_placeholder_stays_dropped() {
+    // The list holds a 32-digit hex example value; only words shorter than 8
+    // characters are ignored for a hex value, so this one is still dropped.
+    let list = &secrets_ruleset().stopwords["secrets_core_generic_api_key"];
+    let placeholders: Vec<&String> = list
+        .iter()
+        .filter(|w| w.len() >= 16 && w.bytes().all(|b| b.is_ascii_hexdigit()))
+        .collect();
+    assert!(!placeholders.is_empty(), "the list holds a long hex word");
+    for w in placeholders {
+        assert!(entropy_of(w.as_bytes()) >= 3.0, "test value");
+        for (path, score, _) in hex_scores(w) {
+            assert_eq!(score, None, "{path}");
         }
     }
 }

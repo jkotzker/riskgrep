@@ -103,30 +103,42 @@ fn stopwords_drop() {
 }
 
 #[test]
-fn stopwords_skip_hex_keeps_a_value_of_hex_digits_only() {
-    let words = ["dead".to_string(), "vpn".to_string()];
+fn stopwords_hex_min_len_ignores_short_words_in_a_hex_value() {
+    let words = [
+        "dead".to_string(),
+        "decafbad".to_string(),
+        "vpn".to_string(),
+    ];
     let plain = Stopwords::new(&words);
-    let skip = Stopwords::new(&words).skip_hex(true);
-    for hex in [&b"3fa9dead51c07b2e"[..], b"3FA9DEAD51C07B2E"] {
-        assert_eq!(plain.apply(hex, 0..hex.len()), PostResult::Drop);
-        assert_eq!(
-            skip.apply(hex, 0..hex.len()),
-            PostResult::Keep(0..hex.len())
-        );
+    let hex = Stopwords::new(&words).hex_min_len(Some(8));
+    let short = b"3fa9dead51c07b2e";
+    assert_eq!(plain.apply(short, 0..short.len()), PostResult::Drop);
+    assert_eq!(
+        hex.apply(short, 0..short.len()),
+        PostResult::Keep(0..short.len())
+    );
+    let upper = b"3FA9DEAD51C07B2E";
+    assert_eq!(
+        hex.apply(upper, 0..upper.len()),
+        PostResult::Keep(0..upper.len())
+    );
+    // A listed word of the minimum length still drops a hex value.
+    for long in [&b"3fa9decafbad51c0"[..], b"3FA9DECAFBAD51C0"] {
+        assert_eq!(hex.apply(long, 0..long.len()), PostResult::Drop);
     }
-    // One character that is not a hex digit puts the value back under the list.
+    // One character that is not a hex digit puts the value back under the whole list.
     let word = b"3fa9dead51c07b2g";
-    assert_eq!(skip.apply(word, 0..word.len()), PostResult::Drop);
+    assert_eq!(hex.apply(word, 0..word.len()), PostResult::Drop);
     let vpn = b"3fa951c07b2evpn";
-    assert_eq!(skip.apply(vpn, 0..vpn.len()), PostResult::Drop);
+    assert_eq!(hex.apply(vpn, 0..vpn.len()), PostResult::Drop);
     // Only the matched range counts, and an empty range is not a hex value.
     let content = b"dead-3fa951c07b2e";
-    assert_eq!(skip.apply(content, 0..content.len()), PostResult::Drop);
+    assert_eq!(hex.apply(content, 0..content.len()), PostResult::Drop);
     assert_eq!(
-        skip.apply(content, 5..content.len()),
+        hex.apply(content, 5..content.len()),
         PostResult::Keep(5..content.len())
     );
-    assert_eq!(skip.apply(content, 0..0), PostResult::Keep(0..0));
+    assert_eq!(hex.apply(content, 0..0), PostResult::Keep(0..0));
 }
 
 #[test]
