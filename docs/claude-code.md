@@ -71,6 +71,9 @@ on_unresolved = "allow"     # MCP tools with no entry (default)
 
 [mcp.servers.desktop-commander.tools."*"]
 decision = "ask"            # its shell and process tools, which read files no field names
+
+[mcp.servers.plugin_desktop-commander_desktop-commander.tools."*"]
+decision = "ask"            # the same server installed as a Claude Code plugin
 ```
 
 `[claude_code.mcp]` takes the same keys as `[mcp]` and applies to Claude Code only: its `on_unresolved` wins over `mcp.on_unresolved`, and its entry for a server and tool replaces the `[mcp]` entry with the same keys. A `claude_code.mcp_tools` entry, which may also carry `decision`, wins over both. The `kind = "none"` and `decision = "allow"` forms both keep a server's tools quiet when `on_unresolved` asks.

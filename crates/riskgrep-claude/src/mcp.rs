@@ -99,6 +99,19 @@ mod tests {
     }
 
     #[test]
+    fn alias_key_without_tool_part_is_a_server_pattern() {
+        assert_eq!(alias_key("mcp__*"), Some(("*", "*")));
+        assert_eq!(alias_key("mcp__notes_*"), Some(("notes_*", "*")));
+        // A `*` no longer spans the server and tool: this key covers every
+        // tool of servers ending in `read_file`, not a tool of that name.
+        assert_eq!(alias_key("mcp__*read_file"), Some(("*read_file", "*")));
+        assert_eq!(alias_key("mcp__*__read_file"), Some(("*", "read_file")));
+        // Without `*` the key names a tool-less name exactly.
+        assert_eq!(alias_key("mcp__notes"), Some(("notes", "")));
+        assert_eq!(alias_key("Read"), None);
+    }
+
+    #[test]
     fn on_unresolved_prefers_agent_then_shared_then_shell_setting() {
         use riskgrep_core::config::Action;
         let mut cfg = Config::default();
