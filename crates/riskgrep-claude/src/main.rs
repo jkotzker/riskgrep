@@ -225,12 +225,7 @@ fn work(
         name if name.starts_with(mcp::PREFIX) => match mcp_job(hook, &cfg, cwd) {
             Ok(Some(job)) => job,
             Ok(None) => return Decision::NoOpinion,
-            Err(()) => {
-                return error_decision(
-                    cc.on_unresolved,
-                    &format!("RiskGrep: could not determine the files {name} reads"),
-                )
-            }
+            Err(d) => return d,
         },
         _ => match resolve::read_target(hook, cwd) {
             Some(p) => Job::Files(vec![p]),
@@ -265,24 +260,47 @@ fn work(
     }
 }
 
-/// The job for an MCP call: `Ok(None)` when it reads nothing, `Err` when
-/// its files cannot be determined ([`McpPlan::Unresolved`]).
-fn mcp_job(hook: &HookInput, cfg: &Config, cwd: &Path) -> Result<Option<Job>, ()> {
-    let (server, tool) = mcp::split(&hook.tool_name).ok_or(())?;
+/// The job for an MCP call: `Ok(None)` when it reads nothing, `Err` with
+/// the decision when its files cannot be determined or its entry sets one.
+fn mcp_job(hook: &HookInput, cfg: &Config, cwd: &Path) -> Result<Option<Job>, Decision> {
+    let name = &hook.tool_name;
+    let unresolved = |a| {
+        error_decision(
+            a,
+            &format!("RiskGrep: could not determine the files {name} reads"),
+        )
+    };
+    let table = mcp::table(cfg);
+    let Some((server, tool)) = mcp::split(name) else {
+        return Err(unresolved(table.on_unresolved.unwrap_or(Action::Allow)));
+    };
     let home = std::env::var("HOME").ok();
-    let plan = mcp::table(cfg).plan(server, tool, &hook.tool_input, cwd, home.as_deref());
-    Ok(Some(match plan {
-        McpPlan::Nothing => return Ok(None),
-        McpPlan::Read(files) => Job::Files(files),
-        McpPlan::Walk(roots) => Job::Walk(roots),
-        McpPlan::Names { roots, max_depth } => Job::Names {
-            roots,
-            glob: None,
-            max_depth,
+    Ok(Some(
+        match table.plan(server, tool, &hook.tool_input, cwd, home.as_deref()) {
+            McpPlan::Nothing => return Ok(None),
+            McpPlan::Read(files) => Job::Files(files),
+            McpPlan::Walk(roots) => Job::Walk(roots),
+            McpPlan::Names { roots, max_depth } => Job::Names {
+                roots,
+                glob: None,
+                max_depth,
+            },
+            McpPlan::Unresolved(a) => return Err(unresolved(a)),
+            McpPlan::Decision(a) => {
+                let what = if a == Action::Ask {
+                    format!("asks before {name}")
+                } else {
+                    format!("denies {name}")
+                };
+                return Err(error_decision(
+                    a,
+                    &format!("RiskGrep: the MCP configuration {what}"),
+                ));
+            }
+            // A plan this build does not know cannot be resolved to paths.
+            _ => return Err(unresolved(table.on_unresolved.unwrap_or(Action::Allow))),
         },
-        // A plan this build does not know cannot be resolved to paths.
-        _ => return Err(()),
-    }))
+    ))
 }
 
 /// Scores each name with the path rules alone (`RiskGrep::scan_names`). Names are

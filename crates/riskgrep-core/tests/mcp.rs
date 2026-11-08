@@ -1,5 +1,6 @@
 //! The shared MCP gating code, driven directly with no agent adapter.
 
+use riskgrep_core::config::Action;
 use riskgrep_core::mcp::{self, McpKind, McpPlan, McpTable, McpTool};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,16 @@ fn tool(kind: McpKind, fields: &[&str]) -> McpTool {
         paths: fields.iter().map(|f| f.to_string()).collect(),
         kind,
         max_depth: None,
+        decision: None,
+    }
+}
+
+fn decided(action: Action) -> McpTool {
+    McpTool {
+        paths: Vec::new(),
+        kind: McpKind::Read,
+        max_depth: None,
+        decision: Some(action),
     }
 }
 
@@ -158,8 +169,14 @@ fn plan_follows_the_entry_kind() {
     );
     assert_eq!(plan("read", json!({"path": "d"})), McpPlan::Nothing);
     assert_eq!(plan("read", json!({"paths": []})), McpPlan::Nothing);
-    assert_eq!(plan("read", json!({"other": "a.txt"})), McpPlan::Unresolved);
-    assert_eq!(plan("read", json!({"path": 3})), McpPlan::Unresolved);
+    assert_eq!(
+        plan("read", json!({"other": "a.txt"})),
+        McpPlan::Unresolved(Action::Allow)
+    );
+    assert_eq!(
+        plan("read", json!({"path": 3})),
+        McpPlan::Unresolved(Action::Allow)
+    );
     // `walk` and `names` keep every path, existing or not.
     assert_eq!(
         plan("walk", json!({"path": "d"})),
@@ -174,9 +191,101 @@ fn plan_follows_the_entry_kind() {
     );
     // `none` reads nothing whatever its input; no entry is unresolved.
     assert_eq!(plan("write", json!({"path": 3})), McpPlan::Nothing);
-    assert_eq!(plan("other", json!({"path": "a.txt"})), McpPlan::Unresolved);
+    assert_eq!(
+        plan("other", json!({"path": "a.txt"})),
+        McpPlan::Unresolved(Action::Allow)
+    );
     assert_eq!(
         t.plan("other", "read", &json!({"path": "a.txt"}), cwd, None),
-        McpPlan::Unresolved
+        McpPlan::Unresolved(Action::Allow)
     );
+}
+
+#[test]
+fn unresolved_follows_on_unresolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path();
+    let mut t = table(&[("s", "read", tool(McpKind::Read, &["path"]))]);
+    for (setting, want) in [
+        (None, Action::Allow),
+        (Some(Action::Allow), Action::Allow),
+        (Some(Action::Ask), Action::Ask),
+        (Some(Action::Deny), Action::Deny),
+    ] {
+        t.on_unresolved = setting;
+        // No entry, and an entry whose field holds no path.
+        for (server, name, input) in [
+            ("s", "other", json!({"path": "a"})),
+            ("x", "read", json!({"path": "a"})),
+            ("s", "read", json!({"path": 3})),
+            ("s", "read", json!({})),
+        ] {
+            assert_eq!(
+                t.plan(server, name, &input, cwd, None),
+                McpPlan::Unresolved(want),
+                "{setting:?} {server} {name} {input}"
+            );
+        }
+        // A resolved call is not affected.
+        assert_eq!(
+            t.plan("s", "read", &json!({"path": "missing"}), cwd, None),
+            McpPlan::Nothing
+        );
+    }
+}
+
+#[test]
+fn entry_decision_applies_to_its_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path();
+    std::fs::write(cwd.join("a.txt"), b"x").unwrap();
+    let mut t = table(&[
+        ("s", "read", tool(McpKind::Read, &["path"])),
+        ("s", "*", decided(Action::Ask)),
+        ("s", "shell", decided(Action::Deny)),
+        ("q", "*", tool(McpKind::None, &[])),
+        ("open", "*", decided(Action::Allow)),
+    ]);
+    t.on_unresolved = Some(Action::Ask);
+    let plan = |s, n, v| t.plan(s, n, &v, cwd, None);
+    let a = json!({"path": "a.txt"});
+    // A server's `*` entry with a decision covers its tools without an
+    // entry of their own, whatever their input; its mapped tools are
+    // planned as before.
+    assert_eq!(plan("s", "list", a.clone()), McpPlan::Decision(Action::Ask));
+    assert_eq!(plan("s", "list", json!(7)), McpPlan::Decision(Action::Ask));
+    assert_eq!(
+        plan("s", "read", a.clone()),
+        McpPlan::Read(vec![cwd.join("a.txt")])
+    );
+    // A mapped tool whose fields cannot be read follows `on_unresolved`.
+    assert_eq!(
+        plan("s", "read", json!({"path": 1})),
+        McpPlan::Unresolved(Action::Ask)
+    );
+    // A tool's own entry wins over the server's.
+    assert_eq!(
+        plan("s", "shell", a.clone()),
+        McpPlan::Decision(Action::Deny)
+    );
+    // `kind = "none"` and `decision = "allow"` both quiet a server that
+    // `on_unresolved` would ask about.
+    assert_eq!(plan("q", "any", a.clone()), McpPlan::Nothing);
+    assert_eq!(
+        plan("open", "any", a.clone()),
+        McpPlan::Decision(Action::Allow)
+    );
+    assert_eq!(plan("other", "any", a), McpPlan::Unresolved(Action::Ask));
+}
+
+#[test]
+fn merge_keeps_on_unresolved_unless_set() {
+    let mut base = McpTable::builtin();
+    base.on_unresolved = Some(Action::Ask);
+    let mut over = table(&[("s", "*", decided(Action::Deny))]);
+    assert_eq!(base.overlay(&over).on_unresolved, Some(Action::Ask));
+    over.on_unresolved = Some(Action::Allow);
+    let t = base.overlay(&over);
+    assert_eq!(t.on_unresolved, Some(Action::Allow));
+    assert_eq!(t.entry("s", "x").unwrap().decision, Some(Action::Deny));
 }

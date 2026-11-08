@@ -4,6 +4,7 @@
 //! tool names onto a server and a tool and turns the [`McpPlan`] into its
 //! own decision format; nothing here depends on one agent's naming.
 
+use crate::config::Action;
 use crate::paths::{absolute, expand_tilde, readable_file};
 use serde::Deserialize;
 use serde_json::Value;
@@ -28,23 +29,53 @@ pub enum McpKind {
 }
 
 /// A tool entry: the input fields that hold a path or a list of paths,
-/// and what the tool does with them.
+/// and what the tool does with them; or a decision every call to the tool
+/// gets, whatever its input.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ToolLayer")]
 pub struct McpTool {
-    #[serde(default)]
     pub paths: Vec<String>,
-    #[serde(default)]
     pub kind: McpKind,
     /// For `names`: how deep under a directory names are revealed (1: its
     /// entries only). Unbounded when absent.
     pub max_depth: Option<usize>,
+    /// The decision for every call, in place of reading its paths; set
+    /// only without `paths`, `kind`, and `max_depth`.
+    pub decision: Option<Action>,
+}
+
+/// An entry as written in a file.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolLayer {
+    paths: Option<Vec<String>>,
+    kind: Option<McpKind>,
+    max_depth: Option<usize>,
+    decision: Option<Action>,
+}
+
+impl TryFrom<ToolLayer> for McpTool {
+    type Error = &'static str;
+
+    fn try_from(l: ToolLayer) -> Result<Self, Self::Error> {
+        if l.decision.is_some() && (l.paths.is_some() || l.kind.is_some() || l.max_depth.is_some())
+        {
+            return Err("an entry with `decision` takes no `paths`, `kind`, or `max_depth`");
+        }
+        Ok(McpTool {
+            paths: l.paths.unwrap_or_default(),
+            kind: l.kind.unwrap_or_default(),
+            max_depth: l.max_depth,
+            decision: l.decision,
+        })
+    }
 }
 
 impl McpTool {
     /// Why the entry is unusable, if it is: a reading kind without fields.
     pub fn problem(&self) -> Option<&'static str> {
-        (self.kind != McpKind::None
+        (self.decision.is_none()
+            && self.kind != McpKind::None
             && (self.paths.is_empty() || self.paths.iter().any(String::is_empty)))
         .then_some("needs `paths`, the input fields that hold paths")
     }
@@ -64,6 +95,9 @@ pub struct McpServer {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpTable {
+    /// The action for a call whose files cannot be determined
+    /// ([`McpPlan::Unresolved`]); `allow` when unset.
+    pub on_unresolved: Option<Action>,
     #[serde(default)]
     pub servers: BTreeMap<String, McpServer>,
 }
@@ -78,8 +112,11 @@ impl McpTable {
     }
 
     /// Adds every tool entry of `over`, replacing an entry of the same
-    /// server and tool key.
+    /// server and tool key, and takes its `on_unresolved` when set.
     pub fn merge(&mut self, over: McpTable) {
+        if over.on_unresolved.is_some() {
+            self.on_unresolved = over.on_unresolved;
+        }
         for (server, s) in over.servers {
             self.servers
                 .entry(server)
@@ -162,6 +199,7 @@ impl McpTable {
             },
             kind,
             max_depth,
+            decision: None,
         };
         let filesystem = [
             ("read_file", t(Read, "path", None)),
@@ -220,14 +258,18 @@ impl McpTable {
         cwd: &Path,
         home: Option<&str>,
     ) -> McpPlan {
+        let unresolved = McpPlan::Unresolved(self.on_unresolved.unwrap_or(Action::Allow));
         let Some(entry) = self.entry(server, tool) else {
-            return McpPlan::Unresolved;
+            return unresolved;
         };
+        if let Some(action) = entry.decision {
+            return McpPlan::Decision(action);
+        }
         if entry.kind == McpKind::None {
             return McpPlan::Nothing;
         }
         let Some(paths) = paths(input, &entry.paths, cwd, home) else {
-            return McpPlan::Unresolved;
+            return unresolved;
         };
         if paths.is_empty() {
             return McpPlan::Nothing;
@@ -259,8 +301,10 @@ pub enum McpPlan {
     Nothing,
     /// The files cannot be determined: the tool has no entry, or none of
     /// its fields is present, or one holds anything but a string or a list
-    /// of strings.
-    Unresolved,
+    /// of strings. Carries `on_unresolved`.
+    Unresolved(Action),
+    /// The entry sets this decision for every call (`decision`).
+    Decision(Action),
     /// Reads these files (kind `read`; each exists and is not a directory).
     Read(Vec<PathBuf>),
     /// Reads the files under these paths (kind `walk`).

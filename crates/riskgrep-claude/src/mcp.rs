@@ -30,16 +30,22 @@ fn alias_key(key: &str) -> Option<(&str, &str)> {
     Some((server, tool))
 }
 
-/// The MCP entries Claude Code calls are judged by: the shared `[mcp]`
-/// entries with every `claude_code.mcp_tools` entry laid over them, so for
-/// the same server and tool key the `claude_code.mcp_tools` entry wins.
+/// The MCP settings Claude Code calls are judged by: the shared `[mcp]`
+/// table, with `[claude_code.mcp]` and then every `claude_code.mcp_tools`
+/// entry laid over it, so for the same server and tool key the
+/// `claude_code.mcp_tools` entry wins, then `[claude_code.mcp]`.
+/// `on_unresolved` is `claude_code.mcp.on_unresolved`, else
+/// `mcp.on_unresolved`, else `claude_code.on_unresolved`, which covered MCP
+/// tools before the MCP settings existed.
 pub fn table(cfg: &Config) -> McpTable {
-    let mut out = cfg.mcp.clone();
+    let mut out = cfg.mcp.overlay(&cfg.claude_code.mcp);
     for (key, entry) in &cfg.claude_code.mcp_tools {
         if let Some((server, tool)) = alias_key(key) {
             out.insert(server, tool, entry.clone());
         }
     }
+    out.on_unresolved
+        .get_or_insert(cfg.claude_code.on_unresolved);
     out
 }
 
@@ -62,6 +68,7 @@ mod tests {
             paths: vec!["p".into()],
             kind,
             max_depth: None,
+            decision: None,
         }
     }
 
@@ -89,5 +96,44 @@ mod tests {
         assert_eq!(kind("filesystem", "read_file"), Some(McpKind::Walk));
         // Built-in entries the alias did not name stay.
         assert_eq!(kind("filesystem", "read_text_file"), Some(McpKind::Read));
+    }
+
+    #[test]
+    fn on_unresolved_prefers_agent_then_shared_then_shell_setting() {
+        use riskgrep_core::config::Action;
+        let mut cfg = Config::default();
+        assert_eq!(table(&cfg).on_unresolved, Some(Action::Allow));
+        // `claude_code.on_unresolved` still covers MCP tools when no MCP
+        // setting is made, as it did before `mcp.on_unresolved` existed.
+        cfg.claude_code.on_unresolved = Action::Ask;
+        assert_eq!(table(&cfg).on_unresolved, Some(Action::Ask));
+        cfg.mcp.on_unresolved = Some(Action::Allow);
+        assert_eq!(table(&cfg).on_unresolved, Some(Action::Allow));
+        cfg.claude_code.mcp.on_unresolved = Some(Action::Deny);
+        assert_eq!(table(&cfg).on_unresolved, Some(Action::Deny));
+    }
+
+    #[test]
+    fn agent_section_entries_lay_over_shared_entries() {
+        use riskgrep_core::config::Action;
+        let mut cfg = Config::default();
+        let decided = |a| McpTool {
+            paths: Vec::new(),
+            kind: McpKind::Read,
+            max_depth: None,
+            decision: Some(a),
+        };
+        cfg.mcp.insert("s", "*", decided(Action::Ask));
+        cfg.mcp.insert("s", "x", decided(Action::Ask));
+        cfg.claude_code.mcp.insert("s", "*", decided(Action::Deny));
+        cfg.claude_code
+            .mcp_tools
+            .insert("mcp__s__x".into(), decided(Action::Allow));
+        cfg.claude_code.mcp.insert("s", "x", decided(Action::Deny));
+        let t = table(&cfg);
+        let d = |n| t.entry("s", n).and_then(|e| e.decision);
+        assert_eq!(d("y"), Some(Action::Deny));
+        // `claude_code.mcp_tools` wins over `[claude_code.mcp]`.
+        assert_eq!(d("x"), Some(Action::Allow));
     }
 }

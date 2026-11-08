@@ -86,6 +86,9 @@ pub struct ClaudeCodeConfig {
     pub on_skipped: Action,
     /// A target with content that was not read (see [`OnPartial`]).
     pub on_partial: OnPartial,
+    /// Shell commands whose files cannot be determined; MCP tools too
+    /// while neither `mcp.on_unresolved` nor `claude_code.mcp.on_unresolved`
+    /// is set.
     pub on_unresolved: Action,
     pub time_budget_ms: u64,
     /// `[claude_code.mcp_tools."mcp__<server>__<tool>"]` entries: MCP
@@ -94,6 +97,9 @@ pub struct ClaudeCodeConfig {
     /// over [`Config::mcp`]. Empty by default; the built-in entries are in
     /// [`McpTable::builtin`].
     pub mcp_tools: BTreeMap<String, McpTool>,
+    /// `[claude_code.mcp]`: MCP settings for Claude Code only, laid over
+    /// [`Config::mcp`] by the Claude Code adapter (same shape as `[mcp]`).
+    pub mcp: McpTable,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,6 +209,7 @@ impl Default for Config {
                 on_unresolved: Action::Allow,
                 time_budget_ms: 2000,
                 mcp_tools: BTreeMap::new(),
+                mcp: McpTable::default(),
             },
             git: GitConfig {
                 block_at: BTreeMap::from([(cat("secret"), 80.0), (cat("biometric"), 75.0)]),
@@ -249,6 +256,7 @@ struct ClaudeLayer {
     on_unresolved: Option<Action>,
     time_budget_ms: Option<u64>,
     mcp_tools: Option<BTreeMap<String, McpTool>>,
+    mcp: Option<McpTable>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -421,6 +429,9 @@ impl Config {
             if let Some(v) = x.mcp_tools {
                 merge_map(&mut self.claude_code.mcp_tools, v);
             }
+            if let Some(v) = x.mcp {
+                self.claude_code.mcp.merge(v);
+            }
         }
         if let Some(x) = l.cache.filter(|_| trust) {
             if let Some(v) = x.max_age_days {
@@ -587,6 +598,9 @@ pub fn baseline_path(mode: Mode, repo_root: Option<&Path>, cfg: &Config) -> Opti
 fn validate_mcp(cfg: &Config) -> Result<(), ConfigError> {
     if let Some(p) = cfg.mcp.problems().into_iter().next() {
         return Err(ConfigError(p));
+    }
+    if let Some(p) = cfg.claude_code.mcp.problems().into_iter().next() {
+        return Err(ConfigError(format!("claude_code.{p}")));
     }
     for (name, t) in &cfg.claude_code.mcp_tools {
         if !name.starts_with("mcp__") {

@@ -513,6 +513,58 @@ fn mcp_malformed_entries_rejected() {
     }
 }
 
+#[test]
+fn mcp_on_unresolved_and_decisions_load() {
+    use riskgrep_core::config::Action;
+    let _e = env(
+        Some(
+            "[mcp]\non_unresolved = \"ask\"\n\n\
+             [mcp.servers.shell.tools.\"*\"]\ndecision = \"deny\"\n\n\
+             [claude_code.mcp]\non_unresolved = \"allow\"\n\n\
+             [claude_code.mcp.servers.shell.tools.run]\ndecision = \"ask\"\n",
+        ),
+        None,
+    );
+    let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
+    assert_eq!(c.mcp.on_unresolved, Some(Action::Ask));
+    assert_eq!(
+        c.mcp.entry("shell", "x").unwrap().decision,
+        Some(Action::Deny)
+    );
+    assert_eq!(c.claude_code.mcp.on_unresolved, Some(Action::Allow));
+    assert_eq!(
+        c.claude_code.mcp.entry("shell", "run").unwrap().decision,
+        Some(Action::Ask)
+    );
+    // Unset by default: the shell setting is separate. `env` holds the
+    // environment lock, so the first guard is dropped before the second.
+    drop(_e);
+    let _e = env(None, None);
+    let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
+    assert_eq!(c.mcp.on_unresolved, None);
+    assert_eq!(c.claude_code.mcp.on_unresolved, None);
+}
+
+#[test]
+fn mcp_decision_entries_rejected_when_mixed() {
+    for bad in [
+        "[mcp.servers.x.tools.y]\ndecision = \"ask\"\npaths = [\"p\"]\n",
+        "[mcp.servers.x.tools.y]\ndecision = \"ask\"\nkind = \"none\"\n",
+        "[mcp.servers.x.tools.y]\ndecision = \"ask\"\nmax_depth = 1\n",
+        "[mcp.servers.x.tools.y]\ndecision = \"maybe\"\n",
+        "[mcp]\non_unresolved = \"maybe\"\n",
+        "[claude_code.mcp.servers.x.tools.y]\nkind = \"read\"\n",
+        "[claude_code.mcp_tools.\"mcp__x__y\"]\ndecision = \"ask\"\npaths = [\"p\"]\n",
+    ] {
+        let _e = env(Some(bad), None);
+        let err = load(Mode::ClaudeCode, None, Overrides::default()).unwrap_err();
+        assert!(
+            err.0.contains("invalid config") || err.0.contains("claude_code.mcp"),
+            "{bad}: {err}"
+        );
+    }
+}
+
 // ---- [cache] ----
 
 #[test]
