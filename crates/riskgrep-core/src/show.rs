@@ -67,6 +67,9 @@ pub enum Shown {
         text: Vec<u8>,
         /// Markers in the whole view (not only in the selected lines).
         masks: usize,
+        /// Lines in the whole view (a last line without a line feed
+        /// counts), the file's own line count.
+        lines: u64,
     },
     /// A structural summary of a file that is not text, one fact per line.
     Summary(String),
@@ -356,7 +359,12 @@ pub fn show_file(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let head = &bytes[..bytes.len().min(Limits::default().sniff)];
-    let class = crate::scanner::classify(&name, head, bytes.len() as u64);
+    let class = crate::classify::settle_npz(
+        crate::scanner::classify(&name, head, bytes.len() as u64),
+        bytes.as_slice(),
+        bytes.len() as u64,
+        &Limits::default(),
+    );
     let text = matches!(class, FileClass::Text | FileClass::EncodedText(_));
     // A format read from disk by structure keeps the size cap as its text
     // limit, should the file grow before that read.
@@ -510,11 +518,13 @@ fn masked(
             .collect();
         if outside.is_empty() {
             let masks = marks.len();
+            let lines =
+                newlines(&text) as u64 + u64::from(!text.is_empty() && !text.ends_with(b"\n"));
             let text = match opts.lines {
                 Some((a, b)) => select_lines(&text, a, b).to_vec(),
                 None => text,
             };
-            return Ok(Shown::Masked { text, masks });
+            return Ok(Shown::Masked { text, masks, lines });
         }
         pieces = remask(&pieces, outside, opts.marker);
     }

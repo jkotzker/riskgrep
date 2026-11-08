@@ -73,7 +73,7 @@ When no partial read is possible (below), no lines are named and the reason ends
 
 When the file can be shown masked, the reason also offers that, between the two sentences (see [Masked view](#masked-view)):
 
-`Do not read this file by other means (Bash, Grep, scripts). For a view with every match masked, run \`/path/to/riskgrep show /path/to/app.env\`. No partial read is available for this file; ask the user.`
+``Do not read this file by other means (Bash, Grep, scripts). For a view with every match masked, run `/path/to/riskgrep show /path/to/app.env`. No partial read is available for this file; ask the user.``
 
 A `Grep` or `Bash` reason that lists several files uses the plural forms (`these files`, `Read each with offset and limit ranges`), or, when only some of the files have known lines, `Read a file with listed lines using offset and limit ranges that exclude them; no partial read is available for the others; ask the user.` The `deny` reason reaches the model; the `ask` reason is shown to the user in the permission prompt.
 

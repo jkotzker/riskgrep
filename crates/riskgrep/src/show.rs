@@ -22,7 +22,13 @@ pub fn show(a: ShowArgs) -> Result<i32, CliError> {
         lines: a.lines,
     };
     let bytes = match show_file(&cfg, &a.file, &opts, riskgrep_core::paths::cache_dir()) {
-        Ok(Shown::Masked { text, .. }) => text,
+        Ok(Shown::Masked { text, lines, .. }) => {
+            if let Some((first, _)) = a.lines.filter(|&(f, _)| f > lines) {
+                let name = crate::git::display(a.file.as_os_str().as_bytes());
+                eprintln!("riskgrep show: {name} has {lines} lines; none from line {first}");
+            }
+            text
+        }
         Ok(Shown::Summary(s)) => s.into_bytes(),
         Err(r) => {
             let name = crate::git::display(a.file.as_os_str().as_bytes());

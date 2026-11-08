@@ -1243,3 +1243,14 @@ fn show_rejects_a_zero_limit() {
         .code(3)
         .stdout(predicate::str::is_empty());
 }
+
+#[test]
+fn show_says_when_the_lines_are_past_the_end() {
+    let (dir, _, _) = key_dir();
+    riskgrep(dir.path())
+        .args(["show", "key.txt", "--lines", "20:30"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("has 8 lines"));
+}

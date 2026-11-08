@@ -26,7 +26,7 @@ fn show(path: &Path, opts: &ShowOptions) -> Result<Shown, String> {
 
 fn masked(path: &Path) -> (Vec<u8>, usize) {
     match show(path, &ShowOptions::default()) {
-        Ok(Shown::Masked { text, masks }) => (text, masks),
+        Ok(Shown::Masked { text, masks, .. }) => (text, masks),
         Ok(Shown::Summary(_)) => panic!("expected a masked view, got a summary"),
         Err(r) => panic!("refused: {r}"),
     }
@@ -407,7 +407,7 @@ fn added_rules_mask_and_rescans_mask_what_masking_reveals() {
         "app.txt",
         format!("pet = zebra-quokka\nnear {key} tail\n").as_bytes(),
     );
-    let Ok(Shown::Masked { text, masks }) = show_with(rules.path(), &p) else {
+    let Ok(Shown::Masked { text, masks, .. }) = show_with(rules.path(), &p) else {
         panic!("not masked");
     };
     assert!(!contains(&text, key.as_bytes()));
@@ -443,7 +443,10 @@ fn markers_longer_than_their_matches_do_not_refuse_a_file_at_the_cap() {
         lines: None,
     };
     let shown = show_file(&cfg, &p, &opts, Some(cache())).map_err(|r| r.0);
-    let Ok(Shown::Masked { text: out, masks }) = shown else {
+    let Ok(Shown::Masked {
+        text: out, masks, ..
+    }) = shown
+    else {
         panic!("not masked: {:?}", shown.err());
     };
     assert_eq!(masks, 20);
@@ -461,4 +464,33 @@ fn a_content_match_without_a_location_refuses_the_view() {
         r.contains("content_flag matched the content without a location"),
         "{r}"
     );
+}
+
+#[test]
+fn an_npz_read_as_a_zip_is_summarised_as_a_zip() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        &dir,
+        "mixed.npz",
+        &synth::npz(&[
+            ("a.npy", synth::npy("<f4", &[4, 8])),
+            ("notes.txt", b"plain\n".to_vec()),
+        ]),
+    );
+    let Ok(Shown::Summary(s)) = show(&p, &ShowOptions::default()) else {
+        panic!("expected a summary");
+    };
+    assert!(s.contains("format: zip container"), "{s}");
+}
+
+#[test]
+fn the_masked_view_counts_its_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    for (body, n) in [("a\nb\n", 2u64), ("a\nb", 2), ("", 0), ("\n", 1)] {
+        let p = write(&dir, "n.txt", body.as_bytes());
+        let Ok(Shown::Masked { lines, .. }) = show(&p, &ShowOptions::default()) else {
+            panic!("not masked");
+        };
+        assert_eq!(lines, n, "{body:?}");
+    }
 }
