@@ -396,6 +396,7 @@ fn scan(
             text: false,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         });
         report = Report::from_targets(&report.riskgrep_version, &report.rules_bundle, targets);
     }

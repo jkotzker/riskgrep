@@ -211,8 +211,18 @@ impl Engine {
         let mut whole_digest: Option<[u8; 32]> = None;
         let mut content_digest =
             || *whole_digest.get_or_insert_with(|| *blake3::hash(content).as_bytes());
-        for rule in results.matching_rules() {
+        let mut path_allowlisted = false;
+        // Private rules too: a path allowlist is usually private, so that
+        // only the rules excluding it see its result.
+        for rule in results.matching_rules().include_private(true) {
             let key = format!("{}:{}", rule.namespace(), rule.identifier());
+            if self.bundle.meta.get(&key).is_some_and(|m| m.path_allowlist) {
+                path_allowlisted = true;
+                continue;
+            }
+            if rule.is_private() {
+                continue;
+            }
             let chain = self.chain(&key).map_err(ScanError::Yara)?;
             let meta = &self.bundle.meta[&key];
             // A whole-content verdict matches on a shared anchor (a magic
@@ -397,6 +407,7 @@ impl Engine {
         Ok(Scan {
             evidence: found.into_iter().map(|(_, e)| e).collect(),
             not_read,
+            path_allowlisted,
         })
     }
 }
@@ -408,6 +419,9 @@ pub struct Scan {
     /// Set when a post-processor could not inspect part of the content: the
     /// first note it gave. The evidence is then a verdict on the rest only.
     pub not_read: Option<String>,
+    /// A rule marked `path_allowlist` matched: the rules that exclude it did
+    /// not apply to this path (see [`crate::meta::RuleMeta::path_allowlist`]).
+    pub path_allowlisted: bool,
 }
 
 /// Strip [`PostResult::Incomplete`] wrappers from `result`, recording the

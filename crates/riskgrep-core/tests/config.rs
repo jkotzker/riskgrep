@@ -118,6 +118,7 @@ block_at = { biometric = 10 }
             categories: Some(vec![cat("biometric")]),
             rulesets: None,
             no_cache: true,
+            path_allowlist: None,
         },
     )
     .unwrap();
@@ -252,6 +253,7 @@ fn meta(weight: f64) -> RuleMeta {
         family_cap: None,
         post: vec![],
         line_complete: false,
+        path_allowlist: false,
     }
 }
 
@@ -677,4 +679,62 @@ on_partial = "allow"
     drop(e);
     let bad = env(Some("[git]\non_partial = \"sometimes\"\n"), None);
     assert!(load(Mode::Git, Some(bad.root()), Overrides::default()).is_err());
+}
+
+#[test]
+fn path_allowlist_is_on_by_default_and_each_integration_may_override_it() {
+    let e = env(None, None);
+    for mode in [Mode::Cli, Mode::Git, Mode::ClaudeCode] {
+        let c = load(mode, Some(e.root()), Overrides::default()).unwrap();
+        assert!(c.path_allowlist);
+        assert!(c.path_allowlist_applies(), "{mode:?}");
+    }
+    drop(e);
+
+    // Off at the top level; `[git]` turns it back on for the git hook only.
+    let e = env(
+        Some("path_allowlist = false\n[git]\npath_allowlist = true\n"),
+        None,
+    );
+    let applies = |mode| {
+        load(mode, Some(e.root()), Overrides::default())
+            .unwrap()
+            .path_allowlist_applies()
+    };
+    assert!(!applies(Mode::Cli));
+    assert!(applies(Mode::Git));
+    assert!(!applies(Mode::ClaudeCode));
+    drop(e);
+
+    // `[claude_code]` alone: only the Claude Code hook changes.
+    let e = env(Some("[claude_code]\npath_allowlist = false\n"), None);
+    let applies = |mode| {
+        load(mode, Some(e.root()), Overrides::default())
+            .unwrap()
+            .path_allowlist_applies()
+    };
+    assert!(applies(Mode::Cli));
+    assert!(applies(Mode::Git));
+    assert!(!applies(Mode::ClaudeCode));
+
+    // `riskgrep scan --path-allowlist` replaces the top-level setting.
+    let c = load(
+        Mode::Cli,
+        Some(e.root()),
+        Overrides {
+            path_allowlist: Some(false),
+            ..Overrides::default()
+        },
+    )
+    .unwrap();
+    assert!(!c.path_allowlist_applies());
+    drop(e);
+
+    // A repository file may set it too, as it may `on_partial`.
+    let e = env(None, Some("path_allowlist = false\n"));
+    let c = load(Mode::Git, Some(e.root()), Overrides::default()).unwrap();
+    assert!(!c.path_allowlist_applies());
+    drop(e);
+    let bad = env(Some("path_allowlist = \"off\"\n"), None);
+    assert!(load(Mode::Cli, Some(bad.root()), Overrides::default()).is_err());
 }

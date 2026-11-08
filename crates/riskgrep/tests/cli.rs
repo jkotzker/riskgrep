@@ -239,6 +239,44 @@ fn stdin_dash() {
 }
 
 #[test]
+fn an_archive_on_stdin_is_unscanned_and_follows_on_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 14);
+    let tar = synth::tar(&[("a.txt", format!("let id = \"{key}\";\n").into_bytes())]);
+    // The pipeline gate of the issue: `--fail-at` makes `on_error` block.
+    let out = riskgrep(dir.path())
+        .args(["scan", "-", "--format", "json", "--fail-at", "secret=99"])
+        .write_stdin(tar.clone())
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["targets"][0]["status"], "unscanned");
+    assert_eq!(
+        v["targets"][0]["reason"],
+        "tar not scanned on standard input"
+    );
+    assert_eq!(v["summary"]["unscanned"], 1);
+    assert!(!String::from_utf8_lossy(&out).contains(&key));
+    // Without a gate, `on_error` allows. Text output names the reason and
+    // still reports what the bytes held.
+    let out = riskgrep(dir.path())
+        .args(["scan", "-"])
+        .write_stdin(tar)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("tar not scanned on standard input"), "{text}");
+    assert!(text.contains("secret 95"), "{text}");
+    assert!(!text.contains(&key));
+}
+
+#[test]
 fn stdin_decodes_utf16_and_utf32_like_a_file() {
     let dir = tempfile::tempdir().unwrap();
     let key = synth::fake_secret("aws_access_key", 13);
@@ -1171,4 +1209,108 @@ fn json_output_keeps_the_raw_file_name() {
         .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["targets"][0]["target"], "a\nb.env");
+}
+
+/// `riskgrep scan --format json` of `arg` from `cwd`, with the ceiling above
+/// `top` so the repository search can reach every root under it: the
+/// target's `secret` score and `path_allowlisted` field.
+fn secret_from(top: &Path, cwd: &Path, args: &[&str]) -> (f64, bool) {
+    let out = riskgrep(cwd)
+        .env("GIT_CEILING_DIRECTORIES", top.parent().unwrap())
+        .args(["scan", "--format", "json", "--no-cache"])
+        .args(args)
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let t = &v["targets"][0];
+    (
+        t["scores"]["secret"].as_f64().unwrap(),
+        t["path_allowlisted"].as_bool().unwrap_or(false),
+    )
+}
+
+#[test]
+fn the_working_directory_does_not_change_a_files_result() {
+    let top = tempfile::tempdir().unwrap();
+    let top = fs::canonicalize(top.path()).unwrap();
+    let line = format!("{}\n", synth::fake_secret("generic_api_key_assignment", 5));
+    // A repository whose vendored tree is allowlisted, and a tree outside
+    // any repository whose parents' names are.
+    let tree = top.join("tree");
+    fs::create_dir_all(tree.join(".git")).unwrap();
+    let vendored = tree.join("node_modules/pkg/settings.ini");
+    let app = tree.join("app/settings.ini");
+    let loose = top.join("srv/lib/python3.13/app/settings.ini");
+    for f in [&vendored, &app, &loose] {
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(f, &line).unwrap();
+    }
+    let cases: &[(&Path, &[&Path], (f64, bool))] = &[
+        (
+            &vendored,
+            &[
+                &tree,
+                &tree.join("node_modules"),
+                &tree.join("node_modules/pkg"),
+                &top,
+            ],
+            (0.0, true),
+        ),
+        (&app, &[&tree, &tree.join("app"), &top], (80.0, false)),
+        (
+            &loose,
+            &[
+                &top,
+                &top.join("srv/lib"),
+                &top.join("srv/lib/python3.13/app"),
+            ],
+            (0.0, true),
+        ),
+    ];
+    for (file, cwds, want) in cases {
+        for cwd in *cwds {
+            let rel = file.strip_prefix(cwd).unwrap_or(file);
+            for arg in [file.to_str().unwrap(), rel.to_str().unwrap()] {
+                assert_eq!(
+                    secret_from(&top, cwd, &[arg]),
+                    *want,
+                    "{} from {}",
+                    arg,
+                    cwd.display()
+                );
+            }
+        }
+    }
+    // With the allowlist off the converted rules read every one of them.
+    for file in [&vendored, &app, &loose] {
+        assert_eq!(
+            secret_from(
+                &top,
+                &top,
+                &["--path-allowlist", "off", file.to_str().unwrap()]
+            ),
+            (80.0, false)
+        );
+    }
+}
+
+#[test]
+fn text_output_says_when_the_path_allowlist_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    let key = synth::fake_secret("generic_api_key_assignment", 5);
+    let value = key.split('"').nth(1).unwrap().to_string();
+    // Found by a rule that ignores the allowlist, on an allowlisted path.
+    fs::write(
+        dir.path().join("config.svg"),
+        format!("<Config>\n  <ApiKey>{value}</ApiKey>\n</Config>\n"),
+    )
+    .unwrap();
+    fs::write(dir.path().join("yarn.lock"), format!("{key}\n")).unwrap();
+    riskgrep(dir.path())
+        .args(["scan", "--no-cache", "config.svg", "yarn.lock"])
+        .assert()
+        .stdout(predicate::str::contains("(path allowlist applied)"))
+        .stdout(predicate::str::contains("2 under a path allowlist"))
+        .stdout(predicate::str::contains(&value).not());
 }

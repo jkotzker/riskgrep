@@ -177,8 +177,11 @@ fn test() -> Result<i32, CliError> {
     let suites = embedded_suites()?;
     let scratch = tempdir()?;
     let original_cwd = std::env::current_dir()?;
-    // Path rules see the path relative to the working directory, so scan
-    // from inside the scratch directory.
+    // Path rules see a path relative to the root of the repository holding
+    // the file, so the scratch directory is made a repository root and a
+    // case's sample is seen as `caseN/<path>`. Relative sample paths are
+    // resolved from inside it.
+    std::fs::create_dir(scratch.join(".git"))?;
     std::env::set_current_dir(&scratch)?;
     let outcome = run_suites(&sets, &suites, &all_rules, &scratch);
     let _ = std::env::set_current_dir(original_cwd);
@@ -338,6 +341,7 @@ mod tests {
             text: true,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         }
     }
 

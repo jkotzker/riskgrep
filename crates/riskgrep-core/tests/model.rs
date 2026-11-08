@@ -17,6 +17,7 @@ fn target(name: &str, score: f64, status: TargetStatus) -> TargetReport {
         text: true,
         container: None,
         read_failed: false,
+        path_allowlisted: false,
     }
 }
 

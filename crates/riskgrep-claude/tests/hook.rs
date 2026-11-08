@@ -1643,3 +1643,29 @@ fn unscanned_message_escapes_control_characters_in_file_names() {
         "{reason:?}"
     );
 }
+
+#[test]
+fn claude_code_path_allowlist_overrides_the_top_level_setting() {
+    // A key in a vendored file: gitleaks' global path allowlist skips it by
+    // default, so a `Read` gets no decision; `[claude_code] path_allowlist =
+    // false` makes the converted rules read it, whatever the top level says.
+    for (config, denied) in [
+        ("", false),
+        (
+            "path_allowlist = false\n[claude_code]\npath_allowlist = true\n",
+            false,
+        ),
+        ("[claude_code]\npath_allowlist = false\n", true),
+    ] {
+        let e = Env::new();
+        e.git_init();
+        e.user_config(config);
+        let p = e.write("node_modules/pkg/index.js", aws_file().as_bytes());
+        let out = e.run("Read", json!({ "file_path": p }));
+        if denied {
+            assert_eq!(out.decision().0, "deny", "{config}");
+        } else {
+            out.silent();
+        }
+    }
+}

@@ -589,6 +589,7 @@ mod tests {
             text: true,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         };
         assert_eq!(offences("x", &t(79.96), &cfg).len(), 1);
         assert!(offences("x", &t(79.94), &cfg).is_empty());
@@ -628,6 +629,7 @@ mod tests {
             text: false,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         };
         assert_eq!(
             offences("backup.zip", &t, &cfg),
