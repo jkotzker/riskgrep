@@ -171,19 +171,20 @@ fn target_dir(root: &Path) -> PathBuf {
         .unwrap_or_else(|| root.join("target"))
 }
 
-struct Bench {
+pub(crate) struct Bench {
     riskgrep: PathBuf,
     claude: PathBuf,
     home: PathBuf,
     cache: PathBuf,
     work: PathBuf,
     repo: PathBuf,
-    out: PathBuf,
+    pub out: PathBuf,
     runs: u32,
 }
 
 impl Bench {
-    fn env(&self, c: &mut Command) {
+    /// The isolated environment every benchmarked command runs in.
+    pub(crate) fn env(&self, c: &mut Command) {
         c.env("HOME", &self.home)
             .env("XDG_CACHE_HOME", self.home.join(".cache"))
             .env(
@@ -195,13 +196,36 @@ impl Bench {
             .env_remove("CLAUDE_CODE");
     }
 
+    /// The evidence database and its WAL files.
+    fn evidence_files(&self) -> [PathBuf; 3] {
+        let db = self.cache.join("evidence.sqlite");
+        let name = db.display().to_string();
+        [
+            db,
+            PathBuf::from(format!("{name}-wal")),
+            PathBuf::from(format!("{name}-shm")),
+        ]
+    }
+
+    /// Wipes the evidence cache but keeps the bundles, like
+    /// [`Bench::wipe_command`].
+    pub(crate) fn wipe(&self) -> Result<(), String> {
+        for f in self.evidence_files() {
+            match fs::remove_file(&f) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{}: {e}", f.display())),
+            }
+        }
+        Ok(())
+    }
+
     /// Shell command that wipes the evidence cache but keeps the bundles.
     fn wipe_command(&self) -> String {
-        let db = self.cache.join("evidence.sqlite");
-        let db = db.display().to_string();
-        let files: Vec<String> = [db.clone(), format!("{db}-wal"), format!("{db}-shm")]
+        let files: Vec<String> = self
+            .evidence_files()
             .iter()
-            .map(|f| shell_quote(f))
+            .map(|f| shell_quote(&f.display().to_string()))
             .collect();
         format!("rm -f {}", files.join(" "))
     }
@@ -310,31 +334,52 @@ fn hook_input(tool_cwd: &Path, file: &Path) -> String {
     .to_string()
 }
 
-pub fn run(args: &[String]) -> Result<(), String> {
-    let mut write_baseline = false;
-    let mut runs = DEFAULT_RUNS;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--write-baseline" => write_baseline = true,
-            "--runs" => {
-                runs = it
-                    .next()
-                    .and_then(|n| n.parse().ok())
-                    .filter(|n| *n >= 20)
-                    .ok_or_else(|| format!("--runs needs a number of at least 20\n{USAGE}"))?
-            }
-            other => return Err(format!("unknown argument `{other}`\n{USAGE}")),
-        }
-    }
-    let root = workspace_root();
-    let targets: Targets = toml::from_str(
-        &fs::read_to_string(root.join("bench/targets.toml"))
-            .map_err(|e| format!("bench/targets.toml: {e}"))?,
-    )
-    .map_err(|e| format!("bench/targets.toml: {e}"))?;
+/// The cases, in run order. Every case in `bench/targets.toml` must be here,
+/// and nothing else (`cases_match_targets` checks it).
+pub(crate) const CASE_NAMES: [&str; 7] = [
+    "claude_read_cached",
+    "claude_read_uncached",
+    "claude_read_zip_uncached",
+    "claude_read_tar_gz_uncached",
+    "scan_stdin_4kb",
+    "scan_stdin_1mb",
+    "git_pre_commit_20_files",
+];
 
-    build_release(&root)?;
+/// One benchmark case: a release binary run in `cwd` with `args`, standard
+/// input from `input`, after an evidence-cache wipe when `wipe` is set.
+pub(crate) struct CaseSpec {
+    pub name: &'static str,
+    pub cwd: PathBuf,
+    pub program: PathBuf,
+    pub args: Vec<&'static str>,
+    pub input: Option<PathBuf>,
+    pub wipe: bool,
+}
+
+impl CaseSpec {
+    /// The command line as hyperfine runs it with `-N` (split on spaces).
+    fn command_line(&self) -> String {
+        let mut words = vec![self.program.display().to_string()];
+        words.extend(self.args.iter().map(|a| a.to_string()));
+        words.join(" ")
+    }
+}
+
+/// The benchmark environment, ready to run: binaries built (unless
+/// `build` is false), an isolated HOME with a compiled rules bundle, and the
+/// fixtures written and settled.
+pub(crate) struct Prepared {
+    pub root: PathBuf,
+    pub bench: Bench,
+    pub cases: Vec<CaseSpec>,
+}
+
+pub(crate) fn prepare(build: bool) -> Result<Prepared, String> {
+    let root = workspace_root();
+    if build {
+        build_release(&root)?;
+    }
     let tdir = target_dir(&root);
     let base = tdir.join("bench");
     if base.exists() {
@@ -361,8 +406,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
         work,
         repo,
         out,
-        runs,
+        runs: DEFAULT_RUNS,
     };
+    for bin in [&b.riskgrep, &b.claude] {
+        if !bin.is_file() {
+            return Err(format!(
+                "{} not found: build it with `cargo build --release -p riskgrep -p riskgrep-claude`",
+                bin.display()
+            ));
+        }
+    }
 
     // One-time bundle compile, timed apart from the cases.
     let mut compile = Command::new(&b.riskgrep);
@@ -413,76 +466,133 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
     println!("settling fixtures for {} s", SETTLE.as_secs());
     std::thread::sleep(SETTLE);
-
-    let rg = b.riskgrep.display().to_string();
-    let cl = b.claude.display().to_string();
     b.check_wipe(&hook_uncached)?;
+
+    let case = |name: &'static str,
+                cwd: &Path,
+                program: &Path,
+                args: &[&'static str],
+                input: Option<&Path>,
+                wipe: bool| CaseSpec {
+        name,
+        cwd: cwd.to_path_buf(),
+        program: program.to_path_buf(),
+        args: args.to_vec(),
+        input: input.map(Path::to_path_buf),
+        wipe,
+    };
+    let cases = vec![
+        case(
+            CASE_NAMES[0],
+            &b.work,
+            &b.claude,
+            &[],
+            Some(&hook_cached),
+            false,
+        ),
+        case(
+            CASE_NAMES[1],
+            &b.work,
+            &b.claude,
+            &[],
+            Some(&hook_uncached),
+            true,
+        ),
+        case(
+            CASE_NAMES[2],
+            &b.work,
+            &b.claude,
+            &[],
+            Some(&hook_zip),
+            true,
+        ),
+        case(
+            CASE_NAMES[3],
+            &b.work,
+            &b.claude,
+            &[],
+            Some(&hook_tar_gz),
+            true,
+        ),
+        case(
+            CASE_NAMES[4],
+            &b.work,
+            &b.riskgrep,
+            &["scan", "-"],
+            Some(&stdin_4k),
+            false,
+        ),
+        case(
+            CASE_NAMES[5],
+            &b.work,
+            &b.riskgrep,
+            &["scan", "-"],
+            Some(&stdin_1m),
+            false,
+        ),
+        case(
+            CASE_NAMES[6],
+            &b.repo,
+            &b.riskgrep,
+            &["git", "pre-commit"],
+            None,
+            true,
+        ),
+    ];
+    debug_assert!(cases.iter().map(|c| c.name).eq(CASE_NAMES));
+    Ok(Prepared {
+        root,
+        bench: b,
+        cases,
+    })
+}
+
+/// Reads `bench/targets.toml`.
+fn load_targets(root: &Path) -> Result<Targets, String> {
+    toml::from_str(
+        &fs::read_to_string(root.join("bench/targets.toml"))
+            .map_err(|e| format!("bench/targets.toml: {e}"))?,
+    )
+    .map_err(|e| format!("bench/targets.toml: {e}"))
+}
+
+pub fn run(args: &[String]) -> Result<(), String> {
+    let mut write_baseline = false;
+    let mut runs = DEFAULT_RUNS;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--write-baseline" => write_baseline = true,
+            "--runs" => {
+                runs = it
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .filter(|n| *n >= 20)
+                    .ok_or_else(|| format!("--runs needs a number of at least 20\n{USAGE}"))?
+            }
+            other => return Err(format!("unknown argument `{other}`\n{USAGE}")),
+        }
+    }
+    let targets = load_targets(&workspace_root())?;
+    let Prepared {
+        root,
+        bench: mut b,
+        cases,
+    } = prepare(true)?;
+    b.runs = runs;
+
     let wipe = b.wipe_command();
     let mut measured: BTreeMap<&str, f64> = BTreeMap::new();
-    measured.insert(
-        "claude_read_cached",
-        b.measure("claude_read_cached", &b.work, &cl, Some(&hook_cached), None)?,
-    );
-    measured.insert(
-        "claude_read_uncached",
-        b.measure(
-            "claude_read_uncached",
-            &b.work,
-            &cl,
-            Some(&hook_uncached),
-            Some(&wipe),
-        )?,
-    );
-    measured.insert(
-        "claude_read_zip_uncached",
-        b.measure(
-            "claude_read_zip_uncached",
-            &b.work,
-            &cl,
-            Some(&hook_zip),
-            Some(&wipe),
-        )?,
-    );
-    measured.insert(
-        "claude_read_tar_gz_uncached",
-        b.measure(
-            "claude_read_tar_gz_uncached",
-            &b.work,
-            &cl,
-            Some(&hook_tar_gz),
-            Some(&wipe),
-        )?,
-    );
-    measured.insert(
-        "scan_stdin_4kb",
-        b.measure(
-            "scan_stdin_4kb",
-            &b.work,
-            &format!("{rg} scan -"),
-            Some(&stdin_4k),
-            None,
-        )?,
-    );
-    measured.insert(
-        "scan_stdin_1mb",
-        b.measure(
-            "scan_stdin_1mb",
-            &b.work,
-            &format!("{rg} scan -"),
-            Some(&stdin_1m),
-            None,
-        )?,
-    );
-    measured.insert(
-        "git_pre_commit_20_files",
-        b.measure(
-            "git_pre_commit_20_files",
-            &b.repo,
-            &format!("{rg} git pre-commit"),
-            None,
-            Some(&wipe),
-        )?,
-    );
+    for c in &cases {
+        let p95 = b.measure(
+            c.name,
+            &c.cwd,
+            &c.command_line(),
+            c.input.as_deref(),
+            c.wipe.then_some(wipe.as_str()),
+        )?;
+        measured.insert(c.name, p95);
+    }
 
     let baseline_path = root.join(format!("bench/baseline-{}.json", os_name()));
     if write_baseline {
@@ -542,6 +652,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cases_match_targets() {
+        let mut names: Vec<String> = load_targets(&workspace_root())
+            .unwrap()
+            .case
+            .into_keys()
+            .collect();
+        names.sort();
+        let mut ours: Vec<&str> = CASE_NAMES.to_vec();
+        ours.sort();
+        assert_eq!(names, ours);
+    }
 
     #[test]
     fn p95_is_nearest_rank() {

@@ -2,6 +2,7 @@
 
 mod bench;
 mod eval;
+mod instructions;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -9,7 +10,8 @@ use std::process::ExitCode;
 const USAGE: &str =
     "usage: cargo xtask convert-gitleaks --config <gitleaks.toml> --tag <release tag> --out <dir>
        cargo xtask eval [--skip-oss] [--write-baseline] [--keep-corpus DIR]
-       cargo xtask bench [--write-baseline] [--runs N]";
+       cargo xtask bench [--write-baseline] [--runs N]
+       cargo xtask instructions [--counter auto|perf|callgrind|time] [--runs N] [--no-build] [--json FILE] [--write-baseline] [--check]";
 
 fn convert(args: &[String]) -> Result<(), String> {
     let (mut config, mut tag, mut out) = (None, None, None);
@@ -56,6 +58,7 @@ fn main() -> ExitCode {
         Some("convert-gitleaks") => convert(&args[1..]),
         Some("eval") => eval::run(&args[1..]),
         Some("bench") => bench::run(&args[1..]),
+        Some("instructions") => instructions::run(&args[1..]),
         _ => Err(USAGE.into()),
     };
     match result {
