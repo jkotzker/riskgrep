@@ -202,22 +202,111 @@ fn compressed_stream(head: &[u8]) -> Option<&'static str> {
     }
 }
 
-fn image_kind(head: &[u8]) -> Option<&'static str> {
-    if head.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+/// The kind of image `head` starts, when it starts with more of the format's
+/// structure than its first bytes: the beginning of a file of that format
+/// has them, and text or binary data that only starts like one does not (a
+/// note that begins `GIF8` stays text). Each check reads only the bytes the
+/// format fixes at its start, which the sniff window holds. `size` is the
+/// length of the whole file, which a box size or an offset must fit.
+fn image_kind(head: &[u8], size: u64) -> Option<&'static str> {
+    if is_png(head) {
         Some("png")
-    } else if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+    } else if is_jpeg(head) {
         Some("jpeg")
-    } else if head.starts_with(b"GIF8") {
+    } else if is_gif(head) {
         Some("gif")
-    } else if head.len() >= 12 && &head[..4] == b"RIFF" && &head[8..12] == b"WEBP" {
+    } else if is_webp(head) {
         Some("webp")
-    } else if head.len() >= 12 && matches!(&head[4..12], b"ftypheic" | b"ftypheix" | b"ftypmif1") {
+    } else if is_heic(head, size) {
         Some("heic")
-    } else if head.starts_with(b"II*\0") || head.starts_with(b"MM\0*") {
+    } else if is_tiff(head, size) {
         Some("tiff")
     } else {
         None
     }
+}
+
+fn be_u32(head: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(head.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn le_u32(head: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(head.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// The 8-byte PNG signature, then the `IHDR` chunk, which comes first and
+/// holds 13 bytes. Apple's optimised PNG puts a 4-byte `CgBI` chunk (and its
+/// checksum) before it.
+fn is_png(head: &[u8]) -> bool {
+    let chunk = |at: usize, len: u32, kind: &[u8; 4]| {
+        be_u32(head, at) == Some(len) && head.get(at + 4..at + 8) == Some(kind)
+    };
+    head.starts_with(b"\x89PNG\r\n\x1a\n")
+        && (chunk(8, 13, b"IHDR") || (chunk(8, 4, b"CgBI") && chunk(24, 13, b"IHDR")))
+}
+
+/// The start-of-image marker, then a marker segment: `FF` and a marker byte
+/// that begins a segment (a frame header, table, application, or comment
+/// segment, or the scan), then the segment's length, which counts its own two
+/// bytes.
+fn is_jpeg(head: &[u8]) -> bool {
+    matches!(
+        head,
+        [0xFF, 0xD8, 0xFF, 0xC0..=0xC7 | 0xC9..=0xCF | 0xDA..=0xDF | 0xE0..=0xEF | 0xFE, hi, lo, ..]
+            if u16::from_be_bytes([*hi, *lo]) >= 2
+    )
+}
+
+/// `GIF87a` or `GIF89a`, the 7-byte logical screen descriptor, the global
+/// color table it declares, and the first block, which is an extension
+/// (`21`), an image (`2C`), or the trailer (`3B`).
+fn is_gif(head: &[u8]) -> bool {
+    if !(head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a")) {
+        return false;
+    }
+    let Some(&packed) = head.get(10) else {
+        return false;
+    };
+    let table = if packed & 0x80 != 0 {
+        3 * (2usize << (packed & 7))
+    } else {
+        0
+    };
+    matches!(head.get(13 + table), Some(0x21 | 0x2C | 0x3B))
+}
+
+/// `RIFF`, the size of the rest of the file, `WEBP`, and the first chunk,
+/// which is `VP8 `, `VP8L`, or `VP8X`. The size covers at least `WEBP` and
+/// that chunk's header.
+fn is_webp(head: &[u8]) -> bool {
+    head.starts_with(b"RIFF")
+        && head.get(8..12) == Some(b"WEBP")
+        && le_u32(head, 4).is_some_and(|n| n >= 12)
+        && matches!(head.get(12..16), Some(b"VP8 " | b"VP8L" | b"VP8X"))
+}
+
+/// An `ftyp` box with one of the brands that mark a HEIF image: its size
+/// holds the 16 bytes of its fixed fields and whole 4-byte brands, and fits
+/// the file.
+fn is_heic(head: &[u8], size: u64) -> bool {
+    matches!(
+        head.get(4..12),
+        Some(b"ftypheic" | b"ftypheix" | b"ftypmif1")
+    ) && be_u32(head, 0).is_some_and(|n| n >= 16 && n % 4 == 0 && u64::from(n) <= size)
+}
+
+/// A TIFF byte order mark (`II` or `MM`), the number 42 in that order, and the
+/// offset of the first directory: on a word boundary, past the 8-byte header,
+/// and with room in the file for the directory's entry count.
+fn is_tiff(head: &[u8], size: u64) -> bool {
+    let offset = if head.starts_with(b"II*\0") {
+        le_u32(head, 4)
+    } else if head.starts_with(b"MM\0*") {
+        be_u32(head, 4)
+    } else {
+        None
+    };
+    offset.is_some_and(|n| n >= 8 && n % 2 == 0 && u64::from(n) + 2 <= size)
 }
 
 /// Bytes read from a password-vault or keychain file: the header rules look at
@@ -343,7 +432,7 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
     if let Some(format) = compressed_stream(head) {
         return FileClass::Container(ContainerKind::Compressed(format));
     }
-    if let Some(kind) = image_kind(head) {
+    if let Some(kind) = image_kind(head, size) {
         return FileClass::Image(kind);
     }
     if let Some(e) = encoding::detect(head) {

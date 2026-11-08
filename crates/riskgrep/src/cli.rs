@@ -37,8 +37,8 @@ pub enum Command {
 structural summary: format, tensor data types and shapes, member counts, and scores, never \
 names or values.\n\n\
 The file is read once and scanned whole by every built-in rule and any rules \
-`extra_ruleset_dirs` adds; categories, rulesets, weight overrides, ignore entries, and \
-baselines never narrow the mask. The masked text is scanned again before it is printed. \
+`extra_ruleset_dirs` adds; categories, rulesets, weight overrides, ignore entries, \
+baselines, and path allowlists (`path_allowlist`) never narrow the mask. The masked text is scanned again before it is printed. \
 Values the rules do not detect are printed.\n\n\
 Exit codes: 0 printed; 2 refused, with the reason on standard error and nothing on \
 standard output (the file is larger than `[show] max_bytes`, 64 MiB by default, a scan \
@@ -83,6 +83,12 @@ pub enum OnPartial {
     Block,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Switch {
+    On,
+    Off,
+}
+
 #[derive(Args, Debug)]
 pub struct ScanArgs {
     /// Files and directories to scan; `-` reads standard input as `<stdin>`.
@@ -119,6 +125,12 @@ pub struct ScanArgs {
     /// --on-error
     #[arg(long, value_enum, default_value = "error")]
     pub on_partial: OnPartial,
+    /// Whether rulesets' path allowlists apply (gitleaks' global path
+    /// allowlist: vendored code, lock files, image and document names), which
+    /// the converted secret rules skip. Default: the `path_allowlist` setting
+    /// (on)
+    #[arg(long, value_enum, value_name = "on|off")]
+    pub path_allowlist: Option<Switch>,
     /// Do not read or write the evidence cache
     #[arg(long)]
     pub no_cache: bool,

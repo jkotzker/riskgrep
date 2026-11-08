@@ -118,6 +118,7 @@ block_at = { biometric = 10 }
             categories: Some(vec![cat("biometric")]),
             rulesets: None,
             no_cache: true,
+            path_allowlist: None,
         },
     )
     .unwrap();
@@ -252,6 +253,7 @@ fn meta(weight: f64) -> RuleMeta {
         family_cap: None,
         post: vec![],
         line_complete: false,
+        path_allowlist: false,
     }
 }
 
@@ -368,48 +370,50 @@ fn load_records_mode() {
 }
 
 #[test]
-fn mcp_tool_defaults_cover_common_servers() {
+fn mcp_defaults_cover_common_servers() {
     use riskgrep_core::config::McpKind;
     let _e = env(None, None);
     let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
-    let cc = &c.claude_code;
-    let read = cc.mcp_tool("mcp__filesystem__read_text_file").unwrap();
+    let m = &c.mcp;
+    let read = m.entry("filesystem", "read_text_file").unwrap();
     assert_eq!(read.kind, McpKind::Read);
     assert_eq!(read.paths, ["path"]);
-    let many = cc
-        .mcp_tool("mcp__plugin_desktop-commander_desktop-commander__read_multiple_files")
+    let many = m
+        .entry(
+            "plugin_desktop-commander_desktop-commander",
+            "read_multiple_files",
+        )
         .unwrap();
     assert_eq!(many.paths, ["paths"]);
     assert_eq!(
-        cc.mcp_tool("mcp__desktop-commander__start_search")
-            .unwrap()
-            .kind,
+        m.entry("desktop-commander", "start_search").unwrap().kind,
         McpKind::Names
     );
-    let list = cc.mcp_tool("mcp__filesystem__list_directory").unwrap();
+    let list = m.entry("filesystem", "list_directory").unwrap();
     assert_eq!((list.kind, list.max_depth), (McpKind::Names, Some(1)));
     assert_eq!(
-        cc.mcp_tool("mcp__filesystem__write_file").unwrap().kind,
+        m.entry("filesystem", "write_file").unwrap().kind,
         McpKind::None
     );
-    assert!(cc.mcp_tool("mcp__other__read_file").is_none());
-    assert!(cc.mcp_tool("Read").is_none());
+    assert!(m.entry("other", "read_file").is_none());
+    // The built-in entries are shared, not under any agent's section.
+    assert!(c.claude_code.mcp_tools.is_empty());
 }
 
 #[test]
-fn mcp_tool_user_entry_adds_and_replaces() {
+fn mcp_user_entry_adds_and_replaces() {
     use riskgrep_core::config::McpKind;
     let _e = env(
         Some(
-            "[claude_code.mcp_tools.\"mcp__notes__open\"]\npaths = [\"file\", \"files\"]\n\n\
-             [claude_code.mcp_tools.\"mcp__db_*__query\"]\nkind = \"none\"\n\n\
-             [claude_code.mcp_tools.\"mcp__filesystem__read_file\"]\npaths = [\"other\"]\n",
+            "[mcp.servers.notes.tools.open]\npaths = [\"file\", \"files\"]\n\n\
+             [mcp.servers.\"db_*\".tools.query]\nkind = \"none\"\n\n\
+             [mcp.servers.filesystem.tools.read_file]\npaths = [\"other\"]\n",
         ),
         None,
     );
     let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
-    let cc = &c.claude_code;
-    let open = cc.mcp_tool("mcp__notes__open").unwrap();
+    let m = &c.mcp;
+    let open = m.entry("notes", "open").unwrap();
     assert_eq!(
         (open.kind, open.paths.as_slice()),
         (
@@ -417,17 +421,44 @@ fn mcp_tool_user_entry_adds_and_replaces() {
             &["file".to_string(), "files".to_string()][..]
         )
     );
-    assert_eq!(
-        cc.mcp_tool("mcp__db_main__query").unwrap().kind,
-        McpKind::None
-    );
-    assert!(cc.mcp_tool("mcp__db_main__drop").is_none());
-    assert_eq!(
-        cc.mcp_tool("mcp__filesystem__read_file").unwrap().paths,
-        ["other"]
-    );
+    assert_eq!(m.entry("db_main", "query").unwrap().kind, McpKind::None);
+    assert!(m.entry("db_main", "drop").is_none());
+    assert_eq!(m.entry("filesystem", "read_file").unwrap().paths, ["other"]);
     // Built-in entries the user did not name stay.
-    assert!(cc.mcp_tool("mcp__filesystem__read_text_file").is_some());
+    assert!(m.entry("filesystem", "read_text_file").is_some());
+}
+
+#[test]
+fn mcp_repo_entry_layers_over_user_entry() {
+    use riskgrep_core::config::McpKind;
+    let e = env(
+        Some(
+            "trusted_repos = [\"{repo}\"]\n\
+             [mcp.servers.notes.tools.open]\npaths = [\"file\"]\n\
+             [mcp.servers.notes.tools.list]\npaths = [\"dir\"]\nkind = \"names\"\n",
+        ),
+        Some("[mcp.servers.notes.tools.open]\nkind = \"none\"\n"),
+    );
+    let c = load(Mode::ClaudeCode, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!(c.mcp.entry("notes", "open").unwrap().kind, McpKind::None);
+    assert_eq!(c.mcp.entry("notes", "list").unwrap().kind, McpKind::Names);
+}
+
+#[test]
+fn mcp_tools_alias_is_read_as_written() {
+    use riskgrep_core::config::McpKind;
+    let _e = env(
+        Some(
+            "[claude_code.mcp_tools.\"mcp__notes__open\"]\npaths = [\"file\", \"files\"]\n\n\
+             [claude_code.mcp_tools.\"mcp__db_*__query\"]\nkind = \"none\"\n",
+        ),
+        None,
+    );
+    let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
+    let a = &c.claude_code.mcp_tools;
+    assert_eq!(a.len(), 2);
+    assert_eq!(a["mcp__notes__open"].paths, ["file", "files"]);
+    assert_eq!(a["mcp__db_*__query"].kind, McpKind::None);
 }
 
 #[test]
@@ -449,6 +480,109 @@ fn mcp_tool_malformed_entries_rejected() {
             err.0.contains("config") || err.0.contains("mcp_tools"),
             "{bad}: {err}"
         );
+    }
+}
+
+#[test]
+fn mcp_malformed_entries_rejected() {
+    for (bad, what) in [
+        (
+            "[mcp.servers.x.tools.y]\nkind = \"read\"\n",
+            "mcp.servers.\"x\".tools.\"y\"",
+        ),
+        (
+            "[mcp.servers.x.tools.y]\npaths = [\"\"]\n",
+            "mcp.servers.\"x\".tools.\"y\"",
+        ),
+        (
+            "[mcp.servers.\"\".tools.y]\nkind = \"none\"\n",
+            "mcp.servers",
+        ),
+        (
+            "[mcp.servers.x.tools.\"\"]\nkind = \"none\"\n",
+            "mcp.servers.\"x\"",
+        ),
+        (
+            "[mcp.servers.x.tools.y]\npaths = [\"p\"]\nkind = \"write\"\n",
+            "invalid config",
+        ),
+        ("[mcp.servers.x]\nfield = 1\n", "invalid config"),
+        ("[mcp]\nfield = 1\n", "invalid config"),
+    ] {
+        let _e = env(Some(bad), None);
+        let err = load(Mode::ClaudeCode, None, Overrides::default()).unwrap_err();
+        assert!(err.0.contains(what), "{bad}: {err}");
+    }
+}
+
+#[test]
+fn mcp_on_unresolved_and_decisions_load() {
+    use riskgrep_core::config::Action;
+    let _e = env(
+        Some(
+            "[mcp]\non_unresolved = \"ask\"\n\n\
+             [mcp.servers.shell.tools.\"*\"]\ndecision = \"deny\"\n\n\
+             [claude_code.mcp]\non_unresolved = \"allow\"\n\n\
+             [claude_code.mcp.servers.shell.tools.run]\ndecision = \"ask\"\n",
+        ),
+        None,
+    );
+    let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
+    assert_eq!(c.mcp.on_unresolved, Some(Action::Ask));
+    assert_eq!(
+        c.mcp.entry("shell", "x").unwrap().decision,
+        Some(Action::Deny)
+    );
+    assert_eq!(c.claude_code.mcp.on_unresolved, Some(Action::Allow));
+    assert_eq!(
+        c.claude_code.mcp.entry("shell", "run").unwrap().decision,
+        Some(Action::Ask)
+    );
+    // Unset by default: the shell setting is separate. `env` holds the
+    // environment lock, so the first guard is dropped before the second.
+    drop(_e);
+    let _e = env(None, None);
+    let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
+    assert_eq!(c.mcp.on_unresolved, None);
+    assert_eq!(c.claude_code.mcp.on_unresolved, None);
+}
+
+#[test]
+fn mcp_decision_entries_rejected_when_mixed() {
+    let mixed = "an entry with `decision` takes no `paths`, `kind`, or `max_depth`";
+    for (bad, why) in [
+        (
+            "[mcp.servers.x.tools.y]\ndecision = \"ask\"\npaths = [\"p\"]\n",
+            mixed,
+        ),
+        (
+            "[mcp.servers.x.tools.y]\ndecision = \"ask\"\nkind = \"none\"\n",
+            mixed,
+        ),
+        (
+            "[mcp.servers.x.tools.y]\ndecision = \"ask\"\nmax_depth = 1\n",
+            mixed,
+        ),
+        (
+            "[claude_code.mcp_tools.\"mcp__x__y\"]\ndecision = \"ask\"\npaths = [\"p\"]\n",
+            mixed,
+        ),
+        (
+            "[mcp.servers.x.tools.y]\ndecision = \"maybe\"\n",
+            "unknown variant `maybe`",
+        ),
+        (
+            "[mcp]\non_unresolved = \"maybe\"\n",
+            "unknown variant `maybe`",
+        ),
+        (
+            "[claude_code.mcp.servers.x.tools.y]\nkind = \"read\"\n",
+            "claude_code.mcp.servers.\"x\".tools.\"y\": needs `paths`",
+        ),
+    ] {
+        let _e = env(Some(bad), None);
+        let err = load(Mode::ClaudeCode, None, Overrides::default()).unwrap_err();
+        assert!(err.0.contains(why), "{bad}: {err}");
     }
 }
 
@@ -587,4 +721,62 @@ fn show_limits_of_zero_are_errors() {
     // The table is accepted by the other commands' loader.
     let e = env(Some("[show]\nmax_bytes = 10\n"), None);
     assert!(load(Mode::Cli, Some(e.root()), Overrides::default()).is_ok());
+}
+
+#[test]
+fn path_allowlist_is_on_by_default_and_each_integration_may_override_it() {
+    let e = env(None, None);
+    for mode in [Mode::Cli, Mode::Git, Mode::ClaudeCode] {
+        let c = load(mode, Some(e.root()), Overrides::default()).unwrap();
+        assert!(c.path_allowlist);
+        assert!(c.path_allowlist_applies(), "{mode:?}");
+    }
+    drop(e);
+
+    // Off at the top level; `[git]` turns it back on for the git hook only.
+    let e = env(
+        Some("path_allowlist = false\n[git]\npath_allowlist = true\n"),
+        None,
+    );
+    let applies = |mode| {
+        load(mode, Some(e.root()), Overrides::default())
+            .unwrap()
+            .path_allowlist_applies()
+    };
+    assert!(!applies(Mode::Cli));
+    assert!(applies(Mode::Git));
+    assert!(!applies(Mode::ClaudeCode));
+    drop(e);
+
+    // `[claude_code]` alone: only the Claude Code hook changes.
+    let e = env(Some("[claude_code]\npath_allowlist = false\n"), None);
+    let applies = |mode| {
+        load(mode, Some(e.root()), Overrides::default())
+            .unwrap()
+            .path_allowlist_applies()
+    };
+    assert!(applies(Mode::Cli));
+    assert!(applies(Mode::Git));
+    assert!(!applies(Mode::ClaudeCode));
+
+    // `riskgrep scan --path-allowlist` replaces the top-level setting.
+    let c = load(
+        Mode::Cli,
+        Some(e.root()),
+        Overrides {
+            path_allowlist: Some(false),
+            ..Overrides::default()
+        },
+    )
+    .unwrap();
+    assert!(!c.path_allowlist_applies());
+    drop(e);
+
+    // A repository file may set it too, as it may `on_partial`.
+    let e = env(None, Some("path_allowlist = false\n"));
+    let c = load(Mode::Git, Some(e.root()), Overrides::default()).unwrap();
+    assert!(!c.path_allowlist_applies());
+    drop(e);
+    let bad = env(Some("path_allowlist = \"off\"\n"), None);
+    assert!(load(Mode::Cli, Some(bad.root()), Overrides::default()).is_err());
 }

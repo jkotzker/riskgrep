@@ -494,3 +494,48 @@ fn the_masked_view_counts_its_lines() {
         assert_eq!(lines, n, "{body:?}");
     }
 }
+
+#[test]
+fn paths_the_allowlist_covers_are_masked_too() {
+    // gitleaks' global path allowlist makes the converted rules skip
+    // `node_modules/`; the masked view runs every rule on every path, as it
+    // ignores thresholds, ignore entries, and baselines. Checked inside a
+    // repository and outside any.
+    for in_repo in [true, false] {
+        let d = tempfile::tempdir().unwrap();
+        if in_repo {
+            fs::create_dir(d.path().join(".git")).unwrap();
+        }
+        let dir = d.path().join("node_modules/pkg");
+        fs::create_dir_all(&dir).unwrap();
+        let line = synth::fake_secret("generic_api_key_assignment", 13);
+        let value = line.split('"').nth(1).unwrap().to_string();
+        let p = dir.join("settings.ini");
+        fs::write(&p, format!("{line}\n")).unwrap();
+
+        // The scan with default settings applies the allowlist and finds
+        // nothing there ...
+        let mut rg = RiskGrep::with_cache_dir(Config::default(), None, Some(cache())).unwrap();
+        let t = &rg.scan_paths(std::slice::from_ref(&p)).targets[0];
+        assert!(t.path_allowlisted, "precondition (in_repo {in_repo})");
+        assert!(t.evidence.is_empty(), "precondition (in_repo {in_repo})");
+
+        // With the setting off, the scan finds the value: the fixture is one
+        // the rules detect.
+        let off = Config {
+            path_allowlist: false,
+            ..Config::default()
+        };
+        let mut rg = RiskGrep::with_cache_dir(off, None, Some(cache())).unwrap();
+        let t = &rg.scan_paths(std::slice::from_ref(&p)).targets[0];
+        assert!(!t.evidence.is_empty(), "fixture (in_repo {in_repo})");
+
+        // ... and the masked view still masks the value.
+        let (text, masks) = masked(&p);
+        assert!(masks >= 1, "nothing masked (in_repo {in_repo})");
+        assert!(
+            !contains(&text, value.as_bytes()),
+            "the value was shown (in_repo {in_repo})"
+        );
+    }
+}

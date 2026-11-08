@@ -124,6 +124,7 @@ fn score_target_uses_meta_weights_and_tiers() {
         family_cap: None,
         post: vec![],
         line_complete: false,
+        path_allowlist: false,
     };
     let meta = HashMap::from([
         ("ns:a".to_string(), m(50.0, None)),
@@ -172,6 +173,7 @@ fn container_scores_merge_member_evidence_by_rule() {
         family_cap: None,
         post: vec![],
         line_complete: false,
+        path_allowlist: false,
     };
     let meta = HashMap::from([
         ("b:bank".to_string(), meta_for("1:30,3:90")),

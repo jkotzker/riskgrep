@@ -467,6 +467,7 @@ mod tests {
             text: true,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         }
     }
 
@@ -513,6 +514,7 @@ mod tests {
             text: true,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         }
     }
 
@@ -928,12 +930,16 @@ mod tests {
             skipped: 0,
             not_read: 2,
             opened: 0,
+            path_allowlisted: 0,
+            skipped_kinds: BTreeMap::new(),
+            opened_formats: BTreeMap::new(),
             listed: members
                 .iter()
                 .map(|(m, score)| MemberReport {
                     path: m.to_string(),
                     status: TargetStatus::Scanned,
                     scores: BTreeMap::from([(Category("secret".into()), *score)]),
+                    path_allowlisted: false,
                 })
                 .collect(),
         });

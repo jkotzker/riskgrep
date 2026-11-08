@@ -38,6 +38,10 @@ pub enum PostSpec {
     },
     Stopwords {
         list: String,
+        /// For a match made only of hex digits, only listed words of at least
+        /// this length count.
+        #[serde(default)]
+        hex_min_len: Option<u64>,
     },
     AllowRegex {
         regex: String,
@@ -86,6 +90,12 @@ pub struct RuleMeta {
     /// show a match. Used by the Claude Code hook's partial reads.
     #[serde(default)]
     pub line_complete: bool,
+    /// Meta `path_allowlist = true`: the rule is a path allowlist that other
+    /// rules exclude (`not <rule>`). It yields no evidence; when it matches,
+    /// the scan reports that the allowlist applied
+    /// ([`crate::engine::Scan::path_allowlisted`]).
+    #[serde(default)]
+    pub path_allowlist: bool,
 }
 
 struct Raw<'a> {
@@ -227,6 +237,12 @@ impl RuleMeta {
             }
         }
 
+        if raw.get("stopwords_hex_min_len").is_some()
+            && !post.iter().any(|p| matches!(p, PostSpec::Stopwords { .. }))
+        {
+            return Err(raw.err("`stopwords_hex_min_len` requires post `stopwords`"));
+        }
+
         Ok(RuleMeta {
             category: Category(category),
             weight,
@@ -235,6 +251,7 @@ impl RuleMeta {
             family_cap,
             post,
             line_complete: raw.boolean("line_complete")?.unwrap_or(false),
+            path_allowlist: raw.boolean("path_allowlist")?.unwrap_or(false),
         })
     }
 
@@ -249,6 +266,7 @@ impl RuleMeta {
             },
             "stopwords" => PostSpec::Stopwords {
                 list: raw.need(raw.string("stopwords")?, "stopwords", name)?,
+                hex_min_len: raw.uint("stopwords_hex_min_len")?,
             },
             "allow_regex" => PostSpec::AllowRegex {
                 regex: raw.need(raw.string("allow_regex")?, "allow_regex", name)?,

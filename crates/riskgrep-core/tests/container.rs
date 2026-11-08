@@ -1682,6 +1682,8 @@ fn a_lone_skipped_member_with_hidden_bytes_is_partial_and_keeps_its_counts() {
         assert_eq!(partial(&t), reason);
         assert!(t.unseen_part().is_some());
         assert_eq!(buckets(&t), (1, 0, 1, 0, 0, 0));
+        // No longer skipped, so no longer counted by kind.
+        assert!(t.container.as_ref().unwrap().skipped_kinds.is_empty());
     }
 }
 
@@ -2069,6 +2071,31 @@ fn a_container_of_only_skipped_members_is_skipped_and_keeps_its_counts() {
         assert_eq!(first.summary.skipped, 1, "{name}");
         assert_eq!(scan(&mut scanner(), &p), first, "{name}");
     }
+}
+
+#[test]
+fn a_member_is_an_image_only_when_its_structure_says_so() {
+    let mut gif8 = text("GIF8 notes for the rollout\n");
+    gif8.extend(aws_file(62));
+    let mut nul_png = b"\x89PNG\r\n\x1a\n".to_vec();
+    nul_png.resize(72, 0);
+    let z = synth::zip(&[
+        ("gif8.txt", gif8),
+        ("pixel.png", synth::png_1x1()),
+        ("nul.png", nul_png),
+    ]);
+    let t = scan_zip(&z);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    // Only the real image and the binary of unknown format are skipped; the
+    // text that starts like a GIF is read, and its key is found.
+    assert_eq!(buckets(&t), (3, 1, 0, 2, 0, 0));
+    assert!(t.scores[&secret()] >= 95.0);
+    let e = t
+        .evidence
+        .iter()
+        .find(|e| e.rule == "aws_access_token")
+        .expect("aws evidence");
+    assert_eq!(e.member.as_deref(), Some("gif8.txt"));
 }
 
 #[test]

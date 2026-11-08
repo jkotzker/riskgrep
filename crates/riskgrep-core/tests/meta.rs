@@ -39,7 +39,8 @@ name_regex = "weight$""#,
             },
             PostSpec::Entropy { min: 3.5 },
             PostSpec::Stopwords {
-                list: "common".into()
+                list: "common".into(),
+                hex_min_len: None
             },
             PostSpec::AllowRegex { regex: "^x".into() },
             PostSpec::NpyHeader {
@@ -221,4 +222,25 @@ allow_regex = "^\\d+$""#,
 fn meta_rejects_non_utf8_string() {
     let e = parse("category = \"secret\"\nweight = 50\nfamily = \"\\xff\"").unwrap_err();
     assert!(e.0.contains("`family` must be a string"), "{e}");
+}
+
+#[test]
+fn stopwords_hex_min_len_is_an_optional_number_that_needs_stopwords() {
+    let with = |post: &str, extra: &str| {
+        parse(&format!(
+            "category = \"secrets\"\nweight = 1\npost = \"{post}\"\nstopwords = \"common\"\nmin_entropy = 3.0\n{extra}"
+        ))
+    };
+    let min_len = |m: RuleMeta| match &m.post[..] {
+        [PostSpec::Stopwords { hex_min_len, .. }] => *hex_min_len,
+        other => panic!("unexpected post {other:?}"),
+    };
+    assert_eq!(
+        min_len(with("stopwords", "stopwords_hex_min_len = 8").unwrap()),
+        Some(8)
+    );
+    assert_eq!(min_len(with("stopwords", "").unwrap()), None);
+    assert!(with("stopwords", "stopwords_hex_min_len = \"yes\"").is_err());
+    let e = with("entropy", "stopwords_hex_min_len = 8").unwrap_err();
+    assert!(e.to_string().contains("stopwords_hex_min_len"), "{e}");
 }

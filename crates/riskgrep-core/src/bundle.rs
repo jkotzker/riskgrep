@@ -13,6 +13,9 @@ use std::time::{Duration, SystemTime};
 
 const YARA_X_VERSION: &str = "1.23.0";
 
+/// The boolean rule global that says whether path allowlists apply.
+pub const PATH_ALLOWLIST_GLOBAL: &str = "path_allowlist_enabled";
+
 pub struct Bundle {
     pub rules: yara_x::Rules,
     /// Keyed by `namespace:identifier`; the namespace is the ruleset id.
@@ -84,6 +87,10 @@ fn compile(rulesets: &[&Ruleset]) -> Result<yara_x::Rules> {
     let mut c = yara_x::Compiler::new();
     c.define_global("path", "")
         .map_err(|e| err(format!("define_global: {e}")))?;
+    // Whether path allowlists apply (`Config::path_allowlist_applies`); set
+    // per scanner.
+    c.define_global(PATH_ALLOWLIST_GLOBAL, true)
+        .map_err(|e| err(format!("define_global: {e}")))?;
     for rs in rulesets {
         c.new_namespace(&rs.id);
         for (file, src) in &rs.sources {
@@ -100,7 +107,7 @@ fn collect_meta(rules: &yara_x::Rules, rulesets: &[&Ruleset]) -> Result<HashMap<
         let ns = rule.namespace();
         let meta = RuleMeta::from_yara(&rule).map_err(|e| err(format!("ruleset {ns}: {e}")))?;
         for p in &meta.post {
-            if let PostSpec::Stopwords { list } = p {
+            if let PostSpec::Stopwords { list, .. } = p {
                 let found = rulesets
                     .iter()
                     .find(|r| r.id == ns)

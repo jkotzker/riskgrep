@@ -2,8 +2,8 @@
 //!
 //! The file is read once into memory, and that buffer is scanned whole by
 //! every built-in rule and every rule configuration adds: no category
-//! filter, ruleset selection, weight override, ignore entry, or baseline
-//! applies ([`crate::config::ShowConfig`]), so configuration can add to the
+//! filter, ruleset selection, weight override, ignore entry, baseline, or
+//! path allowlist applies ([`crate::config::ShowConfig`]), so configuration can add to the
 //! mask but never narrow it. Every located match, whatever its score, is
 //! replaced by a marker; a match spanning lines leaves the same number of
 //! line feeds after its marker, so line numbers stay aligned with the file.
@@ -300,9 +300,13 @@ pub fn parse_lines(s: &str) -> Result<(u64, u64), String> {
 /// text limit is `text_max`: for text, the size was checked against
 /// `[show] max_bytes` before the read, and the masked text, which the
 /// rescans read, can be longer than the file (markers naming rules are
-/// longer than short matches), so text is never sampled.
+/// longer than short matches), so text is never sampled. Path allowlists
+/// are off whatever the `path_allowlist` setting: a rule that skips a path
+/// (gitleaks' global allowlist skips `node_modules/`) would leave its
+/// matches there unmasked.
 fn scan_config(cfg: &ShowConfig, text_max: u64) -> Config {
     Config {
+        path_allowlist: false,
         extra_ruleset_dirs: cfg.extra_ruleset_dirs.clone(),
         limits: Limits {
             text_max,

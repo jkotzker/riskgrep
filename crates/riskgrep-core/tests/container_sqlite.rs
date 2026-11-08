@@ -296,6 +296,34 @@ fn a_wal_is_never_checkpointed_and_its_unmerged_content_is_reported_unread() {
 }
 
 #[test]
+fn a_wal_database_before_its_first_checkpoint_is_unscanned() {
+    // A new database in WAL mode whose every change is still in the log:
+    // its own file holds only an empty first page, so nothing in scope is
+    // read, and it is `unscanned` rather than `partial`.
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("app.db");
+    let c = Connection::open(&p).unwrap();
+    c.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+         CREATE TABLE t(v TEXT);",
+    )
+    .unwrap();
+    c.execute("INSERT INTO t VALUES (?1)", params![aws(6)])
+        .unwrap();
+    assert!(fs::metadata(d.path().join("app.db-wal")).unwrap().len() > 0);
+    let before = snapshot(d.path());
+
+    let r = scan(&mut scanner(), &p);
+    let t = only(&r);
+    let reason = unscanned(t);
+    assert!(reason.contains("write-ahead log"), "{reason}");
+    assert!(t.container.is_none(), "nothing was read to count");
+    assert!(t.scores.values().all(|s| *s == 0.0), "{:?}", t.scores);
+    assert_eq!(snapshot(d.path()), before, "bytes and listing unchanged");
+    drop(c);
+}
+
+#[test]
 fn a_wal_that_appears_after_a_clean_scan_is_not_hidden_by_the_cache() {
     let d = tempfile::tempdir().unwrap();
     let p = db(
