@@ -269,3 +269,36 @@ fn names_follow_the_same_path_rule() {
     assert!(secret(t) >= 80.0, "{:?}", t.scores);
     assert!(!t.path_allowlisted);
 }
+
+#[test]
+fn the_report_follows_the_allowlist_rule_not_the_setting() {
+    // A ruleset's allowlist rule that does not test `path_allowlist_enabled`
+    // keeps excluding its paths with the setting off; the report says so,
+    // since that is what the rules did.
+    let d = tempfile::tempdir().unwrap();
+    let rs = d.path().join("rs");
+    fs::create_dir_all(&rs).unwrap();
+    fs::write(
+        rs.join("ruleset.toml"),
+        "id = \"own\"\nversion = \"1\"\nlicence = \"MIT\"\ndescription = \"t\"\ncategories = [\"secret\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        rs.join("a.yar"),
+        "private rule own_allowlist {\n  meta:\n    category = \"secret\"\n    weight = 0\n    path_allowlist = true\n  condition:\n    path icontains \"/third_party/\"\n}\n\
+         rule own_marker {\n  meta:\n    category = \"secret\"\n    weight = 80\n  strings:\n    $hit = \"OWN-MARKER-\"\n  condition:\n    $hit and not own_allowlist\n}\n",
+    )
+    .unwrap();
+    let tree = d.path().join("tree");
+    let p = put(&tree, "x/third_party/a.txt", "OWN-MARKER-1\n");
+    let cfg = Config {
+        extra_ruleset_dirs: vec![rs],
+        rulesets: vec!["own".into()],
+        path_allowlist: false,
+        ..Config::default()
+    };
+    let mut g = RiskGrep::with_cache_dir(cfg, None, None).unwrap();
+    let t = scan(&mut g, &p);
+    assert_eq!(secret(&t), 0.0, "{:?}", t.scores);
+    assert!(t.path_allowlisted);
+}

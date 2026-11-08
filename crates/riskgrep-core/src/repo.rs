@@ -21,6 +21,7 @@
 //! Not replicated: `safe.directory` entries, `core.worktree`, and git's
 //! validation that a `.git` entry is really a repository.
 
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -67,6 +68,67 @@ pub fn find_repo_root(cwd: &Path, search: &Search<'_>) -> Option<PathBuf> {
     None
 }
 
+/// [`find_repo_root`] for a canonical directory, sharing answers with every
+/// directory searched before through `memo` (canonical directory to its
+/// root). A directory without a `.git` entry that is not the stop below
+/// `$HOME` has its parent's answer, unless that parent is a ceiling or on
+/// another device, where the search stops; so each directory is examined
+/// once however many files below it are looked up.
+pub fn find_repo_root_cached(
+    dir: &Path,
+    search: &Search<'_>,
+    memo: &mut HashMap<PathBuf, Option<PathBuf>>,
+) -> Option<PathBuf> {
+    if dir.components().any(|c| c.as_os_str() == ".git") {
+        return None;
+    }
+    // Directories whose answer is their parent's, nearest first.
+    let mut pending: Vec<&Path> = Vec::new();
+    let mut cur = dir;
+    // The device of `cur`, once its parent's was read.
+    let mut cur_dev = None;
+    let found = loop {
+        if let Some(r) = memo.get(cur) {
+            break r.clone();
+        }
+        if search.home_parent == Some(cur) {
+            memo.insert(cur.to_path_buf(), None);
+            break None;
+        }
+        if let Ok(entry) = fs::symlink_metadata(cur.join(".git")) {
+            let owned =
+                entry.uid() == search.uid && fs::metadata(cur).is_ok_and(|m| m.uid() == search.uid);
+            let r = owned.then(|| cur.to_path_buf());
+            memo.insert(cur.to_path_buf(), r.clone());
+            break r;
+        }
+        let Some(parent) = cur.parent() else {
+            memo.insert(cur.to_path_buf(), None);
+            break None;
+        };
+        let mut parent_dev = None;
+        if !search.across_filesystems {
+            let d = cur_dev.unwrap_or_else(|| (search.dev_of)(cur));
+            parent_dev = Some((search.dev_of)(parent));
+            if parent_dev != Some(d) {
+                memo.insert(cur.to_path_buf(), None);
+                break None;
+            }
+        }
+        if search.ceilings.iter().any(|c| c == parent) {
+            memo.insert(cur.to_path_buf(), None);
+            break None;
+        }
+        pending.push(cur);
+        cur = parent;
+        cur_dev = parent_dev;
+    };
+    for d in pending {
+        memo.insert(d.to_path_buf(), found.clone());
+    }
+    found
+}
+
 /// The environment's inputs to [`find_repo_root`], read once: the ceilings
 /// from `GIT_CEILING_DIRECTORIES`, the stop from `$HOME`,
 /// `GIT_DISCOVERY_ACROSS_FILESYSTEM`, and the effective user id of this
@@ -97,18 +159,29 @@ impl SearchEnv {
         }
     }
 
+    fn with<T>(&self, f: impl FnOnce(&Search<'_>) -> T) -> T {
+        f(&Search {
+            ceilings: &self.ceilings,
+            home_parent: self.home_parent.as_deref(),
+            uid: self.uid,
+            across_filesystems: self.across_filesystems,
+            dev_of: &|p| fs::metadata(p).ok().map(|m| m.dev()),
+        })
+    }
+
     /// [`find_repo_root`] from `dir` under this environment.
     pub fn repo_root(&self, dir: &Path) -> Option<PathBuf> {
-        find_repo_root(
-            dir,
-            &Search {
-                ceilings: &self.ceilings,
-                home_parent: self.home_parent.as_deref(),
-                uid: self.uid,
-                across_filesystems: self.across_filesystems,
-                dev_of: &|p| fs::metadata(p).ok().map(|m| m.dev()),
-            },
-        )
+        self.with(|s| find_repo_root(dir, s))
+    }
+
+    /// [`find_repo_root_cached`] from the canonical `dir` under this
+    /// environment.
+    pub fn repo_root_cached(
+        &self,
+        dir: &Path,
+        memo: &mut HashMap<PathBuf, Option<PathBuf>>,
+    ) -> Option<PathBuf> {
+        self.with(|s| find_repo_root_cached(dir, s, memo))
     }
 }
 
@@ -250,6 +323,71 @@ mod tests {
         };
         assert_eq!(find_repo_root(&sub, &search(false)), None);
         assert_eq!(find_repo_root(&sub, &search(true)), Some(top));
+    }
+
+    /// Every directory of a tree, in walk order.
+    fn dirs(top: &Path) -> Vec<PathBuf> {
+        let mut out = vec![top.to_path_buf()];
+        let mut i = 0;
+        while i < out.len() {
+            let mut kids: Vec<PathBuf> = fs::read_dir(&out[i])
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.is_dir())
+                .collect();
+            kids.sort();
+            out.extend(kids);
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn the_cached_search_answers_as_the_search_does() {
+        let (_d, top) = top();
+        for sub in [
+            "r/a/b/c",
+            "r/n/.git/hooks",
+            "r/n/x/y",
+            "h/me/p/q",
+            "c/z/w",
+            "dev/k/l",
+        ] {
+            fs::create_dir_all(top.join(sub)).unwrap();
+        }
+        fs::create_dir(top.join("r/.git")).unwrap();
+        fs::write(top.join("r/a/b/.git"), "gitdir: x\n").unwrap();
+        fs::create_dir(top.join("c/.git")).unwrap();
+        fs::create_dir(top.join("dev/.git")).unwrap();
+        let home_parent = top.join("h");
+        let ceilings = [top.join("c/z")];
+        let boundary = top.join("dev/k");
+        let dev = move |p: &Path| Some(if p.starts_with(&boundary) { 2 } else { 1 });
+        for uid in [uid(), uid() + 1] {
+            for across in [false, true] {
+                let search = Search {
+                    ceilings: &ceilings,
+                    home_parent: Some(&home_parent),
+                    uid,
+                    across_filesystems: across,
+                    dev_of: &dev,
+                };
+                // Deepest first and in walk order, so both orders of filling
+                // the memo are checked.
+                let all = dirs(&top);
+                for order in [all.clone(), all.into_iter().rev().collect()] {
+                    let mut memo = HashMap::new();
+                    for d in &order {
+                        assert_eq!(
+                            find_repo_root_cached(d, &search, &mut memo),
+                            find_repo_root(d, &search),
+                            "{} (uid {uid}, across {across})",
+                            d.display()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -541,11 +541,8 @@ impl RiskGrep {
     /// parent of `$HOME`, filesystem boundaries).
     fn rules_path(&self, real: &Path) -> String {
         let root = real.parent().and_then(|dir| {
-            self.roots
-                .borrow_mut()
-                .entry(dir.to_path_buf())
-                .or_insert_with(|| self.search.repo_root(dir))
-                .clone()
+            self.search
+                .repo_root_cached(dir, &mut self.roots.borrow_mut())
         });
         relative_to(root.as_deref(), real)
     }
@@ -563,10 +560,7 @@ impl RiskGrep {
             let parent = fs::canonicalize(abs.parent()?).ok()?;
             Some(parent.join(abs.file_name()?))
         });
-        match real {
-            Some(r) => self.rules_path(&r),
-            None => name.to_string(),
-        }
+        self.rules_path(&real.unwrap_or(abs))
     }
 
     /// Close the evidence cache now: its SQLite connection closes, which
@@ -1038,7 +1032,7 @@ impl RiskGrep {
             Err(ScanError::Yara(_)) => return Raw::status(p.target, unscanned("scan error")),
         };
         let (mut ev, engine_not_read) = (scan.evidence, scan.not_read);
-        let allowlisted = scan.path_allowlisted && self.allowlist;
+        let allowlisted = scan.path_allowlisted;
         if let Some(d) = &p.content.decoded {
             d.place(&mut ev);
         } else if let Some(tail) = p.content.tail {
@@ -1091,7 +1085,7 @@ impl RiskGrep {
                 let path = format!("{}!/{}", p.path_ext, m.path);
                 match engine.scan_content_checked(scanner, &path, &m.content.bytes) {
                     Ok(scan) => {
-                        if scan.path_allowlisted && self.allowlist {
+                        if scan.path_allowlisted {
                             allowlisted.insert(m.path.clone());
                         }
                         let mut ev = scan.evidence;
@@ -1465,6 +1459,17 @@ mod tests {
     }
 
     /// Evidence cached from an older extractor's output must not be used.
+    #[test]
+    fn a_missing_name_is_seen_by_its_absolute_path() {
+        // Neither the name nor its parent exists: the rules see the path
+        // made absolute, as for a file outside any repository, never the
+        // name relative to the working directory.
+        let g = RiskGrep::with_cache_dir(Config::default(), None, None).unwrap();
+        let seen = g.rules_path_of_name("riskgrep-missing-dir-7f3a/x/.env");
+        assert!(Path::new(&seen).is_absolute(), "{seen}");
+        assert!(seen.ends_with("riskgrep-missing-dir-7f3a/x/.env"), "{seen}");
+    }
+
     #[test]
     fn evidence_key_changes_with_the_extractor_version() {
         let key = |v| evidence_key("bundle", Some(&Versioned(v)), true, "a.zip");
