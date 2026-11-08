@@ -1297,7 +1297,9 @@ fn show_masks_paths_the_allowlist_covers() {
         .get_output()
         .stdout
         .clone();
-    assert!(has(&json, "\"path_allowlisted\": true") || has(&json, "\"path_allowlisted\":true"));
+    let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(v["targets"][0]["path_allowlisted"], true, "precondition");
+    assert_eq!(v["targets"][0]["scores"]["secret"], 0.0, "precondition");
     let out = riskgrep_in(home.path(), dir.path())
         .args(["show", "node_modules/pkg/settings.ini"])
         .assert()

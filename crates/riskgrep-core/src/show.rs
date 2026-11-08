@@ -395,8 +395,9 @@ pub fn show_file(
 /// The rule ids that match the file's name alone: their location-free
 /// evidence describes the path, not the content.
 fn path_rules(rg: &mut RiskGrep, real: &Path) -> Result<HashSet<String>, Refusal> {
-    let name = rg.rule_path(real);
-    let r = rg.scan_names(&[name]);
+    // `scan_names` derives the path the rules see from the absolute path,
+    // as the content scan does (`RiskGrep::rules_path`).
+    let r = rg.scan_names(&[real.to_string_lossy().into_owned()]);
     let t = only(&r.targets)?;
     if t.status != TargetStatus::Scanned {
         return refuse(status_reason(t));

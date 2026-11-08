@@ -539,3 +539,57 @@ fn paths_the_allowlist_covers_are_masked_too() {
         );
     }
 }
+
+#[test]
+fn rules_see_the_path_a_scan_gives_them() {
+    // A rule conditioned on the path from the repository's root matches in
+    // a scan from any working directory, so the masked view must give rules
+    // the same path, or such a match is printed unmasked.
+    let rules = tempfile::tempdir().unwrap();
+    fs::write(
+        rules.path().join("ruleset.toml"),
+        "id = \"show_path\"\nversion = \"0.1.0\"\nlicence = \"MIT\"\n\
+         description = \"test rules\"\ncategories = [\"secret\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        rules.path().join("rules.yar"),
+        r#"rule rooted_word {
+  meta:
+    category = "secret"
+    weight = 10
+  strings:
+    $re = "pelican-marmot"
+  condition:
+    path matches /^conf\/app\.txt$/ and $re
+}
+"#,
+    )
+    .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    fs::create_dir(d.path().join(".git")).unwrap();
+    fs::create_dir(d.path().join("conf")).unwrap();
+    let p = write(&d, "conf/app.txt", b"name = pelican-marmot\n");
+
+    // The scan (working directory outside the repository) finds it ...
+    let cfg = Config {
+        extra_ruleset_dirs: vec![rules.path().to_path_buf()],
+        ..Config::default()
+    };
+    let mut rg = RiskGrep::with_cache_dir(cfg, None, Some(cache())).unwrap();
+    let t = &rg.scan_paths(std::slice::from_ref(&p)).targets[0];
+    assert!(
+        t.evidence.iter().any(|e| e.rule == "rooted_word"),
+        "precondition"
+    );
+
+    // ... and the masked view masks it.
+    match show_with(rules.path(), &p) {
+        Ok(Shown::Masked { text, masks, .. }) => {
+            assert_eq!(masks, 1);
+            assert!(!contains(&text, b"pelican-marmot"), "the word was shown");
+        }
+        Ok(Shown::Summary(_)) => panic!("expected a masked view, got a summary"),
+        Err(r) => panic!("refused: {r}"),
+    }
+}

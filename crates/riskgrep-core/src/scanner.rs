@@ -675,8 +675,9 @@ impl RiskGrep {
     /// Scan `bytes`, the whole content of the file at `path`, as text, for
     /// [`crate::show`]: UTF-16 and UTF-32 text is recognised from its first
     /// bytes and transcoded (evidence offsets are in `bytes`), anything else
-    /// is scanned as UTF-8 text. The rules see `path` (relative to the
-    /// working directory) as for a file read from disk. `limits.text_max`
+    /// is scanned as UTF-8 text. `path` must be canonical; the rules see
+    /// it as for a file read from disk ([`RiskGrep::rules_path`]: from the
+    /// root of its repository, else absolute). `limits.text_max`
     /// applies as for a file; never cached. With `utf8`, the content is
     /// scanned as UTF-8 text whatever its first bytes look like.
     pub(crate) fn scan_text_file(
@@ -695,7 +696,7 @@ impl RiskGrep {
             c @ FileClass::EncodedText(_) if !utf8 => c,
             _ => FileClass::Text,
         };
-        let path_ext = relative_to(self.cwd.as_deref(), path);
+        let path_ext = self.rules_path(path);
         let raw = match classify::slice_for_scan(bytes, &class, &self.cfg.limits) {
             Err(e) => Raw::status(target.to_string(), unreadable(&e)),
             Ok(content) => self.scan_now(Pending {
@@ -722,11 +723,6 @@ impl RiskGrep {
             MetaState::Loaded(sm) => sm.keys.get(rule).map(String::as_str),
             _ => None,
         }
-    }
-
-    /// The path the rules see for `path` (see [`RiskGrep::scan_text_file`]).
-    pub(crate) fn rule_path(&self, path: &Path) -> String {
-        relative_to(self.cwd.as_deref(), path)
     }
 
     /// Score file names without their content: each name is scanned as an
