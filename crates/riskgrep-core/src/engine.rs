@@ -195,6 +195,11 @@ impl Engine {
         path_for_rules: &str,
         content: &[u8],
     ) -> Result<Scan, ScanError> {
+        // Measurement only (#110): extra work in proportion to the content.
+        #[cfg(feature = "bench-slowdown")]
+        for b in content {
+            std::hint::black_box(b);
+        }
         let mut not_read: Option<String> = None;
         scanner
             .set_global("path", path_for_rules)

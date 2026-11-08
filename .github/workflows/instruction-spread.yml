@@ -1,0 +1,111 @@
+# Measurement only (issue #110): runs `cargo xtask instructions` at one
+# commit on separate hosted runner VMs, to measure the run-to-run spread of
+# the instruction counts and which counter each OS can read. Each job also
+# counts a build with the `bench-slowdown` positive control. Not part of the
+# deliverable.
+name: Instruction-count spread
+
+on:
+  push:
+    branches: ["jkotzker/110-*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  measure:
+    name: measure (${{ matrix.os }}, ${{ matrix.job }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        job: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Install counters (Linux)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind linux-tools-common linux-tools-generic "linux-tools-$(uname -r)" || sudo apt-get install -y valgrind linux-tools-common linux-tools-generic || true
+          echo "perf_event_paranoid before: $(cat /proc/sys/kernel/perf_event_paranoid)"
+          sudo sysctl -w kernel.perf_event_paranoid=1
+          perf stat -x , -e instructions:u -- true || true
+
+      - name: Runner details
+        shell: bash
+        run: |
+          mkdir -p out
+          {
+            echo "ImageOS=${ImageOS:-}"
+            echo "ImageVersion=${ImageVersion:-}"
+            echo "RUNNER_ARCH=$RUNNER_ARCH"
+            uname -a
+            git --version
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              sw_vers
+              sysctl -n machdep.cpu.brand_string
+              sysctl -n hw.ncpu
+            else
+              grep -m1 'model name' /proc/cpuinfo || true
+              nproc
+              cat /proc/sys/kernel/perf_event_paranoid
+              perf --version || true
+              valgrind --version || true
+            fi
+          } | tee out/runner.txt
+
+      - name: Build release binaries
+        run: cargo build --release -p riskgrep -p riskgrep-claude
+
+      - name: Count (perf)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: cargo xtask instructions --no-build --counter perf --runs 5 --json out/perf.json
+
+      - name: Count (callgrind)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: cargo xtask instructions --no-build --counter callgrind --runs 3 --json out/callgrind.json
+
+      - name: Count (time)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: cargo xtask instructions --no-build --counter time --runs 5 --json out/time.json
+
+      - name: Build release binaries with the positive control
+        run: cargo build --release -p riskgrep -p riskgrep-claude --features riskgrep-core/bench-slowdown
+
+      - name: Count control (perf)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: cargo xtask instructions --no-build --counter perf --runs 5 --json out/control-perf.json
+
+      - name: Count control (callgrind)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: cargo xtask instructions --no-build --counter callgrind --runs 3 --json out/control-callgrind.json
+
+      - name: Count control (time)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: cargo xtask instructions --no-build --counter time --runs 5 --json out/control-time.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: counts-${{ matrix.os }}-${{ matrix.job }}
+          path: out/
+          if-no-files-found: error

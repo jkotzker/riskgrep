@@ -455,6 +455,11 @@ impl RiskGrep {
         repo_root: Option<&Path>,
         cache_dir: Option<PathBuf>,
     ) -> Result<RiskGrep, RiskGrepError> {
+        // Measurement only (#110): a fixed amount of extra work per process.
+        #[cfg(feature = "bench-slowdown")]
+        for i in 0..400_000u64 {
+            std::hint::black_box(i);
+        }
         let cwd = std::env::current_dir().and_then(fs::canonicalize).ok();
         let root = repo_root.map(|r| fs::canonicalize(r).unwrap_or_else(|_| r.to_path_buf()));
         let base = root.clone().or_else(|| cwd.clone());

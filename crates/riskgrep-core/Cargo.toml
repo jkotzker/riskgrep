@@ -28,6 +28,11 @@ globset = "0.4"
 getrandom = "0.4"
 tar = { version = "0.4.46", default-features = false }
 
+[features]
+# Measurement only (issue #110): a deliberate slowdown, the positive control
+# for the instruction-count spread runs. Never part of a release.
+bench-slowdown = []
+
 [build-dependencies]
 blake3 = "1.8.7"
 
