@@ -220,6 +220,36 @@ impl Bench {
         Ok(())
     }
 
+    /// Writes the isolated user configuration file.
+    pub(crate) fn write_config(&self, toml: &str) -> Result<(), String> {
+        let dir = self.home.join(".config/riskgrep");
+        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let file = dir.join("config.toml");
+        fs::write(&file, toml).map_err(|e| format!("{}: {e}", file.display()))
+    }
+
+    /// Compiles the rules bundle again, with `riskgrep rules compile` run as
+    /// the last argument of `wrapper` (for example under Valgrind, whose
+    /// emulated CPU can lack features of the real one, so that native code
+    /// compiled outside it is not used inside it).
+    pub(crate) fn recompile_bundle(&self, wrapper: &[&str]) -> Result<(), String> {
+        let bundles = self.cache.join("bundles");
+        if bundles.exists() {
+            fs::remove_dir_all(&bundles).map_err(|e| format!("{}: {e}", bundles.display()))?;
+        }
+        let (program, pre) = wrapper.split_first().ok_or("empty wrapper")?;
+        let mut c = Command::new(program);
+        c.args(pre)
+            .arg(&self.riskgrep)
+            .args(["rules", "compile"])
+            .current_dir(&self.work);
+        self.env(&mut c);
+        run_checked(
+            c.stdout(Stdio::null()),
+            "riskgrep rules compile (recompile)",
+        )
+    }
+
     /// Shell command that wipes the evidence cache but keeps the bundles.
     fn wipe_command(&self) -> String {
         let files: Vec<String> = self

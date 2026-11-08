@@ -23,8 +23,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         job: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        # Run 1 found no instruction count on hosted macOS; two jobs record
+        # the raw /usr/bin/time -l output as evidence.
+        include:
+          - os: macos-latest
+            job: 1
+          - os: macos-latest
+            job: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,6 +66,7 @@ jobs:
               sw_vers
               sysctl -n machdep.cpu.brand_string
               sysctl -n hw.ncpu
+              /usr/bin/time -l /usr/bin/true 2>&1 || true
             else
               grep -m1 'model name' /proc/cpuinfo || true
               nproc

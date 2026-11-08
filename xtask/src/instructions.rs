@@ -26,6 +26,10 @@ const DEFAULT_RUNS: u32 = 5;
 /// is a regression.
 pub const THRESHOLD: f64 = 0.02;
 
+/// User configuration for the counted runs: time budgets no case reaches.
+const GENEROUS_BUDGETS: &str =
+    "[limits]\ntime_budget_ms = 600000\n\n[claude_code]\ntime_budget_ms = 600000\n";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Counter {
     Perf,
@@ -293,6 +297,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Counter::from_name(&counter_name)
             .ok_or_else(|| format!("unknown counter `{counter_name}`\n{USAGE}"))?
     };
+    // A scan that runs out of time reads less and so counts fewer
+    // instructions; under Valgrind the default 2 s budgets are easily spent.
+    // The budgets only cut work short, so raising them changes no count of a
+    // scan that finishes.
+    p.bench.write_config(GENEROUS_BUDGETS)?;
+    if counter == Counter::Callgrind {
+        p.bench
+            .recompile_bundle(&["valgrind", "--tool=none", "--quiet"])?;
+    }
     let os = std::env::consts::OS;
     println!("counter: {} on {os}, {runs} runs per case", counter.name());
 
@@ -460,6 +473,16 @@ mod tests {
             assert_eq!(Counter::from_name(c.name()), Some(c));
         }
         assert_eq!(Counter::from_name("cycles"), None);
+    }
+
+    #[test]
+    fn generous_budgets_parse_as_configuration() {
+        let v: toml::Value = toml::from_str(GENEROUS_BUDGETS).unwrap();
+        assert_eq!(v["limits"]["time_budget_ms"].as_integer(), Some(600_000));
+        assert_eq!(
+            v["claude_code"]["time_budget_ms"].as_integer(),
+            Some(600_000)
+        );
     }
 
     #[test]
