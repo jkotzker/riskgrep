@@ -294,6 +294,23 @@ fn unscanned(reason: &str) -> TargetStatus {
     }
 }
 
+/// `p` with `.` components dropped and each `..` removing the component
+/// before it, without reading the filesystem.
+fn lexical(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// A kind count with owned keys, for the report and the cache.
 fn owned(m: &BTreeMap<&'static str, u64>) -> BTreeMap<String, u64> {
     m.iter().map(|(k, n)| (k.to_string(), *n)).collect()
@@ -560,7 +577,9 @@ impl RiskGrep {
             let parent = fs::canonicalize(abs.parent()?).ok()?;
             Some(parent.join(abs.file_name()?))
         });
-        self.rules_path(&real.unwrap_or(abs))
+        // Not canonical: drop `.` and resolve `..` by the text, so the
+        // repository search walks the directories the path names.
+        self.rules_path(&real.unwrap_or_else(|| lexical(&abs)))
     }
 
     /// Close the evidence cache now: its SQLite connection closes, which
@@ -1459,6 +1478,13 @@ mod tests {
     }
 
     /// Evidence cached from an older extractor's output must not be used.
+    #[test]
+    fn a_missing_name_is_normalized_before_the_search() {
+        let g = RiskGrep::with_cache_dir(Config::default(), None, None).unwrap();
+        let seen = g.rules_path_of_name("/riskgrep-missing-7f3a/a/../b/./x/.env");
+        assert_eq!(seen, "/riskgrep-missing-7f3a/b/x/.env");
+    }
+
     #[test]
     fn a_missing_name_is_seen_by_its_absolute_path() {
         // Neither the name nor its parent exists: the rules see the path
