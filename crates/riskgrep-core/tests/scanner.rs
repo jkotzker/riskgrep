@@ -598,6 +598,7 @@ fn an_archive_on_standard_input_is_still_scanned_as_bytes() {
     let t = only(&r);
     assert!(matches!(t.status, TargetStatus::Unscanned { .. }));
     assert!(t.scores[&secret()] >= 95.0, "{:?}", t.scores);
+    assert!(!t.text, "an unscanned target has no line numbers to match");
     assert!(!t.evidence.is_empty());
 }
 

@@ -576,6 +576,7 @@ impl RiskGrep {
             (container, &raw.status)
         {
             raw.status = unscanned(&format!("{} not scanned on standard input", kind.name()));
+            raw.text = false;
         }
         let targets = self.finalize(vec![raw]);
         self.report(targets)
