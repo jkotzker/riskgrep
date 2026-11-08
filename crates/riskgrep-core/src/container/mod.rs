@@ -17,7 +17,6 @@ use crate::classify::{self, Content, FileClass, Limits, Source};
 use crate::model::TargetStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
@@ -533,15 +532,7 @@ pub fn describe(
 /// `!!/` so a joined path splits unambiguously, and at most [`NAME_MAX`]
 /// bytes (a longer name is cut and ends with `…#` and its position).
 pub fn escape_name(name: &str, seq: u64) -> String {
-    let mut s = String::with_capacity(name.len());
-    for ch in name.chars() {
-        if ch.is_control() {
-            let _ = write!(s, "{}", ch.escape_default());
-        } else {
-            s.push(ch);
-        }
-    }
-    let mut s = s.replace("!/", "!!/");
+    let mut s = crate::model::escape_controls(name).replace("!/", "!!/");
     if s.ends_with('!') {
         // Else `a!` joined to a nested member `x` (`a!!/x`) would read as
         // the escaped name `a!/x`.

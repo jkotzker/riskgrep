@@ -4,6 +4,10 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Fixed
+
+- File names with control characters (a newline, tab, or escape sequence) are written escaped (`\n`, `\t`, `\u{1b}`) in `riskgrep scan` text output and in the Claude Code hook's decision messages, as archive member names already were, so a name cannot forge a line of output or move a terminal's cursor. Other characters, including non-ASCII ones, are written as they are. JSON output and the git hook's message are unchanged. The escaping is `riskgrep_core::model::escape_controls`.
+
 ### Changed
 
 - Upgraded the YARA-X engine from 1.22.0 to 1.23.0. Detection results and scores are unchanged on the evaluation corpus. YARA-X 1.23.0 pins its own `yara-x-macros` and `yara-x-parser` crates to the same version, so `riskgrep-core` no longer pins them. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.

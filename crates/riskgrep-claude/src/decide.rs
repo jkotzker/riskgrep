@@ -3,7 +3,7 @@
 
 use crate::input::Lines;
 use riskgrep_core::config::{Action, ClaudeCodeConfig};
-use riskgrep_core::model::{meets_threshold, round1};
+use riskgrep_core::model::{escape_controls, meets_threshold, round1};
 use riskgrep_core::{Category, Report, TargetReport, TargetStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +131,7 @@ fn top_member(t: &TargetReport, cat: &Category) -> Option<String> {
         .iter()
         .copied()
         .max_by(|a, b| score(a).total_cmp(&score(b)).then(b.cmp(a)))?;
-    let mut s = format!(" in {}!/{top}", t.target);
+    let mut s = format!(" in {}!/{top}", escape_controls(&t.target));
     match members.len() - 1 {
         0 => {}
         1 => s.push_str(", and 1 more member"),
@@ -244,14 +244,17 @@ fn decide_targets(
             items.push(Item {
                 sev,
                 score: -1.0,
-                text: format!("RiskGrep: could not scan {} ({reason})", t.target),
+                text: format!(
+                    "RiskGrep: could not scan {} ({reason})",
+                    escape_controls(&t.target)
+                ),
                 finding: None,
             });
         }
         // Part of what the call would read was never scanned.
         if let Some(not_read) = t.unseen_part() {
             if let Some(sev) = severity(cfg.on_partial.action(cfg.on_error)) {
-                let target = &t.target;
+                let target = escape_controls(&t.target);
                 let what = match t
                     .container
                     .as_ref()
@@ -328,7 +331,7 @@ fn decide_targets(
                 score,
                 text: format!(
                     "RiskGrep: {what}{} scored {} {:.1} ({}){located}. Threshold: {level} at {}.",
-                    t.target,
+                    escape_controls(&t.target),
                     cat.0,
                     score,
                     named,

@@ -1,7 +1,7 @@
 //! Text output: one line per target with findings, then a summary line.
 //! Reports carry no matched content, so neither does this output.
 
-use riskgrep_core::model::round1;
+use riskgrep_core::model::{escape_controls, round1};
 use riskgrep_core::{Evidence, Report, TargetReport, TargetStatus};
 use std::fmt::Write;
 
@@ -22,6 +22,7 @@ pub fn render(report: &Report) -> String {
 }
 
 fn target_line(t: &TargetReport) -> Option<String> {
+    let target = escape_controls(&t.target);
     let scores: Vec<String> = t
         .scores
         .iter()
@@ -29,18 +30,16 @@ fn target_line(t: &TargetReport) -> Option<String> {
         .map(|(c, s)| format!("{} {:.1}", c.0, round1(*s)))
         .collect();
     match &t.status {
-        TargetStatus::Unscanned { reason } => Some(format!("{}  unscanned: {reason}", t.target)),
+        TargetStatus::Unscanned { reason } => Some(format!("{target}  unscanned: {reason}")),
         _ if scores.is_empty() => match &t.status {
-            TargetStatus::Partial { not_read } => {
-                Some(format!("{}  partial: {not_read}", t.target))
-            }
+            TargetStatus::Partial { not_read } => Some(format!("{target}  partial: {not_read}")),
             _ => None,
         },
         status => {
             let evidence: Vec<String> = t.evidence.iter().map(evidence_text).collect();
             let mut line = format!(
                 "{}  {}  [{}]",
-                t.target,
+                target,
                 scores.join("  "),
                 evidence.join("; ")
             );
