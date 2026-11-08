@@ -393,7 +393,13 @@ pub fn show_file(
         )
     } else {
         drop(bytes);
-        summary(&mut rg, path, &class)
+        #[cfg(test)]
+        tests::BEFORE_SUMMARY.with(|h| {
+            if let Some(f) = h.borrow_mut().take() {
+                f();
+            }
+        });
+        summary(&mut rg, &real, &class)
     }
 }
 
@@ -615,6 +621,50 @@ fn summary(rg: &mut RiskGrep, path: &Path, class: &FileClass) -> Result<Shown, R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// Run once, between the read that classifies a file and its
+        /// summary's scan.
+        pub(super) static BEFORE_SUMMARY: RefCell<Option<Box<dyn FnOnce()>>> =
+            RefCell::new(None);
+    }
+
+    #[test]
+    fn the_summary_describes_the_file_that_was_read() {
+        // A link retargeted between the read and the summary's scan: the
+        // summary still describes the file the read classified.
+        let d = tempfile::tempdir().unwrap();
+        let a = d.path().join("a.safetensors");
+        let b = d.path().join("b.safetensors");
+        fs::write(&a, crate::synth::safetensors(&[("x", "F32", &[1000, 512])])).unwrap();
+        fs::write(&b, crate::synth::safetensors(&[("x", "F16", &[7, 9])])).unwrap();
+        let link = d.path().join("link.safetensors");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        let (l, target) = (link.clone(), b.clone());
+        BEFORE_SUMMARY.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                fs::remove_file(&l).unwrap();
+                std::os::unix::fs::symlink(&target, &l).unwrap();
+            }));
+        });
+        let cache = tempfile::tempdir().unwrap();
+        let r = show_file(
+            &ShowConfig::default(),
+            &link,
+            &ShowOptions::default(),
+            Some(cache.path().to_path_buf()),
+        );
+        assert!(
+            BEFORE_SUMMARY.with(|h| h.borrow().is_none()),
+            "hook not run"
+        );
+        let Ok(Shown::Summary(s)) = r else {
+            panic!("expected a summary");
+        };
+        assert!(s.contains("F32 [1000, 512]"), "{s}");
+        assert!(!s.contains("F16"), "{s}");
+    }
 
     fn sp(a: usize, b: usize, r: &str) -> Span {
         Span::new(a..b, r)
