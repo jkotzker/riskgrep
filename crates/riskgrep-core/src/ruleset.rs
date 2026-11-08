@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 static BUILTIN: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/rulesets");
 
@@ -45,6 +45,9 @@ pub struct Ruleset {
     /// built-in rulesets. Changing the public fields afterwards does not
     /// change it.
     digest: [u8; 32],
+    /// The directory, when an untrusted repository supplied this ruleset:
+    /// errors about its files name them and do not quote them.
+    untrusted_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -58,6 +61,22 @@ struct Manifest {
 
 impl Ruleset {
     pub fn load_dir(path: &Path) -> Result<Ruleset> {
+        Self::load_from(path, false)
+    }
+
+    /// [`Ruleset::load_dir`] for a directory an untrusted repository
+    /// supplies: an error about one of its files, now or when the ruleset
+    /// compiles, names the file and does not quote it.
+    pub(crate) fn load_untrusted_dir(path: &Path) -> Result<Ruleset> {
+        Self::load_from(path, true)
+    }
+
+    /// The directory an untrusted repository supplied this ruleset from.
+    pub(crate) fn untrusted_dir(&self) -> Option<&Path> {
+        self.untrusted_dir.as_deref()
+    }
+
+    fn load_from(path: &Path, untrusted: bool) -> Result<Ruleset> {
         let io = |p: &Path, e: std::io::Error| Error(format!("{}: {e}", p.display()));
         let manifest_path = path.join("ruleset.toml");
         let manifest = fs::read_to_string(&manifest_path).map_err(|e| io(&manifest_path, e))?;
@@ -81,8 +100,18 @@ impl Ruleset {
                 }
             }
         }
-        Self::assemble(&manifest, sources, lists, None)
-            .map_err(|e| Error(format!("{}: {e}", path.display())))
+        let mut rs = Self::assemble(&manifest, sources, lists, None).map_err(|e| {
+            Error(if untrusted {
+                format!(
+                    "{}: could not be read as a manifest",
+                    manifest_path.display()
+                )
+            } else {
+                format!("{}: {e}", path.display())
+            })
+        })?;
+        rs.untrusted_dir = untrusted.then(|| path.to_path_buf());
+        Ok(rs)
     }
 
     /// The digest of the files this ruleset was loaded from.
@@ -133,6 +162,7 @@ impl Ruleset {
             sources,
             stopwords,
             digest,
+            untrusted_dir: None,
         })
     }
 }

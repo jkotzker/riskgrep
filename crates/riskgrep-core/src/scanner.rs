@@ -453,7 +453,12 @@ pub fn resolve_rulesets(cfg: &Config, base: Option<&Path>) -> Result<Vec<Ruleset
             Some(b) if d.is_relative() => b.join(d),
             _ => d.clone(),
         };
-        let rs = Ruleset::load_dir(&dir).map_err(|e| error(format!("ruleset: {e}")))?;
+        let load = if cfg.untrusted_ruleset_dirs.contains(d) {
+            Ruleset::load_untrusted_dir
+        } else {
+            Ruleset::load_dir
+        };
+        let rs = load(&dir).map_err(|e| error(format!("ruleset: {e}")))?;
         if all.iter().any(|r| r.id == rs.id) {
             return Err(error(format!(
                 "ruleset id `{}` in {} is already defined",

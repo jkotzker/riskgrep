@@ -1385,6 +1385,154 @@ fn show_reports_an_untrusted_repository_config_without_its_text() {
     assert!(!has(&out.stderr, &value), "the error quoted the file");
 }
 
+/// A repository whose `.riskgrep.toml`, `rules/ruleset.toml`, or
+/// `rules/rules.yar` (`kind`) holds a line that does not parse, directly or
+/// through a link, and the generated text of that line.
+struct BadRepoFile {
+    dir: tempfile::TempDir,
+    _other: tempfile::TempDir,
+    marker: String,
+    name: &'static str,
+}
+
+const MANIFEST: &str = "id = \"probe\"\nversion = \"1\"\nlicence = \"MIT\"\n\
+                        description = \"test\"\ncategories = [\"secret\"]\n";
+
+fn bad_repo_file(name: &'static str, linked: bool) -> BadRepoFile {
+    let dir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    fs::write(dir.path().join("note.txt"), "nothing\n").unwrap();
+    let line = synth::fake_secret("generic_api_key_assignment", 13);
+    let marker = line.split('"').nth(1).unwrap().to_string();
+    let text = format!("{}\n", line.replace('"', ""));
+    let target = if name == ".riskgrep.toml" {
+        dir.path().join(name)
+    } else {
+        fs::write(
+            dir.path().join(".riskgrep.toml"),
+            "extra_ruleset_dirs = [\"rules\"]\n",
+        )
+        .unwrap();
+        fs::create_dir(dir.path().join("rules")).unwrap();
+        if name == "rules.yar" {
+            fs::write(dir.path().join("rules/ruleset.toml"), MANIFEST).unwrap();
+        }
+        dir.path().join("rules").join(name)
+    };
+    if linked {
+        let data = other.path().join("data.txt");
+        fs::write(&data, text).unwrap();
+        std::os::unix::fs::symlink(&data, target).unwrap();
+    } else {
+        fs::write(target, text).unwrap();
+    }
+    BadRepoFile {
+        dir,
+        _other: other,
+        marker,
+        name,
+    }
+}
+
+const BAD_FILES: [&str; 3] = [".riskgrep.toml", "ruleset.toml", "rules.yar"];
+
+#[test]
+fn errors_do_not_quote_files_an_untrusted_repository_supplies() {
+    for name in BAD_FILES {
+        for linked in [false, true] {
+            let r = bad_repo_file(name, linked);
+            let home = tempfile::tempdir().unwrap();
+            let out = riskgrep_in(home.path(), r.dir.path())
+                .args(["scan", "note.txt"])
+                .output()
+                .unwrap();
+            let what = format!("{name}, linked: {linked}");
+            assert!(!has(&out.stdout, &r.marker), "stdout quoted {what}");
+            assert!(!has(&out.stderr, &r.marker), "stderr quoted {what}");
+            assert!(has(&out.stderr, r.name), "the error names {what}");
+            let code = if name == "rules.yar" { 0 } else { 3 };
+            assert_eq!(out.status.code(), Some(code), "{what}");
+            if name == "rules.yar" {
+                assert!(has(&out.stdout, "rule load failure"), "{what}");
+                assert!(has(&out.stderr, "could not be compiled"), "{what}");
+            } else {
+                assert!(has(&out.stderr, "could not be read"), "{what}");
+            }
+        }
+    }
+}
+
+#[test]
+fn rules_compile_does_not_quote_an_untrusted_repositorys_files() {
+    let r = bad_repo_file("rules.yar", true);
+    let home = tempfile::tempdir().unwrap();
+    let out = riskgrep_in(home.path(), r.dir.path())
+        .args(["rules", "compile", "--repo"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!has(&out.stdout, &r.marker));
+    assert!(!has(&out.stderr, &r.marker));
+    assert!(has(&out.stderr, "could not be compiled"));
+}
+
+#[test]
+fn errors_keep_their_detail_for_a_trusted_repository() {
+    for name in BAD_FILES {
+        for linked in [false, true] {
+            let r = bad_repo_file(name, linked);
+            let home = tempfile::tempdir().unwrap();
+            write_user_config(
+                home.path(),
+                &format!("trusted_repos = [\"{}\"]\n", r.dir.path().display()),
+            );
+            let out = riskgrep_in(home.path(), r.dir.path())
+                .args(["scan", "note.txt"])
+                .output()
+                .unwrap();
+            let what = format!("{name}, linked: {linked}");
+            assert!(has(&out.stderr, &r.marker), "detail kept for {what}");
+            let code = if name == "rules.yar" { 0 } else { 3 };
+            assert_eq!(out.status.code(), Some(code), "{what}");
+        }
+    }
+}
+
+#[test]
+fn errors_keep_their_detail_for_the_users_own_rule_directories() {
+    // The repository, untrusted, adds nothing: the directory is the user's.
+    for name in ["ruleset.toml", "rules.yar"] {
+        let r = bad_repo_file(name, false);
+        fs::remove_file(r.dir.path().join(".riskgrep.toml")).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write_user_config(
+            home.path(),
+            &format!(
+                "extra_ruleset_dirs = [\"{}\"]\n",
+                r.dir.path().join("rules").display()
+            ),
+        );
+        let out = riskgrep_in(home.path(), r.dir.path())
+            .args(["scan", "note.txt"])
+            .output()
+            .unwrap();
+        assert!(has(&out.stderr, &r.marker), "{name}");
+
+        // Also when an untrusted repository names the same directory.
+        fs::write(
+            r.dir.path().join(".riskgrep.toml"),
+            "extra_ruleset_dirs = [\"rules\"]\n",
+        )
+        .unwrap();
+        let out = riskgrep_in(home.path(), r.dir.path())
+            .args(["scan", "note.txt"])
+            .output()
+            .unwrap();
+        assert!(has(&out.stderr, &r.marker), "{name}, listed by both");
+    }
+}
+
 #[test]
 fn show_uses_a_repositorys_rules_only_when_it_is_trusted() {
     let dir = tempfile::tempdir().unwrap();

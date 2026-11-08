@@ -141,6 +141,10 @@ pub struct Config {
     pub categories: Option<Vec<Category>>,
     pub rulesets: Vec<String>,
     pub extra_ruleset_dirs: Vec<PathBuf>,
+    /// The entries of `extra_ruleset_dirs` that only a repository outside
+    /// `trusted_repos` names (set by [`load`]): an error about their files
+    /// names the file and does not quote it.
+    pub untrusted_ruleset_dirs: Vec<PathBuf>,
     pub weight_overrides: BTreeMap<String, f64>,
     pub limits: Limits,
     pub ignore: IgnoreRules,
@@ -194,6 +198,7 @@ impl Default for Config {
             categories: None,
             rulesets: Vec::new(),
             extra_ruleset_dirs: Vec::new(),
+            untrusted_ruleset_dirs: Vec::new(),
             weight_overrides: BTreeMap::new(),
             limits: Limits::default(),
             ignore: IgnoreRules::default(),
@@ -339,6 +344,22 @@ fn read_layer(path: &Path) -> Result<Option<Layer>, ConfigError> {
     let invalid = |e: String| ConfigError(format!("invalid config {}: {e}", path.display()));
     let layer: Layer = toml::from_str(&text).map_err(|e| invalid(e.to_string()))?;
     Ok(Some(layer))
+}
+
+/// [`read_layer`] for a repository's file. When `quote` is false, because
+/// the repository is not trusted, the error names the file and leaves out
+/// what the parser would quote from it.
+fn read_repo_layer(path: &Path, quote: bool) -> Result<Option<Layer>, ConfigError> {
+    read_layer(path).map_err(|e| {
+        if quote {
+            e
+        } else {
+            ConfigError(format!(
+                "invalid config {}: could not be read as configuration",
+                path.display()
+            ))
+        }
+    })
 }
 
 impl Layer {
@@ -572,7 +593,8 @@ fn is_trusted(repo_root: &Path, trusted: &[PathBuf]) -> bool {
 /// Defaults, then the user file, then the repository file, then `cli`.
 /// `Mode::ClaudeCode` reads the repository file only when `repo_root` is in
 /// the user file's `trusted_repos`; `trusted_repos` in a repository file is
-/// ignored in every mode. Relative paths in a file (`extra_ruleset_dirs`,
+/// ignored in every mode. In the other modes an error about the file of a
+/// repository not in that list does not quote it. Relative paths in a file (`extra_ruleset_dirs`,
 /// `trusted_repos`) resolve against that file's directory: the user file's
 /// own directory, or the repository root for the repository file.
 pub fn load(
@@ -608,10 +630,22 @@ pub fn load(
         }
     }
     if let Some(root) = repo_root {
-        let allowed = mode != Mode::ClaudeCode || is_trusted(root, &cfg.trusted_repos);
-        if allowed {
-            if let Some(mut layer) = read_layer(&root.join(REPO_CONFIG))? {
+        let trusted = is_trusted(root, &cfg.trusted_repos);
+        if mode != Mode::ClaudeCode || trusted {
+            if let Some(mut layer) = read_repo_layer(&root.join(REPO_CONFIG), trusted)? {
                 layer.resolve_paths(root);
+                if !trusted {
+                    cfg.untrusted_ruleset_dirs = layer
+                        .extra_ruleset_dirs
+                        .iter()
+                        .flatten()
+                        .filter(|d| {
+                            let dir = canonical(d);
+                            !cfg.extra_ruleset_dirs.iter().any(|u| canonical(u) == dir)
+                        })
+                        .cloned()
+                        .collect();
+                }
                 cfg.merge(layer, false, &mut spec);
             }
         }
@@ -702,17 +736,7 @@ pub fn load_show(repo_root: Option<&Path>) -> Result<ShowConfig, ConfigError> {
     let mut trusted = Vec::new();
     for (path, base, from_repo) in paths {
         let untrusted = from_repo && !repo_root.is_some_and(|r| is_trusted(r, &trusted));
-        let read = read_layer(&path).map_err(|e| {
-            if untrusted {
-                ConfigError(format!(
-                    "invalid config {}: cannot be read as configuration",
-                    path.display()
-                ))
-            } else {
-                e
-            }
-        })?;
-        let Some(mut layer) = read else {
+        let Some(mut layer) = read_repo_layer(&path, !untrusted)? else {
             continue;
         };
         layer.resolve_paths(&base);
