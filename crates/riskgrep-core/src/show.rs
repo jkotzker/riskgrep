@@ -326,13 +326,19 @@ pub fn show_file(
     opts: &ShowOptions,
     cache_dir: Option<PathBuf>,
 ) -> Result<Shown, Refusal> {
+    // The file is read through its canonical path, the one the rules see
+    // as the path from its repository's root (`RiskGrep::rules_path`), so
+    // the path they see is the file that was read.
+    let real =
+        fs::canonicalize(path).or_else(|e| refuse(format!("cannot open ({:?})", e.kind())))?;
     // Checked before opening too: opening a FIFO would wait for a writer.
-    match fs::metadata(path) {
+    match fs::metadata(&real) {
         Ok(m) if m.is_file() => {}
         Ok(_) => return refuse("not a regular file"),
         Err(e) => return refuse(format!("cannot open ({:?})", e.kind())),
     }
-    let mut file = File::open(path).or_else(|e| refuse(format!("cannot open ({:?})", e.kind())))?;
+    let mut file =
+        File::open(&real).or_else(|e| refuse(format!("cannot open ({:?})", e.kind())))?;
     let md = file
         .metadata()
         .or_else(|e| refuse(format!("cannot read ({:?})", e.kind())))?;
@@ -357,7 +363,6 @@ pub fn show_file(
         return Err(too_large());
     }
     drop(file);
-    let real = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let name = real
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

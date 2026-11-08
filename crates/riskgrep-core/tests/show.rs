@@ -592,4 +592,18 @@ fn rules_see_the_path_a_scan_gives_them() {
         Ok(Shown::Summary(_)) => panic!("expected a masked view, got a summary"),
         Err(r) => panic!("refused: {r}"),
     }
+
+    // Through a link outside the repository, the rules still see the
+    // linked file's path from its repository's root.
+    let out = tempfile::tempdir().unwrap();
+    let link = out.path().join("link.txt");
+    std::os::unix::fs::symlink(&p, &link).unwrap();
+    match show_with(rules.path(), &link) {
+        Ok(Shown::Masked { text, masks, .. }) => {
+            assert_eq!(masks, 1);
+            assert!(!contains(&text, b"pelican-marmot"), "the word was shown");
+        }
+        Ok(Shown::Summary(_)) => panic!("expected a masked view, got a summary"),
+        Err(r) => panic!("refused: {r}"),
+    }
 }
