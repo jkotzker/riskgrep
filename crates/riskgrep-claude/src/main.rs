@@ -11,8 +11,10 @@
 use riskgrep_claude::bash::bash_targets_within;
 use riskgrep_claude::decide::{decide, decide_names, error_decision, Decision};
 use riskgrep_claude::input::{self, HookInput};
+use riskgrep_claude::mcp;
 use riskgrep_claude::resolve;
-use riskgrep_core::config::{self, Action, Config, McpKind, Mode, Overrides};
+use riskgrep_core::config::{self, Action, Config, Mode, Overrides};
+use riskgrep_core::mcp::McpPlan;
 use riskgrep_core::{Report, RiskGrep};
 use serde_json::json;
 use std::io::{Read, Write};
@@ -111,7 +113,7 @@ fn run(start: Instant) -> Decision {
     let gated = matches!(
         hook.tool_name.as_str(),
         "Read" | "NotebookRead" | "Grep" | "Glob" | "Bash"
-    ) || hook.tool_name.starts_with("mcp__");
+    ) || hook.tool_name.starts_with(mcp::PREFIX);
     if !gated || hook.event.as_deref().is_some_and(|e| e != "PreToolUse") {
         return Decision::NoOpinion;
     }
@@ -220,7 +222,7 @@ fn work(
                 max_depth: None,
             }
         }
-        name if name.starts_with("mcp__") => match mcp_job(hook, &cc, cwd) {
+        name if name.starts_with(mcp::PREFIX) => match mcp_job(hook, &cfg, cwd) {
             Ok(Some(job)) => job,
             Ok(None) => return Decision::NoOpinion,
             Err(()) => {
@@ -264,33 +266,21 @@ fn work(
 }
 
 /// The job for an MCP call: `Ok(None)` when it reads nothing, `Err` when
-/// the tool has no `claude_code.mcp_tools` entry or its path fields cannot
-/// be read.
-fn mcp_job(hook: &HookInput, cc: &config::ClaudeCodeConfig, cwd: &Path) -> Result<Option<Job>, ()> {
-    let tool = cc.mcp_tool(&hook.tool_name).ok_or(())?;
-    if tool.kind == McpKind::None {
-        return Ok(None);
-    }
+/// its files cannot be determined ([`McpPlan::Unresolved`]).
+fn mcp_job(hook: &HookInput, cfg: &Config, cwd: &Path) -> Result<Option<Job>, ()> {
+    let (server, tool) = mcp::split(&hook.tool_name).ok_or(())?;
     let home = std::env::var("HOME").ok();
-    let paths = resolve::mcp_paths(hook, &tool.paths, cwd, home.as_deref()).ok_or(())?;
-    if paths.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(match tool.kind {
-        McpKind::Read => {
-            let files = resolve::existing_files(paths);
-            if files.is_empty() {
-                return Ok(None);
-            }
-            Job::Files(files)
-        }
-        McpKind::Walk => Job::Walk(paths),
-        McpKind::Names | McpKind::None => Job::Names {
-            roots: paths,
+    let plan = mcp::table(cfg).plan(server, tool, &hook.tool_input, cwd, home.as_deref());
+    Ok(Some(match plan {
+        McpPlan::Nothing => return Ok(None),
+        McpPlan::Read(files) => Job::Files(files),
+        McpPlan::Walk(roots) => Job::Walk(roots),
+        McpPlan::Names { roots, max_depth } => Job::Names {
+            roots,
             glob: None,
-            max_depth: tool.max_depth,
+            max_depth,
         },
-        // A kind this build does not know cannot be resolved to paths.
+        // A plan this build does not know cannot be resolved to paths.
         _ => return Err(()),
     }))
 }

@@ -1076,6 +1076,51 @@ fn user_added_mcp_entry_is_used() {
 }
 
 #[test]
+fn shared_mcp_entry_is_used() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.open]\npaths = [\"file\"]\n\n\
+         [mcp.servers.notes.tools.\"*\"]\nkind = \"none\"\n",
+    );
+    let (d, _) = e.run("mcp__notes__open", json!({ "file": f })).decision();
+    assert_eq!(d, "deny");
+    e.run("mcp__notes__list", json!({ "file": f })).silent();
+    // A tool name holding `__` after the server is one tool of that server.
+    e.run("mcp__notes__open__v2", json!({ "file": f })).silent();
+}
+
+#[test]
+fn claude_code_mcp_tools_entry_wins_over_shared_entry() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.open]\nkind = \"none\"\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__open\"]\npaths = [\"file\"]\n\n\
+         [claude_code.mcp_tools.\"mcp__filesystem__read_text_file\"]\nkind = \"none\"\n",
+    );
+    let (d, _) = e.run("mcp__notes__open", json!({ "file": f })).decision();
+    assert_eq!(d, "deny");
+    // The alias replaces a built-in entry too.
+    e.run(FS_READ, json!({ "path": f })).silent();
+    let (d, _) = e
+        .run("mcp__filesystem__read_file", json!({ "path": f }))
+        .decision();
+    assert_eq!(d, "deny");
+}
+
+#[test]
+fn mcp_server_pattern_does_not_hide_a_builtin_entry() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config("[mcp.servers.\"*\".tools.\"*\"]\nkind = \"none\"\n");
+    let (d, _) = e.run(FS_READ, json!({ "path": f })).decision();
+    assert_eq!(d, "deny");
+    e.run("mcp__other__open_file", json!({ "path": f }))
+        .silent();
+}
+
+#[test]
 fn malformed_mcp_entry_is_a_configuration_error() {
     let e = Env::new();
     e.user_config("[claude_code.mcp_tools.\"mcp__notes__open\"]\nkind = \"read\"\n");

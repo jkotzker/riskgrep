@@ -368,48 +368,50 @@ fn load_records_mode() {
 }
 
 #[test]
-fn mcp_tool_defaults_cover_common_servers() {
+fn mcp_defaults_cover_common_servers() {
     use riskgrep_core::config::McpKind;
     let _e = env(None, None);
     let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
-    let cc = &c.claude_code;
-    let read = cc.mcp_tool("mcp__filesystem__read_text_file").unwrap();
+    let m = &c.mcp;
+    let read = m.entry("filesystem", "read_text_file").unwrap();
     assert_eq!(read.kind, McpKind::Read);
     assert_eq!(read.paths, ["path"]);
-    let many = cc
-        .mcp_tool("mcp__plugin_desktop-commander_desktop-commander__read_multiple_files")
+    let many = m
+        .entry(
+            "plugin_desktop-commander_desktop-commander",
+            "read_multiple_files",
+        )
         .unwrap();
     assert_eq!(many.paths, ["paths"]);
     assert_eq!(
-        cc.mcp_tool("mcp__desktop-commander__start_search")
-            .unwrap()
-            .kind,
+        m.entry("desktop-commander", "start_search").unwrap().kind,
         McpKind::Names
     );
-    let list = cc.mcp_tool("mcp__filesystem__list_directory").unwrap();
+    let list = m.entry("filesystem", "list_directory").unwrap();
     assert_eq!((list.kind, list.max_depth), (McpKind::Names, Some(1)));
     assert_eq!(
-        cc.mcp_tool("mcp__filesystem__write_file").unwrap().kind,
+        m.entry("filesystem", "write_file").unwrap().kind,
         McpKind::None
     );
-    assert!(cc.mcp_tool("mcp__other__read_file").is_none());
-    assert!(cc.mcp_tool("Read").is_none());
+    assert!(m.entry("other", "read_file").is_none());
+    // The built-in entries are shared, not under any agent's section.
+    assert!(c.claude_code.mcp_tools.is_empty());
 }
 
 #[test]
-fn mcp_tool_user_entry_adds_and_replaces() {
+fn mcp_user_entry_adds_and_replaces() {
     use riskgrep_core::config::McpKind;
     let _e = env(
         Some(
-            "[claude_code.mcp_tools.\"mcp__notes__open\"]\npaths = [\"file\", \"files\"]\n\n\
-             [claude_code.mcp_tools.\"mcp__db_*__query\"]\nkind = \"none\"\n\n\
-             [claude_code.mcp_tools.\"mcp__filesystem__read_file\"]\npaths = [\"other\"]\n",
+            "[mcp.servers.notes.tools.open]\npaths = [\"file\", \"files\"]\n\n\
+             [mcp.servers.\"db_*\".tools.query]\nkind = \"none\"\n\n\
+             [mcp.servers.filesystem.tools.read_file]\npaths = [\"other\"]\n",
         ),
         None,
     );
     let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
-    let cc = &c.claude_code;
-    let open = cc.mcp_tool("mcp__notes__open").unwrap();
+    let m = &c.mcp;
+    let open = m.entry("notes", "open").unwrap();
     assert_eq!(
         (open.kind, open.paths.as_slice()),
         (
@@ -417,17 +419,44 @@ fn mcp_tool_user_entry_adds_and_replaces() {
             &["file".to_string(), "files".to_string()][..]
         )
     );
-    assert_eq!(
-        cc.mcp_tool("mcp__db_main__query").unwrap().kind,
-        McpKind::None
-    );
-    assert!(cc.mcp_tool("mcp__db_main__drop").is_none());
-    assert_eq!(
-        cc.mcp_tool("mcp__filesystem__read_file").unwrap().paths,
-        ["other"]
-    );
+    assert_eq!(m.entry("db_main", "query").unwrap().kind, McpKind::None);
+    assert!(m.entry("db_main", "drop").is_none());
+    assert_eq!(m.entry("filesystem", "read_file").unwrap().paths, ["other"]);
     // Built-in entries the user did not name stay.
-    assert!(cc.mcp_tool("mcp__filesystem__read_text_file").is_some());
+    assert!(m.entry("filesystem", "read_text_file").is_some());
+}
+
+#[test]
+fn mcp_repo_entry_layers_over_user_entry() {
+    use riskgrep_core::config::McpKind;
+    let e = env(
+        Some(
+            "trusted_repos = [\"{repo}\"]\n\
+             [mcp.servers.notes.tools.open]\npaths = [\"file\"]\n\
+             [mcp.servers.notes.tools.list]\npaths = [\"dir\"]\nkind = \"names\"\n",
+        ),
+        Some("[mcp.servers.notes.tools.open]\nkind = \"none\"\n"),
+    );
+    let c = load(Mode::ClaudeCode, Some(e.root()), Overrides::default()).unwrap();
+    assert_eq!(c.mcp.entry("notes", "open").unwrap().kind, McpKind::None);
+    assert_eq!(c.mcp.entry("notes", "list").unwrap().kind, McpKind::Names);
+}
+
+#[test]
+fn mcp_tools_alias_is_read_as_written() {
+    use riskgrep_core::config::McpKind;
+    let _e = env(
+        Some(
+            "[claude_code.mcp_tools.\"mcp__notes__open\"]\npaths = [\"file\", \"files\"]\n\n\
+             [claude_code.mcp_tools.\"mcp__db_*__query\"]\nkind = \"none\"\n",
+        ),
+        None,
+    );
+    let c = load(Mode::ClaudeCode, None, Overrides::default()).unwrap();
+    let a = &c.claude_code.mcp_tools;
+    assert_eq!(a.len(), 2);
+    assert_eq!(a["mcp__notes__open"].paths, ["file", "files"]);
+    assert_eq!(a["mcp__db_*__query"].kind, McpKind::None);
 }
 
 #[test]
@@ -449,6 +478,38 @@ fn mcp_tool_malformed_entries_rejected() {
             err.0.contains("config") || err.0.contains("mcp_tools"),
             "{bad}: {err}"
         );
+    }
+}
+
+#[test]
+fn mcp_malformed_entries_rejected() {
+    for (bad, what) in [
+        (
+            "[mcp.servers.x.tools.y]\nkind = \"read\"\n",
+            "mcp.servers.\"x\".tools.\"y\"",
+        ),
+        (
+            "[mcp.servers.x.tools.y]\npaths = [\"\"]\n",
+            "mcp.servers.\"x\".tools.\"y\"",
+        ),
+        (
+            "[mcp.servers.\"\".tools.y]\nkind = \"none\"\n",
+            "mcp.servers",
+        ),
+        (
+            "[mcp.servers.x.tools.\"\"]\nkind = \"none\"\n",
+            "mcp.servers.\"x\"",
+        ),
+        (
+            "[mcp.servers.x.tools.y]\npaths = [\"p\"]\nkind = \"write\"\n",
+            "invalid config",
+        ),
+        ("[mcp.servers.x]\nfield = 1\n", "invalid config"),
+        ("[mcp]\nfield = 1\n", "invalid config"),
+    ] {
+        let _e = env(Some(bad), None);
+        let err = load(Mode::ClaudeCode, None, Overrides::default()).unwrap_err();
+        assert!(err.0.contains(what), "{bad}: {err}");
     }
 }
 

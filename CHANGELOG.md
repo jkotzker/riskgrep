@@ -4,12 +4,18 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- MCP entries are configured under a top-level `[mcp]` table keyed by server and tool name (`[mcp.servers.notes.tools.open_note]`), independent of any agent's tool-name format, and the built-in entries for the filesystem server and Desktop Commander live there. Matching and path resolution moved from `riskgrep-claude` into `riskgrep-core`, so other agent integrations can reuse them; the Claude Code hook maps `mcp__<server>__<tool>` onto a server and a tool, splitting at the first `__` after `mcp__` as Claude Code does. `claude_code.mcp_tools` still works and applies to Claude Code only; for the same server and tool its entry wins over an `[mcp]` entry. See [MCP tools](docs/claude-code.md#mcp-tools).
+
 ### Fixed
 
 - File names with control characters (a newline, tab, or escape sequence) are written escaped (`\n`, `\t`, `\u{1b}`) in `riskgrep scan` text output and in the Claude Code hook's decision messages, as archive member names already were, so a name cannot forge a line of output or move a terminal's cursor. Other characters, including non-ASCII ones, are written as they are. JSON output and the git hook's message are unchanged. The escaping is `riskgrep_core::model::escape_controls`.
 
 ### Changed
 
+- `claude_code.mcp_tools` keys are split into a server and a tool, so a `*` no longer matches across the `__` between them, and when several entries match, an exact server name now wins over a server pattern, then an exact tool name over a tool pattern, before key order decides. A key with no `__` after its server part, such as `mcp__*`, still covers every tool of the servers it matches.
+- `riskgrep-core` API: the new `mcp` module holds `McpKind`, `McpTool` (still re-exported from `config`), `McpTable` with its lookup (`entry`) and `plan`, `McpPlan`, and `paths`; `Config::mcp` holds the `[mcp]` entries; `paths::absolute`, `paths::expand_tilde`, and `paths::readable_file` are new. `ClaudeCodeConfig::mcp_tool` is removed, and `ClaudeCodeConfig::mcp_tools` is empty by default, since the built-in entries moved to `McpTable::builtin`.
 - Upgraded the YARA-X engine from 1.22.0 to 1.23.0. Detection results and scores are unchanged on the evaluation corpus. YARA-X 1.23.0 pins its own `yara-x-macros` and `yara-x-parser` crates to the same version, so `riskgrep-core` no longer pins them. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.
 
 ## [1.2.0] – 2026-11-02
