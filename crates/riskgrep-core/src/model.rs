@@ -2,7 +2,29 @@
 //! rule ids, counts, offsets, and structural facts only.
 
 use serde::{Deserialize, Serialize, Serializer};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
+/// A file name or path as written in text output and decision messages:
+/// control characters (newline, tab, escape, and the C1 range) become
+/// `\n`, `\t`, `\u{1b}`, and so on, so a name cannot forge a line or move a
+/// terminal's cursor. Other characters, including non-ASCII ones, are kept.
+/// Archive member names get the same escaping.
+pub fn escape_controls(name: &str) -> Cow<'_, str> {
+    if !name.chars().any(char::is_control) {
+        return Cow::Borrowed(name);
+    }
+    let mut s = String::with_capacity(name.len() + 8);
+    for ch in name.chars() {
+        if ch.is_control() {
+            let _ = write!(s, "{}", ch.escape_default());
+        } else {
+            s.push(ch);
+        }
+    }
+    Cow::Owned(s)
+}
 
 /// Round to one decimal, half away from zero.
 pub fn round1(x: f64) -> f64 {
@@ -241,5 +263,24 @@ mod threshold_tests {
         // Raw 79.94 shows as 79.9, so it does not.
         assert!(!meets_threshold(79.94, 80.0));
         assert!(meets_threshold(79.94, 79.9));
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::escape_controls;
+
+    #[test]
+    fn controls_are_escaped_and_other_text_is_not() {
+        assert_eq!(
+            escape_controls("a\nb\tc\u{1b}[2J\u{85}"),
+            "a\\nb\\tc\\u{1b}[2J\\u{85}"
+        );
+        assert_eq!(
+            escape_controls("caf\u{e9} \u{6a21}\u{578b} a!/b"),
+            "caf\u{e9} \u{6a21}\u{578b} a!/b"
+        );
+        // Escaping twice changes nothing more.
+        assert_eq!(escape_controls(&escape_controls("a\nb")), "a\\nb");
     }
 }
