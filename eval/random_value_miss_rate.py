@@ -1,8 +1,10 @@
 """Miss rate of random credential values through the scanner, one file per value.
 
 Usage: python3 eval/random_value_miss_rate.py <riskgrep binary> <new scratch dir> <values per case> <stopword list>
-(for example: target/release/riskgrep /tmp/miss 8000
+(for example: "$PWD/target/release/riskgrep" /tmp/miss 8000
 crates/riskgrep-core/rulesets/secrets-core/stopwords/secrets_core_generic_api_key.txt).
+The binary and the scratch directory must be absolute paths: scans run from inside
+the scratch directory.
 For 32, 40, and 64 hex digits and 40 letters and digits, writes <values> files per
 layout (XML element, credential-named JSON object, api_key line), scans each
 layout directory with --no-cache, and counts files whose secret score is below 80,
