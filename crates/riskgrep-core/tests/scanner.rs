@@ -254,7 +254,7 @@ fn text_flag_marks_line_addressable_content() {
     )
     .unwrap();
     let png = d.path().join("a.png");
-    fs::write(&png, b"\x89PNG\r\n\x1a\n0000").unwrap();
+    fs::write(&png, synth::png_1x1()).unwrap();
     for f in [&txt, &der, &emb, &png] {
         age(f);
     }
@@ -476,6 +476,78 @@ fn image_skipped() {
     let r = scanner().scan_paths(&[f]);
     assert!(matches!(only(&r).status, TargetStatus::Skipped { .. }));
     assert!(only(&r).scores.is_empty());
+}
+
+fn skipped_reason(t: &TargetReport) -> &str {
+    match &t.status {
+        TargetStatus::Skipped { reason } => reason,
+        s => panic!("expected skipped, got {s:?}"),
+    }
+}
+
+#[test]
+fn a_valid_image_is_skipped_as_an_image() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("pixel");
+    fs::write(&f, synth::png_1x1()).unwrap();
+    let r = scanner().scan_paths(&[f]);
+    assert_eq!(skipped_reason(only(&r)), "png image not scanned in v1");
+}
+
+#[test]
+fn text_that_starts_like_an_image_is_scanned() {
+    let d = tempfile::tempdir().unwrap();
+    let key = aws_line(31);
+    let mut g = scanner();
+    for (name, prefix) in [
+        ("gif8.txt", &b"GIF8 notes for the rollout\n"[..]),
+        ("gif89a", b"GIF89a\n"),
+        ("png4", b"\x89PNG"),
+        ("jpeg3", b"\xFF\xD8\xFF"),
+    ] {
+        let mut bytes = prefix.to_vec();
+        bytes.extend_from_slice(key.as_bytes());
+        let f = d.path().join(name);
+        fs::write(&f, &bytes).unwrap();
+        let r = g.scan_paths(&[f]);
+        let t = only(&r);
+        assert_eq!(t.status, TargetStatus::Scanned, "{name}");
+        assert!(t.scores[&secret()] >= 95.0, "{name}");
+    }
+}
+
+#[test]
+fn an_image_prefix_followed_by_nul_bytes_is_skipped_as_unknown_binary() {
+    let d = tempfile::tempdir().unwrap();
+    let mut g = scanner();
+    for (name, mut bytes) in [
+        ("png", b"\x89PNG\r\n\x1a\n".to_vec()),
+        ("webp", b"RIFF\0\0\0\0WEBP".to_vec()),
+        ("tiff", b"II*\0".to_vec()),
+    ] {
+        bytes.resize(bytes.len() + 64, 0);
+        let f = d.path().join(name);
+        fs::write(&f, &bytes).unwrap();
+        let r = g.scan_paths(&[f]);
+        assert_eq!(
+            skipped_reason(only(&r)),
+            "binary file of unknown format",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn git_blobs_are_classified_by_structure_too() {
+    let mut g = scanner();
+    let key = aws_line(32);
+    let mut text = b"GIF8 notes\n".to_vec();
+    text.extend_from_slice(key.as_bytes());
+    let t = g.scan_blob("gif8.txt", b"b1", &text, None);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert!(t.scores[&secret()] >= 95.0);
+    let t = g.scan_blob("pixel", b"b2", &synth::png_1x1(), None);
+    assert_eq!(skipped_reason(&t), "png image not scanned in v1");
 }
 
 #[test]

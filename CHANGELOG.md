@@ -4,6 +4,10 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Fixed
+
+- A file or archive member that only starts like an image is no longer reported as one. Each format is recognised by more than its first bytes (the full PNG signature and an `IHDR` chunk, `GIF87a` or `GIF89a` with a screen descriptor and a first block, a JPEG marker segment, a `WEBP` chunk, a valid `ftyp` box size, and a TIFF directory offset that fits the file). Text that begins `GIF8` or `\x89PNG` was `skipped` as an image and never read; it is now scanned, and data that begins with an image's signature but holds NUL bytes is `skipped` as a binary of unknown format. A valid image with text after its end is still skipped.
+
 ### Changed
 
 - Upgraded the YARA-X engine from 1.22.0 to 1.23.0. Detection results and scores are unchanged on the evaluation corpus. YARA-X 1.23.0 pins its own `yara-x-macros` and `yara-x-parser` crates to the same version, so `riskgrep-core` no longer pins them. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.

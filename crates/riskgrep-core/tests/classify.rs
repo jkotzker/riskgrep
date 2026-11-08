@@ -208,26 +208,146 @@ fn archives_by_magic() {
     );
 }
 
-#[test]
-fn images_by_magic() {
-    let cases: Vec<(&str, Vec<u8>)> = vec![
-        ("png", vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]),
-        ("jpeg", vec![0xFF, 0xD8, 0xFF, 0xE0]),
-        ("gif", b"GIF89a".to_vec()),
+/// The start of each kind of image, as far as its structure goes.
+fn image_heads() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("png", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec()),
+        ("jpeg", vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]),
+        ("jpeg", vec![0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x43]),
+        ("jpeg", vec![0xFF, 0xD8, 0xFF, 0xE1, 0x12, 0x34]),
+        ("gif", gif_head(b"GIF89a", 0x00, 0x2C)),
+        ("gif", gif_head(b"GIF87a", 0x00, 0x3B)),
+        // A global color table of 2 entries (6 bytes) sits before the block.
+        ("gif", gif_head(b"GIF89a", 0x80, 0x21)),
         ("webp", b"RIFF\x10\x00\x00\x00WEBPVP8 ".to_vec()),
+        ("webp", b"RIFF\x10\x00\x00\x00WEBPVP8L".to_vec()),
+        ("webp", b"RIFF\x10\x00\x00\x00WEBPVP8X".to_vec()),
         ("heic", b"\0\0\0\x18ftypheic".to_vec()),
         ("heic", b"\0\0\0\x18ftypheix".to_vec()),
         ("heic", b"\0\0\0\x18ftypmif1".to_vec()),
         ("tiff", b"II*\0\x08\0\0\0".to_vec()),
         ("tiff", b"MM\0*\0\0\0\x08".to_vec()),
-    ];
-    for (kind, head) in cases {
+    ]
+}
+
+/// A GIF header: `magic`, a logical screen descriptor whose packed field is
+/// `packed`, the global color table that field declares, and a block that
+/// starts with `block`.
+fn gif_head(magic: &[u8], packed: u8, block: u8) -> Vec<u8> {
+    let mut v = magic.to_vec();
+    v.extend_from_slice(&[1, 0, 1, 0, packed, 0, 0]);
+    if packed & 0x80 != 0 {
+        v.resize(v.len() + 3 * (2usize << (packed & 7)), 0xAA);
+    }
+    v.push(block);
+    v
+}
+
+#[test]
+fn images_by_structure() {
+    for (kind, head) in image_heads() {
+        let head = pad(head, 64);
+        assert_eq!(classify("img", &head), FileClass::Image(kind), "{kind}");
         assert_eq!(
-            classify("img", &pad(head, 64)),
+            classify("notes.txt", &head),
             FileClass::Image(kind),
-            "{kind}"
+            "{kind}: the name does not matter"
         );
     }
+    assert_eq!(
+        classify("img", &synth::png_1x1()),
+        FileClass::Image("png"),
+        "a whole PNG"
+    );
+}
+
+/// What the issue's table starts files with: the first bytes of an image
+/// format, and nothing more of its structure.
+fn lookalikes() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("GIF8 text", b"GIF8 notes for the rollout\n".to_vec()),
+        ("GIF89a line", b"GIF89a\n".to_vec()),
+        ("GIF87a line", b"GIF87a\n".to_vec()),
+        ("PNG first four", b"\x89PNG".to_vec()),
+        ("PNG first four, CRLF", b"\x89PNG\r\n".to_vec()),
+        ("JPEG first three", vec![0xFF, 0xD8, 0xFF]),
+        ("JPEG, no marker", vec![0xFF, 0xD8, 0xFF, b'a', b'b']),
+        ("TIFF little endian", b"II*\0".to_vec()),
+        ("TIFF big endian", b"MM\0*".to_vec()),
+        ("TIFF odd offset", b"II*\0\x09\0\0\0".to_vec()),
+        ("TIFF offset 0", b"II*\0\0\0\0\0".to_vec()),
+        ("TIFF text offset", b"MM\0*abcd".to_vec()),
+    ]
+}
+
+#[test]
+fn text_that_starts_like_an_image_is_not_an_image() {
+    let key = format!(
+        "let id = \"{}\";\n",
+        synth::fake_secret("aws_access_key", 1)
+    )
+    .into_bytes();
+    for (why, prefix) in lookalikes() {
+        let mut head = prefix.clone();
+        head.extend_from_slice(&key);
+        let class = classify("notes.txt", &head);
+        let nul = head.contains(&0);
+        let want = if nul {
+            FileClass::UnknownBinary
+        } else {
+            FileClass::Text
+        };
+        assert_eq!(class, want, "{why}");
+    }
+    // The ASCII row of the issue, with no NUL byte anywhere, is text.
+    let mut gif8 = b"GIF8 notes for the rollout\n".to_vec();
+    gif8.extend_from_slice(&key);
+    assert_eq!(classify("gif8.txt", &gif8), FileClass::Text);
+    assert_eq!(classify("", &gif8), FileClass::Text);
+}
+
+#[test]
+fn a_prefix_followed_by_nul_bytes_is_unknown_binary_not_an_image() {
+    let prefixes: Vec<(&str, Vec<u8>)> = vec![
+        ("png", b"\x89PNG\r\n\x1a\n".to_vec()),
+        ("webp", b"RIFF\0\0\0\0WEBP".to_vec()),
+        ("tiff", b"II*\0".to_vec()),
+        ("tiff", b"MM\0*".to_vec()),
+        ("heic", b"\0\0\0\0ftypheic".to_vec()),
+        ("heic", b"\0\0\0\x08ftypheic".to_vec()),
+        ("heic", b"\0\0\0\x19ftypheic".to_vec()),
+        ("jpeg", vec![0xFF, 0xD8, 0xFF, 0x00]),
+        ("gif", b"GIF89a".to_vec()),
+    ];
+    for (kind, mut head) in prefixes {
+        head.resize(head.len() + 64, 0);
+        assert_eq!(classify("img", &head), FileClass::UnknownBinary, "{kind}");
+    }
+    // A PNG signature with a chunk that is not IHDR first.
+    let mut other = b"\x89PNG\r\n\x1a\n\0\0\0\rIDAT".to_vec();
+    other.resize(64, 0);
+    assert_eq!(classify("img", &other), FileClass::UnknownBinary);
+    // A WebP with a first chunk no WebP starts with.
+    let mut chunk = b"RIFF\x10\0\0\0WEBPJUNK".to_vec();
+    chunk.resize(64, 0);
+    assert_eq!(classify("img", &chunk), FileClass::UnknownBinary);
+}
+
+#[test]
+fn an_image_box_or_offset_must_fit_the_file() {
+    // An `ftyp` box larger than the file, and one not a multiple of four.
+    let huge = pad(b"\0\0\x10\0ftypheic".to_vec(), 64);
+    assert_ne!(classify("img", &huge), FileClass::Image("heic"));
+    let ragged = pad(b"\0\0\0\x15ftypheic".to_vec(), 64);
+    assert_ne!(classify("img", &ragged), FileClass::Image("heic"));
+    // A TIFF whose first IFD lies past the end of the file.
+    let past = pad(b"II*\0\xF0\0\0\0".to_vec(), 64);
+    assert_ne!(classify("img", &past), FileClass::Image("tiff"));
+    assert_eq!(
+        classify_sized("img", &past, 0x1000),
+        FileClass::Image("tiff"),
+        "the same head in a larger file"
+    );
 }
 
 #[test]
