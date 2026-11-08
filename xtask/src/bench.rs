@@ -401,6 +401,8 @@ impl CaseSpec {
 /// fixtures written and settled.
 pub(crate) struct Prepared {
     pub root: PathBuf,
+    /// The cargo target directory the binaries are in.
+    pub target: PathBuf,
     pub bench: Bench,
     pub cases: Vec<CaseSpec>,
 }
@@ -572,6 +574,7 @@ pub(crate) fn prepare(build: bool) -> Result<Prepared, String> {
     debug_assert!(cases.iter().map(|c| c.name).eq(CASE_NAMES));
     Ok(Prepared {
         root,
+        target: tdir,
         bench: b,
         cases,
     })
@@ -608,6 +611,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         root,
         bench: mut b,
         cases,
+        ..
     } = prepare(true)?;
     b.runs = runs;
 

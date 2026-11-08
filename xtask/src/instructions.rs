@@ -58,6 +58,14 @@ impl Counter {
             .find(|c| c.name() == s)
     }
 
+    /// Whether this counter can run on this operating system.
+    pub fn supported_here(self) -> bool {
+        match self {
+            Counter::Perf | Counter::Callgrind => cfg!(target_os = "linux"),
+            Counter::Time => cfg!(target_os = "macos"),
+        }
+    }
+
     /// `program args` wrapped in this counter, which writes its result to
     /// `report` (`perf`, `callgrind`) or to standard error (`time`).
     fn command(self, program: &Path, args: &[&str], report: &Path) -> Command {
@@ -104,6 +112,16 @@ impl Counter {
                 .filter(|n| *n > 0)
                 .ok_or_else(|| "/usr/bin/time -l reported no instructions retired".into()),
         }
+    }
+}
+
+/// Removes a previous run's report, so a counter that writes none is not
+/// read with an old count.
+fn clear_report(report: &Path) -> Result<(), String> {
+    match fs::remove_file(report) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{}: {e}", report.display())),
     }
 }
 
@@ -168,14 +186,26 @@ impl Summary {
     }
 }
 
-/// The verdict for one case against its baseline.
+/// The verdict for one case against its baseline. A count more than
+/// `threshold` above the baseline is a regression; one more than `threshold`
+/// below also fails, because work may have been skipped, and a baseline left
+/// that high would let a later regression of the same size pass.
 pub fn judge(count: u64, baseline: u64, threshold: f64) -> Result<(), String> {
-    let limit = baseline as f64 * (1.0 + threshold);
-    if count as f64 > limit {
+    let change = count as f64 / baseline as f64 - 1.0;
+    let pct = |x: f64| x * 100.0;
+    // Compared as counts against limits, not as a ratio, so a count exactly
+    // at a limit passes despite rounding.
+    if count as f64 > baseline as f64 * (1.0 + threshold) {
         Err(format!(
             "{count} instructions is {:+.2}% against the baseline {baseline} (limit {:+.2}%)",
-            (count as f64 / baseline as f64 - 1.0) * 100.0,
-            threshold * 100.0
+            pct(change),
+            pct(threshold)
+        ))
+    } else if (count as f64) < baseline as f64 * (1.0 - threshold) {
+        Err(format!(
+            "{count} instructions is {:+.2}% against the baseline {baseline} (limit {:+.2}%): if the drop is expected, rewrite the baseline",
+            pct(change),
+            -pct(threshold)
         ))
     } else {
         Ok(())
@@ -207,11 +237,21 @@ pub fn check(
     failures
 }
 
-pub fn baseline_path(root: &Path, os: &str, arch: &str, counter: Counter) -> PathBuf {
-    root.join(format!(
-        "bench/instructions-{os}-{arch}-{}.json",
-        counter.name()
-    ))
+/// The baseline file: in `bench/` (committed) for `callgrind`, whose counts
+/// do not depend on the CPU model; in the target directory for `perf` and
+/// `time`, whose counts belong to one machine.
+pub fn baseline_path(
+    root: &Path,
+    target: &Path,
+    os: &str,
+    arch: &str,
+    counter: Counter,
+) -> PathBuf {
+    let dir = match counter {
+        Counter::Callgrind => root.join("bench"),
+        Counter::Perf | Counter::Time => target.to_path_buf(),
+    };
+    dir.join(format!("instructions-{os}-{arch}-{}.json", counter.name()))
 }
 
 /// The `--json` report: every count, and under `baseline` the smallest count
@@ -273,6 +313,7 @@ fn run_case(
         p.bench.wipe()?;
     }
     let report = p.bench.out.join(format!("{}.count", case.name));
+    clear_report(&report)?;
     let mut c = match counter {
         Some(k) => k.command(&case.program, &case.args, &report),
         None => {
@@ -330,6 +371,18 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Counter::from_name(&counter_name)
             .ok_or_else(|| format!("unknown counter `{counter_name}`\n{USAGE}"))?
     };
+    if !counter.supported_here() {
+        return Err(format!(
+            "the {} counter does not run on {}: use {}",
+            counter.name(),
+            std::env::consts::OS,
+            if cfg!(target_os = "macos") {
+                "time"
+            } else {
+                "callgrind or perf"
+            }
+        ));
+    }
     // A scan that runs out of time reads less and so counts fewer
     // instructions; under Valgrind the default 2 s budgets are easily spent.
     // The budgets only cut work short, so raising them changes no count of a
@@ -365,7 +418,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         fs::write(path, format!("{doc:#}\n")).map_err(|e| format!("{}: {e}", path.display()))?;
     }
 
-    let path = baseline_path(&p.root, os, arch, counter);
+    let path = baseline_path(&p.root, &p.target, os, arch, counter);
     let shown = path
         .strip_prefix(&p.root)
         .unwrap_or(&path)
@@ -415,7 +468,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let failures = check(&measured, &baseline, THRESHOLD);
     if failures.is_empty() {
         println!(
-            "\nno case is more than {:.1}% over {shown}",
+            "\nevery case is within {:.1}% of {shown}",
             THRESHOLD * 100.0
         );
         Ok(())
@@ -480,7 +533,27 @@ mod tests {
     fn judge_uses_the_threshold() {
         assert!(judge(1_020, 1_000, 0.02).is_ok());
         assert!(judge(1_021, 1_000, 0.02).is_err());
-        assert!(judge(900, 1_000, 0.02).is_ok());
+        assert!(judge(980, 1_000, 0.02).is_ok());
+        // A large drop also fails: work may have been skipped, and a stale
+        // high baseline would hide later regressions.
+        let drop = judge(979, 1_000, 0.02).unwrap_err();
+        assert!(drop.contains("rewrite the baseline"), "{drop}");
+    }
+
+    #[test]
+    fn time_counts_only_on_macos() {
+        assert_eq!(Counter::Time.supported_here(), cfg!(target_os = "macos"));
+        assert!(Counter::Callgrind.supported_here() || cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn stale_report_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("x.count");
+        fs::write(&report, "totals: 5\n").unwrap();
+        clear_report(&report).unwrap();
+        assert!(Counter::Callgrind.read("", &report).is_err());
+        clear_report(&report).unwrap();
     }
 
     #[test]
@@ -518,11 +591,16 @@ mod tests {
 
     #[test]
     fn baseline_is_per_os_and_counter() {
-        let p = baseline_path(Path::new("/r"), "linux", "x86_64", Counter::Callgrind);
+        let (root, target) = (Path::new("/r"), Path::new("/t"));
+        let p = baseline_path(root, target, "linux", "x86_64", Counter::Callgrind);
         assert_eq!(
             p,
             Path::new("/r/bench/instructions-linux-x86_64-callgrind.json")
         );
+        // Counts from one machine's hardware counter stay out of the
+        // repository.
+        let p = baseline_path(root, target, "macos", "aarch64", Counter::Time);
+        assert_eq!(p, Path::new("/t/instructions-macos-aarch64-time.json"));
     }
 
     #[test]
@@ -539,7 +617,7 @@ mod tests {
     #[test]
     fn committed_baseline_covers_every_case() {
         let root = crate::eval::workspace_root();
-        let path = baseline_path(&root, "linux", "x86_64", Counter::Callgrind);
+        let path = baseline_path(&root, &root, "linux", "x86_64", Counter::Callgrind);
         let b: BTreeMap<String, u64> =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let mut ours: Vec<&str> = bench::CASE_NAMES.to_vec();
