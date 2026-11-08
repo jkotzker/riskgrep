@@ -1076,6 +1076,153 @@ fn user_added_mcp_entry_is_used() {
 }
 
 #[test]
+fn shared_mcp_entry_is_used() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.open]\npaths = [\"file\"]\n\n\
+         [mcp.servers.notes.tools.\"*\"]\nkind = \"none\"\n",
+    );
+    let (d, _) = e.run("mcp__notes__open", json!({ "file": f })).decision();
+    assert_eq!(d, "deny");
+    e.run("mcp__notes__list", json!({ "file": f })).silent();
+    // A tool name holding `__` after the server is one tool of that server.
+    e.run("mcp__notes__open__v2", json!({ "file": f })).silent();
+}
+
+#[test]
+fn claude_code_mcp_tools_entry_wins_over_shared_entry() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.open]\nkind = \"none\"\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__open\"]\npaths = [\"file\"]\n\n\
+         [claude_code.mcp_tools.\"mcp__filesystem__read_text_file\"]\nkind = \"none\"\n",
+    );
+    let (d, _) = e.run("mcp__notes__open", json!({ "file": f })).decision();
+    assert_eq!(d, "deny");
+    // The alias replaces a built-in entry too.
+    e.run(FS_READ, json!({ "path": f })).silent();
+    let (d, _) = e
+        .run("mcp__filesystem__read_file", json!({ "path": f }))
+        .decision();
+    assert_eq!(d, "deny");
+}
+
+const UNRESOLVED_CMD: &str = "cat \"$(printf f)\"";
+
+#[test]
+fn mcp_on_unresolved_is_separate_from_the_shell_setting() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    let tool = "mcp__other__open_file";
+    let reason = format!("RiskGrep: could not determine the files {tool} reads");
+    // `mcp.on_unresolved` asks about MCP tools only.
+    e.user_config("[mcp]\non_unresolved = \"ask\"\n");
+    assert_eq!(
+        e.run(tool, json!({ "path": f })).decision(),
+        ("ask".to_string(), reason.clone())
+    );
+    e.run("Bash", json!({ "command": UNRESOLVED_CMD })).silent();
+    // The shell setting alone still covers MCP tools, as before.
+    e.user_config("[claude_code]\non_unresolved = \"ask\"\n");
+    assert_eq!(e.run(tool, json!({ "path": f })).decision().0, "ask");
+    // ... until `mcp.on_unresolved` is set.
+    e.user_config("[claude_code]\non_unresolved = \"ask\"\n\n[mcp]\non_unresolved = \"allow\"\n");
+    e.run(tool, json!({ "path": f })).silent();
+    assert_eq!(
+        e.run("Bash", json!({ "command": UNRESOLVED_CMD }))
+            .decision()
+            .0,
+        "ask"
+    );
+    // The agent's section overrides the shared setting.
+    e.user_config(
+        "[mcp]\non_unresolved = \"ask\"\n\n[claude_code.mcp]\non_unresolved = \"deny\"\n",
+    );
+    assert_eq!(
+        e.run(tool, json!({ "path": f })).decision(),
+        ("deny".to_string(), reason)
+    );
+    e.user_config(
+        "[mcp]\non_unresolved = \"ask\"\n\n[claude_code.mcp]\non_unresolved = \"allow\"\n",
+    );
+    e.run(tool, json!({ "path": f })).silent();
+}
+
+#[test]
+fn mcp_server_entry_decision_covers_its_unmapped_tools() {
+    let e = Env::new();
+    let clean = e.write("clean.txt", b"nothing here\n");
+    let flagged = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.desktop-commander.tools.\"*\"]\ndecision = \"ask\"\n\n\
+         [mcp.servers.desktop-commander.tools.kill_process]\nkind = \"none\"\n\n\
+         [mcp.servers.notes.tools.\"*\"]\ndecision = \"deny\"\n",
+    );
+    let tool = "mcp__desktop-commander__start_process";
+    assert_eq!(
+        e.run(tool, json!({ "command": "ls" })).decision(),
+        (
+            "ask".to_string(),
+            format!("RiskGrep: the MCP configuration asks before {tool}")
+        )
+    );
+    // The server's built-in and own entries still apply.
+    e.run(
+        "mcp__desktop-commander__read_file",
+        json!({ "path": clean }),
+    )
+    .silent();
+    let (d, _) = e
+        .run(
+            "mcp__desktop-commander__read_file",
+            json!({ "path": flagged }),
+        )
+        .decision();
+    assert_eq!(d, "deny");
+    e.run("mcp__desktop-commander__kill_process", json!({ "pid": 1 }))
+        .silent();
+    // The plugin's server name is another server.
+    e.run(
+        "mcp__plugin_desktop-commander_desktop-commander__start_process",
+        json!({ "command": "ls" }),
+    )
+    .silent();
+    assert_eq!(
+        e.run("mcp__notes__open", json!({})).decision(),
+        (
+            "deny".to_string(),
+            "RiskGrep: the MCP configuration denies mcp__notes__open".to_string()
+        )
+    );
+}
+
+#[test]
+fn agent_section_decision_overrides_shared_entry() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.\"*\"]\ndecision = \"ask\"\n\n\
+         [claude_code.mcp.servers.notes.tools.\"*\"]\nkind = \"none\"\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__open\"]\ndecision = \"deny\"\n",
+    );
+    e.run("mcp__notes__list", json!({ "file": f })).silent();
+    assert_eq!(e.run("mcp__notes__open", json!({})).decision().0, "deny");
+}
+
+#[test]
+fn mcp_server_pattern_does_not_hide_a_builtin_entry() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config("[mcp.servers.\"*\".tools.\"*\"]\nkind = \"none\"\n");
+    let (d, _) = e.run(FS_READ, json!({ "path": f })).decision();
+    assert_eq!(d, "deny");
+    e.run("mcp__other__open_file", json!({ "path": f }))
+        .silent();
+}
+
+#[test]
 fn malformed_mcp_entry_is_a_configuration_error() {
     let e = Env::new();
     e.user_config("[claude_code.mcp_tools.\"mcp__notes__open\"]\nkind = \"read\"\n");
