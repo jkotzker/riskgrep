@@ -870,6 +870,8 @@ mod tests {
             not_read: 2,
             opened: 0,
             path_allowlisted: 0,
+            skipped_kinds: BTreeMap::new(),
+            opened_formats: BTreeMap::new(),
             listed: members
                 .iter()
                 .map(|(m, score)| MemberReport {

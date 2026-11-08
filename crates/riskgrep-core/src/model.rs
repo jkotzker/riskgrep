@@ -179,10 +179,23 @@ pub struct ContainerReport {
     /// Members of formats that are not scanned (images, binary files of
     /// unknown format).
     pub skipped: u64,
+    /// `skipped` by kind: an image's format (`png`, `jpeg`), `unknown` for a
+    /// binary of no format the scanner recognises, or `link_or_device` for
+    /// an entry with nothing to read. Each member counts once, at any
+    /// nesting level, so the counts add up to `skipped`; no member is named.
+    /// Serialized only when not empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub skipped_kinds: BTreeMap<String, u64>,
     /// Members not read or not scanned at all.
     pub not_read: u64,
     /// Nested containers opened; what they hold is counted as members.
     pub opened: u64,
+    /// `opened` by the format that read each nested container (`zip`, `tar`,
+    /// `gzip`, `sqlite`), counted as `skipped_kinds` is. A tar inside a gzip
+    /// stream is read with the stream, as one container, so it is not
+    /// counted. Serialized only when not empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub opened_formats: BTreeMap<String, u64>,
     /// Members scanned (whole or in part) to which a path allowlist applied;
     /// counted, not named. Serialized only when not 0.
     #[serde(skip_serializing_if = "is_zero")]

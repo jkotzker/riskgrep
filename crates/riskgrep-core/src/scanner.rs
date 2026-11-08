@@ -145,8 +145,10 @@ impl ContainerInfo {
             scanned: self.counts.scanned,
             read_in_part: self.read_in_part,
             skipped: self.counts.skipped,
+            skipped_kinds: self.counts.skipped_kinds,
             not_read: self.not_read,
             opened: self.opened,
+            opened_formats: self.counts.opened_formats,
             path_allowlisted: self.counts.path_allowlisted,
             listed,
         }
@@ -290,6 +292,11 @@ fn unscanned(reason: &str) -> TargetStatus {
     TargetStatus::Unscanned {
         reason: reason.into(),
     }
+}
+
+/// A kind count with owned keys, for the report and the cache.
+fn owned(m: &BTreeMap<&'static str, u64>) -> BTreeMap<String, u64> {
+    m.iter().map(|(k, n)| (k.to_string(), *n)).collect()
 }
 
 /// Classification of a container member, as for a file.
@@ -1142,6 +1149,8 @@ impl RiskGrep {
             scanned: scanned.iter().filter(|s| !in_part.contains(s)).count() as u64,
             skipped: x.skipped,
             path_allowlisted: allowlisted.len() as u64,
+            skipped_kinds: owned(&x.skipped_kinds),
+            opened_formats: owned(&x.opened_formats),
             // Only members a report lists: with evidence, or not read whole.
             allowlisted_listed: allowlisted
                 .iter()

@@ -337,6 +337,8 @@ mod tests {
             not_read: 1,
             opened: 0,
             path_allowlisted: 0,
+            skipped_kinds: BTreeMap::new(),
+            opened_formats: BTreeMap::new(),
             listed: vec![],
         });
         let r = Report::from_targets("0", "b", vec![c]);

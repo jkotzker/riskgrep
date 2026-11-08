@@ -205,6 +205,8 @@ fn container_rows_round_trip() {
         skipped: 1,
         path_allowlisted: 1,
         allowlisted_listed: vec!["inner.zip!/config/.env".into()],
+        skipped_kinds: [("png".to_string(), 1)].into(),
+        opened_formats: [("zip".to_string(), 1)].into(),
     };
     c.put_entry([3; 32], "b1", &[e.clone()], Some(&counts), true);
     let got = c.entry([3; 32], "b1").unwrap();

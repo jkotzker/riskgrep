@@ -11,7 +11,7 @@ use crate::model::Evidence;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{Metadata, OpenOptions, Permissions};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -83,6 +83,12 @@ pub struct ContainerRow {
     /// Members a path allowlist applied to.
     #[serde(default)]
     pub path_allowlisted: u64,
+    /// `skipped` by kind (see [`crate::model::ContainerReport::skipped_kinds`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skipped_kinds: BTreeMap<String, u64>,
+    /// Nested containers opened, by format.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub opened_formats: BTreeMap<String, u64>,
     /// Those of them with evidence: the members a report lists.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowlisted_listed: Vec<String>,
