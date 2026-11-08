@@ -47,7 +47,7 @@ fn words(command: &str) -> Option<Vec<String>> {
             b'\'' => {
                 let end = i + 1 + b[i + 1..].iter().position(|&c| c == b'\'')?;
                 let inner = &command[i + 1..end];
-                if inner.chars().any(char::is_control) {
+                if inner.chars().any(riskgrep_core::model::needs_escape) {
                     return None;
                 }
                 // The closing quote must end the word.
@@ -122,9 +122,13 @@ pub fn is_masked_view(command: &str, trusted: &str) -> bool {
 
 /// `s` as one shell word the exemption accepts: plain when it can be,
 /// otherwise single-quoted; `None` when it holds a single quote or a
-/// control character.
+/// character `escape_controls` would escape (a control character, a
+/// bidirectional mark, a line separator).
 pub fn shell_word(s: &str) -> Option<String> {
-    if s.is_empty() || s.chars().any(|c| c == '\'' || c.is_control()) {
+    if s.is_empty()
+        || s.chars()
+            .any(|c| c == '\'' || riskgrep_core::model::needs_escape(c))
+    {
         return None;
     }
     if s.bytes().all(plain_char) {
@@ -262,6 +266,24 @@ mod tests {
             masked_view_command("/x y/riskgrep", "a").as_deref(),
             Some("'/x y/riskgrep' show a")
         );
+    }
+
+    #[test]
+    fn names_with_hidden_format_characters_get_no_command() {
+        for f in [
+            "a\u{202e}b.env",
+            "a\u{2028}b.env",
+            "a\u{2066}b.env",
+            "a\n.env",
+        ] {
+            assert_eq!(
+                masked_view_command("/opt/rg/bin/riskgrep", f),
+                None,
+                "{f:?}"
+            );
+            let c = format!("/opt/rg/bin/riskgrep show '{f}'");
+            assert!(!is_masked_view(&c, "/opt/rg/bin/riskgrep"), "{f:?}");
+        }
     }
 
     #[test]

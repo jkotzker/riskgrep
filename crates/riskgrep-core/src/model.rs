@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 /// format character that changes how text is ordered or broken into lines
 /// (the bidirectional marks, embeddings, overrides, and isolates, and the
 /// line and paragraph separators).
-fn needs_escape(ch: char) -> bool {
+pub fn needs_escape(ch: char) -> bool {
     ch.is_control()
         || matches!(
             ch,
