@@ -366,7 +366,7 @@ fn matches(key: &str, name: &str) -> Option<bool> {
 
 /// Whether `name` matches `pat`, where `*` stands for any run of
 /// characters and every other character for itself.
-pub fn wildcard(pat: &str, name: &str) -> bool {
+fn wildcard(pat: &str, name: &str) -> bool {
     let mut parts = pat.split('*');
     let first = parts.next().unwrap_or_default();
     let Some(mut rest) = name.strip_prefix(first) else {
