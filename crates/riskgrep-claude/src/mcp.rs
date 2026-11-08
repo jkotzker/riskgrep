@@ -3,10 +3,14 @@
 //! ([`riskgrep_core::mcp`]).
 
 use riskgrep_core::config::Config;
-use riskgrep_core::mcp::McpTable;
+use riskgrep_core::mcp::{wildcard, McpTable, McpTool};
 
 /// The prefix of every MCP tool name in Claude Code.
 pub const PREFIX: &str = "mcp__";
+
+/// The server name Claude Code gives Desktop Commander when it is installed
+/// as a plugin, `plugin_<plugin>_<server>`.
+const DESKTOP_COMMANDER_PLUGIN: &str = "plugin_desktop-commander_desktop-commander";
 
 /// The server and tool of MCP tool `name`, split as Claude Code 2.1.318
 /// splits it: the server is the text between `mcp__` and the next `__`,
@@ -18,30 +22,23 @@ pub fn split(name: &str) -> Option<(&str, &str)> {
     Some(rest.split_once("__").unwrap_or((rest, "")))
 }
 
-/// The server and tool keys of a `claude_code.mcp_tools` key, split as
-/// [`split`] splits a name. A key with no `__` after its server part (such
-/// as `mcp__*`) covers every tool of the servers it matches when that part
-/// holds `*`.
-fn alias_key(key: &str) -> Option<(&str, &str)> {
-    let (server, tool) = split(key)?;
-    if tool.is_empty() && !key.strip_prefix(PREFIX)?.contains("__") && server.contains('*') {
-        return Some((server, "*"));
-    }
-    Some((server, tool))
-}
-
 /// The MCP settings Claude Code calls are judged by: the shared `[mcp]`
-/// table, with `[claude_code.mcp]` and then every `claude_code.mcp_tools`
-/// entry laid over it, so for the same server and tool key the
-/// `claude_code.mcp_tools` entry wins, then `[claude_code.mcp]`.
-/// `on_unresolved` is `claude_code.mcp.on_unresolved`, else
-/// `mcp.on_unresolved`, else `claude_code.on_unresolved`, which covered MCP
-/// tools before the MCP settings existed.
+/// table with `[claude_code.mcp]` laid over it, and the built-in Desktop
+/// Commander entries under the server name of its plugin, below any entry
+/// the configuration makes for that server and tool. `on_unresolved` is
+/// `claude_code.mcp.on_unresolved`, else `mcp.on_unresolved`, else
+/// `claude_code.on_unresolved`, which covered MCP tools before the MCP
+/// settings existed. `claude_code.mcp_tools` is consulted by [`entry`].
 pub fn table(cfg: &Config) -> McpTable {
     let mut out = cfg.mcp.overlay(&cfg.claude_code.mcp);
-    for (key, entry) in &cfg.claude_code.mcp_tools {
-        if let Some((server, tool)) = alias_key(key) {
-            out.insert(server, tool, entry.clone());
+    if let Some(builtin) = McpTable::builtin().servers.remove("desktop-commander") {
+        let tools = &mut out
+            .servers
+            .entry(DESKTOP_COMMANDER_PLUGIN.to_string())
+            .or_default()
+            .tools;
+        for (tool, entry) in builtin.tools {
+            tools.entry(tool).or_insert(entry);
         }
     }
     out.on_unresolved
@@ -49,10 +46,35 @@ pub fn table(cfg: &Config) -> McpTable {
     out
 }
 
+/// The entry for MCP tool `name`, with `table` from [`table`]. A
+/// `claude_code.mcp_tools` key is matched against the whole name, so a `*`
+/// in it can span the `__` between server and tool. In order: the
+/// `claude_code.mcp_tools` key equal to `name`; an entry of `table` naming
+/// exactly that server and tool; the first `claude_code.mcp_tools` key with
+/// `*` in key order that matches; then the patterns of `table`.
+pub fn entry<'a>(cfg: &'a Config, table: &'a McpTable, name: &str) -> Option<&'a McpTool> {
+    let aliases = &cfg.claude_code.mcp_tools;
+    if let Some(e) = aliases.get(name) {
+        return Some(e);
+    }
+    let (server, tool) = split(name)?;
+    table
+        .servers
+        .get(server)
+        .and_then(|s| s.tools.get(tool))
+        .or_else(|| {
+            aliases
+                .iter()
+                .find(|(k, _)| k.contains('*') && wildcard(k, name))
+                .map(|(_, e)| e)
+        })
+        .or_else(|| table.entry(server, tool))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use riskgrep_core::mcp::{McpKind, McpTool};
+    use riskgrep_core::mcp::McpKind;
 
     #[test]
     fn split_matches_claude_code() {
@@ -63,7 +85,7 @@ mod tests {
         assert_eq!(split("Read"), None);
     }
 
-    fn entry(kind: McpKind) -> McpTool {
+    fn tool(kind: McpKind) -> McpTool {
         McpTool {
             paths: vec!["p".into()],
             kind,
@@ -75,40 +97,85 @@ mod tests {
     #[test]
     fn alias_entries_lay_over_shared_entries() {
         let mut cfg = Config::default();
-        cfg.mcp.insert("notes", "open", entry(McpKind::Walk));
-        cfg.mcp.insert("notes", "list", entry(McpKind::Names));
+        cfg.mcp.insert("notes", "open", tool(McpKind::Walk));
+        cfg.mcp.insert("notes", "list", tool(McpKind::Names));
         for (k, kind) in [
             ("mcp__notes__open", McpKind::Read),
             ("mcp__db_*__query", McpKind::None),
             ("mcp__x*", McpKind::Names),
             ("mcp__filesystem__read_file", McpKind::Walk),
         ] {
-            cfg.claude_code.mcp_tools.insert(k.into(), entry(kind));
+            cfg.claude_code.mcp_tools.insert(k.into(), tool(kind));
         }
         let t = table(&cfg);
-        let kind = |s, tool| t.entry(s, tool).map(|e| e.kind);
-        // The alias wins for the same key; other shared entries stay.
-        assert_eq!(kind("notes", "open"), Some(McpKind::Read));
-        assert_eq!(kind("notes", "list"), Some(McpKind::Names));
-        assert_eq!(kind("db_main", "query"), Some(McpKind::None));
-        assert_eq!(kind("db_main", "drop"), None);
-        assert_eq!(kind("xyz", "anything"), Some(McpKind::Names));
-        assert_eq!(kind("filesystem", "read_file"), Some(McpKind::Walk));
+        let kind = |name| entry(&cfg, &t, name).map(|e| e.kind);
+        // The alias wins for the same name; other shared entries stay.
+        assert_eq!(kind("mcp__notes__open"), Some(McpKind::Read));
+        assert_eq!(kind("mcp__notes__list"), Some(McpKind::Names));
+        assert_eq!(kind("mcp__db_main__query"), Some(McpKind::None));
+        assert_eq!(kind("mcp__db_main__drop"), None);
+        assert_eq!(kind("mcp__xyz__anything"), Some(McpKind::Names));
+        assert_eq!(kind("mcp__filesystem__read_file"), Some(McpKind::Walk));
         // Built-in entries the alias did not name stay.
-        assert_eq!(kind("filesystem", "read_text_file"), Some(McpKind::Read));
+        assert_eq!(kind("mcp__filesystem__read_text_file"), Some(McpKind::Read));
+        assert_eq!(kind("Read"), None);
     }
 
     #[test]
-    fn alias_key_without_tool_part_is_a_server_pattern() {
-        assert_eq!(alias_key("mcp__*"), Some(("*", "*")));
-        assert_eq!(alias_key("mcp__notes_*"), Some(("notes_*", "*")));
-        // A `*` no longer spans the server and tool: this key covers every
-        // tool of servers ending in `read_file`, not a tool of that name.
-        assert_eq!(alias_key("mcp__*read_file"), Some(("*read_file", "*")));
-        assert_eq!(alias_key("mcp__*__read_file"), Some(("*", "read_file")));
-        // Without `*` the key names a tool-less name exactly.
-        assert_eq!(alias_key("mcp__notes"), Some(("notes", "")));
-        assert_eq!(alias_key("Read"), None);
+    fn alias_keys_match_the_whole_name() {
+        let mut cfg = Config::default();
+        for (k, kind) in [
+            ("mcp__*read_file", McpKind::Read),
+            ("mcp__*__open", McpKind::Walk),
+            ("mcp__notes__*", McpKind::None),
+        ] {
+            cfg.claude_code.mcp_tools.insert(k.into(), tool(kind));
+        }
+        let t = table(&cfg);
+        let kind = |name| entry(&cfg, &t, name).map(|e| e.kind);
+        // A `*` spans the `__` between server and tool.
+        assert_eq!(kind("mcp__notes__read_file"), Some(McpKind::Read));
+        // The first key in key order wins, whatever names the server.
+        assert_eq!(kind("mcp__notes__open"), Some(McpKind::Walk));
+        assert_eq!(kind("mcp__notes__list"), Some(McpKind::None));
+        assert_eq!(kind("mcp__other__list"), None);
+    }
+
+    #[test]
+    fn exact_table_entry_comes_before_alias_patterns_and_table_patterns_after() {
+        let mut cfg = Config::default();
+        cfg.mcp.insert("notes", "open", tool(McpKind::Walk));
+        cfg.mcp.insert("notes", "*", tool(McpKind::Names));
+        cfg.claude_code
+            .mcp_tools
+            .insert("mcp__notes__l*".into(), tool(McpKind::None));
+        let t = table(&cfg);
+        let kind = |name| entry(&cfg, &t, name).map(|e| e.kind);
+        assert_eq!(kind("mcp__notes__open"), Some(McpKind::Walk));
+        assert_eq!(kind("mcp__notes__list"), Some(McpKind::None));
+        assert_eq!(kind("mcp__notes__read"), Some(McpKind::Names));
+    }
+
+    #[test]
+    fn plugin_server_gets_desktop_commander_entries_below_the_configuration() {
+        let mut cfg = Config::default();
+        let t = table(&cfg);
+        let builtin = McpTable::builtin();
+        assert!(!builtin.servers.contains_key(DESKTOP_COMMANDER_PLUGIN));
+        assert_eq!(
+            t.servers[DESKTOP_COMMANDER_PLUGIN],
+            builtin.servers["desktop-commander"]
+        );
+        // A configured entry stays, and one for the unsuffixed server does
+        // not reach the plugin's.
+        cfg.mcp
+            .insert(DESKTOP_COMMANDER_PLUGIN, "read_file", tool(McpKind::None));
+        cfg.mcp
+            .insert("desktop-commander", "list_directory", tool(McpKind::None));
+        let t = table(&cfg);
+        let kind = |tool| t.entry(DESKTOP_COMMANDER_PLUGIN, tool).map(|e| e.kind);
+        assert_eq!(kind("read_file"), Some(McpKind::None));
+        assert_eq!(kind("list_directory"), Some(McpKind::Names));
     }
 
     #[test]
@@ -144,9 +211,9 @@ mod tests {
             .insert("mcp__s__x".into(), decided(Action::Allow));
         cfg.claude_code.mcp.insert("s", "x", decided(Action::Deny));
         let t = table(&cfg);
-        let d = |n| t.entry("s", n).and_then(|e| e.decision);
-        assert_eq!(d("y"), Some(Action::Deny));
+        let d = |n| entry(&cfg, &t, n).and_then(|e| e.decision);
+        assert_eq!(d("mcp__s__y"), Some(Action::Deny));
         // `claude_code.mcp_tools` wins over `[claude_code.mcp]`.
-        assert_eq!(d("x"), Some(Action::Allow));
+        assert_eq!(d("mcp__s__x"), Some(Action::Allow));
     }
 }

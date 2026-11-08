@@ -378,17 +378,16 @@ fn mcp_defaults_cover_common_servers() {
     let read = m.entry("filesystem", "read_text_file").unwrap();
     assert_eq!(read.kind, McpKind::Read);
     assert_eq!(read.paths, ["path"]);
-    let many = m
-        .entry(
-            "plugin_desktop-commander_desktop-commander",
-            "read_multiple_files",
-        )
-        .unwrap();
+    let many = m.entry("desktop-commander", "read_multiple_files").unwrap();
     assert_eq!(many.paths, ["paths"]);
     assert_eq!(
         m.entry("desktop-commander", "start_search").unwrap().kind,
         McpKind::Names
     );
+    // One agent's name for a server is that agent's adapter's concern.
+    assert!(m
+        .entry("plugin_desktop-commander_desktop-commander", "read_file")
+        .is_none());
     let list = m.entry("filesystem", "list_directory").unwrap();
     assert_eq!((list.kind, list.max_depth), (McpKind::Names, Some(1)));
     assert_eq!(

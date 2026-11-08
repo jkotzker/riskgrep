@@ -95,9 +95,9 @@ pub struct ClaudeCodeConfig {
     pub time_budget_ms: u64,
     /// `[claude_code.mcp_tools."mcp__<server>__<tool>"]` entries: MCP
     /// entries keyed by Claude Code tool name, the form 1.2.0 shipped. The
-    /// Claude Code adapter maps each onto its server and tool and lays them
-    /// over [`Config::mcp`]. Empty by default; the built-in entries are in
-    /// [`McpTable::builtin`].
+    /// Claude Code adapter matches each key against the whole tool name and
+    /// consults them beside [`Config::mcp`]. Empty by default; the built-in
+    /// entries are in [`McpTable::builtin`].
     pub mcp_tools: BTreeMap<String, McpTool>,
     /// `[claude_code.mcp]`: MCP settings for Claude Code only, laid over
     /// [`Config::mcp`] by the Claude Code adapter (same shape as `[mcp]`).

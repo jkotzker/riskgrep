@@ -96,9 +96,9 @@ pub struct McpServer {
 #[serde(deny_unknown_fields)]
 pub struct McpTable {
     /// The action for a call whose files cannot be determined
-    /// ([`McpPlan::Unresolved`]). [`McpTable::plan`] uses `allow` when it is
-    /// unset; an adapter may fill it first from its own settings (the
-    /// Claude Code adapter falls back to `claude_code.on_unresolved`).
+    /// ([`McpPlan::Unresolved`]). [`McpTable::plan`] and
+    /// [`McpTable::plan_entry`] use `allow` when it is unset; an adapter may
+    /// fill it first from its own settings.
     pub on_unresolved: Option<Action>,
     #[serde(default)]
     pub servers: BTreeMap<String, McpServer>,
@@ -188,9 +188,7 @@ impl McpTable {
     /// - Desktop Commander, the input schemas its server reported on
     ///   2026-10-25 (`read_file` and `get_file_info` take `path`,
     ///   `read_multiple_files` takes `paths`, `start_search` and
-    ///   `list_directory` take `path`), under `desktop-commander` and under
-    ///   `plugin_desktop-commander_desktop-commander`, the server name of
-    ///   its Claude Code plugin.
+    ///   `list_directory` take `path`), under `desktop-commander`.
     pub fn builtin() -> McpTable {
         use McpKind::{Names, None as Reads, Read};
         let t = |kind, field: &str, max_depth| McpTool {
@@ -230,20 +228,12 @@ impl McpTable {
             ("get_file_info", t(Reads, "", None)),
         ];
         let mut out = McpTable::default();
-        for (servers, tools) in [
-            (&["filesystem"][..], &filesystem[..]),
-            (
-                &[
-                    "desktop-commander",
-                    "plugin_desktop-commander_desktop-commander",
-                ][..],
-                &desktop_commander[..],
-            ),
+        for (server, tools) in [
+            ("filesystem", &filesystem[..]),
+            ("desktop-commander", &desktop_commander[..]),
         ] {
-            for server in servers {
-                for (tool, entry) in tools {
-                    out.insert(server, tool, entry.clone());
-                }
+            for (tool, entry) in tools {
+                out.insert(server, tool, entry.clone());
             }
         }
         out
@@ -260,8 +250,21 @@ impl McpTable {
         cwd: &Path,
         home: Option<&str>,
     ) -> McpPlan {
+        self.plan_entry(self.entry(server, tool), input, cwd, home)
+    }
+
+    /// What a call with input `input` reads under `entry` (`None`: the tool
+    /// has no entry), for an adapter with entries of its own to consult
+    /// beside [`McpTable::entry`]; the rest is as for [`McpTable::plan`].
+    pub fn plan_entry(
+        &self,
+        entry: Option<&McpTool>,
+        input: &Value,
+        cwd: &Path,
+        home: Option<&str>,
+    ) -> McpPlan {
         let unresolved = McpPlan::Unresolved(self.on_unresolved.unwrap_or(Action::Allow));
-        let Some(entry) = self.entry(server, tool) else {
+        let Some(entry) = entry else {
             return unresolved;
         };
         if let Some(action) = entry.decision {
@@ -366,7 +369,7 @@ fn matches(key: &str, name: &str) -> Option<bool> {
 
 /// Whether `name` matches `pat`, where `*` stands for any run of
 /// characters and every other character for itself.
-fn wildcard(pat: &str, name: &str) -> bool {
+pub fn wildcard(pat: &str, name: &str) -> bool {
     let mut parts = pat.split('*');
     let first = parts.next().unwrap_or_default();
     let Some(mut rest) = name.strip_prefix(first) else {

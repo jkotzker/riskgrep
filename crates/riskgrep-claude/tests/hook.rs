@@ -1352,6 +1352,101 @@ fn mcp_server_pattern_does_not_hide_a_builtin_entry() {
         .silent();
 }
 
+const NOTE_READ: &str = "mcp__notes__read_note";
+
+#[test]
+fn mcp_alias_star_spans_server_and_tool() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config("[claude_code.mcp_tools.\"mcp__*read*\"]\nkind = \"read\"\npaths = [\"p\"]\n");
+    let (d, _) = e.run(NOTE_READ, json!({ "p": f })).decision();
+    assert_eq!(d, "deny");
+    // The key is matched against the whole name, so it does not reach a
+    // tool whose name has no `read`.
+    e.run("mcp__notes__open", json!({ "p": f })).silent();
+}
+
+#[test]
+fn mcp_alias_patterns_apply_in_key_order() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    // `*` sorts before a letter, so the tool pattern comes first even
+    // though the other key names the server exactly.
+    e.user_config(
+        "[claude_code.mcp_tools.\"mcp__*__read_note\"]\nkind = \"read\"\npaths = [\"p\"]\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__*\"]\nkind = \"none\"\n",
+    );
+    let (d, _) = e.run(NOTE_READ, json!({ "p": f })).decision();
+    assert_eq!(d, "deny");
+    e.user_config(
+        "[claude_code.mcp_tools.\"mcp__*__read_note\"]\nkind = \"none\"\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__*\"]\nkind = \"read\"\npaths = [\"p\"]\n",
+    );
+    e.run(NOTE_READ, json!({ "p": f })).silent();
+}
+
+#[test]
+fn mcp_alias_pattern_does_not_hide_an_exact_entry() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.read_note]\npaths = [\"p\"]\n\n\
+         [claude_code.mcp_tools.\"mcp__*\"]\nkind = \"none\"\n",
+    );
+    // A built-in entry and an `[mcp]` entry naming the exact server and
+    // tool both stand; the pattern covers the rest.
+    let (d, _) = e.run(FS_READ, json!({ "path": f })).decision();
+    assert_eq!(d, "deny");
+    let (d, _) = e.run(NOTE_READ, json!({ "p": f })).decision();
+    assert_eq!(d, "deny");
+    e.run("mcp__notes__open", json!({ "p": f })).silent();
+}
+
+#[test]
+fn mcp_alias_pattern_wins_over_shared_pattern() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.\"*\"]\nkind = \"none\"\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__*\"]\npaths = [\"p\"]\n",
+    );
+    let (d, _) = e.run(NOTE_READ, json!({ "p": f })).decision();
+    assert_eq!(d, "deny");
+}
+
+#[test]
+fn mcp_shared_keys_match_server_and_tool_separately() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    // A `*` in an `[mcp]` key stays within the server or the tool name.
+    e.user_config("[mcp.servers.\"*read*\".tools.\"*\"]\npaths = [\"p\"]\n");
+    e.run(NOTE_READ, json!({ "p": f })).silent();
+    // An exact server key wins over a pattern that sorts first.
+    e.user_config(
+        "[mcp.servers.\"*\".tools.read_note]\npaths = [\"p\"]\n\n\
+         [mcp.servers.notes.tools.\"*\"]\nkind = \"none\"\n",
+    );
+    e.run(NOTE_READ, json!({ "p": f })).silent();
+}
+
+#[test]
+fn mcp_plugin_server_keeps_its_own_entries() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    // Replacing the shared Desktop Commander entry leaves the plugin's.
+    e.user_config("[mcp.servers.desktop-commander.tools.read_file]\nkind = \"none\"\n");
+    e.run("mcp__desktop-commander__read_file", json!({ "path": f }))
+        .silent();
+    let (d, _) = e.run(DC_READ, json!({ "path": f })).decision();
+    assert_eq!(d, "deny");
+    // A user's entry for the plugin's server replaces the built-in one.
+    e.user_config(
+        "[mcp.servers.plugin_desktop-commander_desktop-commander.tools.read_file]\n\
+         kind = \"none\"\n",
+    );
+    e.run(DC_READ, json!({ "path": f })).silent();
+}
+
 #[test]
 fn malformed_mcp_entry_is_a_configuration_error() {
     let e = Env::new();
