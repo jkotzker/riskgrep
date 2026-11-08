@@ -6,18 +6,39 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+/// Whether `escape_controls` writes `ch` escaped: a control character, or a
+/// format character that changes how text is ordered or broken into lines
+/// (the bidirectional marks, embeddings, overrides, and isolates, and the
+/// line and paragraph separators).
+fn needs_escape(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{61c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+}
+
 /// A file name or path as written in text output and decision messages:
-/// control characters (newline, tab, escape, and the C1 range) become
-/// `\n`, `\t`, `\u{1b}`, and so on, so a name cannot forge a line or move a
-/// terminal's cursor. Other characters, including non-ASCII ones, are kept.
-/// Archive member names get the same escaping.
+/// control characters (newline, tab, escape, and the C1 range), the
+/// bidirectional formatting characters (U+061C, U+200E, U+200F, U+202A to
+/// U+202E, U+2066 to U+2069), and the line and paragraph separators (U+2028,
+/// U+2029) become `\n`, `\t`, `\u{1b}`, `\u{202e}`, and so on, so a name
+/// cannot forge a line, reorder the text around it, or move a terminal's
+/// cursor. Other characters, including non-ASCII ones, are kept. Archive
+/// member names get the same escaping.
 pub fn escape_controls(name: &str) -> Cow<'_, str> {
-    if !name.chars().any(char::is_control) {
+    if !name.chars().any(needs_escape) {
         return Cow::Borrowed(name);
     }
     let mut s = String::with_capacity(name.len() + 8);
     for ch in name.chars() {
-        if ch.is_control() {
+        if needs_escape(ch) {
             let _ = write!(s, "{}", ch.escape_default());
         } else {
             s.push(ch);
@@ -311,6 +332,23 @@ mod escape_tests {
         assert_eq!(
             escape_controls("caf\u{e9} \u{6a21}\u{578b} a!/b"),
             "caf\u{e9} \u{6a21}\u{578b} a!/b"
+        );
+        // Bidirectional controls and line separators are escaped too.
+        for cp in [
+            0x61c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068,
+            0x2069, 0x2028, 0x2029,
+        ] {
+            let ch = char::from_u32(cp).unwrap();
+            assert_eq!(
+                escape_controls(&format!("a{ch}b")),
+                format!("a\\u{{{cp:x}}}b"),
+                "U+{cp:04X}"
+            );
+        }
+        // Neighbours of those ranges and right-to-left letters are kept.
+        assert_eq!(
+            escape_controls("\u{200d}\u{200b}\u{2027}\u{202f}\u{2065}\u{206a}\u{5e9}\u{5dc}\u{5d5}\u{5dd}\u{627}"),
+            "\u{200d}\u{200b}\u{2027}\u{202f}\u{2065}\u{206a}\u{5e9}\u{5dc}\u{5d5}\u{5dd}\u{627}"
         );
         // Escaping twice changes nothing more.
         assert_eq!(escape_controls(&escape_controls("a\nb")), "a\\nb");

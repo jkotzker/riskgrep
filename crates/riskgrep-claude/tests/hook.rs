@@ -1736,6 +1736,15 @@ fn decision_message_escapes_control_characters_in_file_names() {
         ("tab\tx.env", "tab\\tx.env"),
         ("caf\u{e9}.env", "caf\u{e9}.env"),
         ("\u{6a21}\u{578b}.env", "\u{6a21}\u{578b}.env"),
+        ("bidi\u{202e}gnp.env", "bidi\\u{202e}gnp.env"),
+        ("sep\u{2028}forged.env", "sep\\u{2028}forged.env"),
+        ("sep\u{2029}x.env", "sep\\u{2029}x.env"),
+        ("iso\u{2066}x\u{2069}.env", "iso\\u{2066}x\\u{2069}.env"),
+        ("mark\u{200f}\u{61c}.env", "mark\\u{200f}\\u{61c}.env"),
+        (
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd}.env",
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd}.env",
+        ),
     ];
     for (name, shown) in names {
         let e = Env::new();
