@@ -550,6 +550,82 @@ fn git_blobs_are_classified_by_structure_too() {
     assert_eq!(skipped_reason(&t), "png image not scanned in v1");
 }
 
+fn padded(magic: &[u8]) -> Vec<u8> {
+    let mut v = magic.to_vec();
+    v.resize(magic.len() + 32, 1);
+    v
+}
+
+fn bzip2_head() -> Vec<u8> {
+    let mut v = b"BZh9\x31\x41\x59\x26\x53\x59".to_vec();
+    v.extend_from_slice(&[0x5A; 64]);
+    v
+}
+
+#[test]
+fn archives_and_compressed_streams_on_standard_input_are_unscanned() {
+    let member = || vec![("a.txt", aws_line(33).into_bytes())];
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("zip", synth::zip(&member())),
+        ("gzip", synth::gzip(aws_line(33).as_bytes())),
+        ("tar", synth::tar(&member())),
+        ("bzip2", bzip2_head()),
+        ("xz", padded(&[0xFD, b'7', b'z', b'X', b'Z', 0])),
+        ("7z", padded(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C])),
+        ("pdf", b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec()),
+        ("sqlite", synth::sqlite("t", "c", aws_line(33).as_bytes())),
+    ];
+    for (format, bytes) in cases {
+        let r = scanner().scan_bytes("<stdin>", &bytes);
+        let t = only(&r);
+        assert_eq!(
+            t.status,
+            TargetStatus::Unscanned {
+                reason: format!("{format} not scanned on standard input")
+            },
+            "{format}"
+        );
+        assert_eq!(r.summary.unscanned, 1, "{format}");
+        assert_eq!(r.summary.scanned, 0, "{format}");
+    }
+}
+
+#[test]
+fn an_archive_on_standard_input_is_still_scanned_as_bytes() {
+    // An uncompressed tar holds its member's text as it is.
+    let tar = synth::tar(&[("a.txt", aws_line(34).into_bytes())]);
+    let r = scanner().scan_bytes("<stdin>", &tar);
+    let t = only(&r);
+    assert!(matches!(t.status, TargetStatus::Unscanned { .. }));
+    assert!(t.scores[&secret()] >= 95.0, "{:?}", t.scores);
+    assert!(!t.evidence.is_empty());
+}
+
+#[test]
+fn standard_input_of_no_known_container_keeps_its_status() {
+    let mut g = scanner();
+    let text = g.scan_bytes("<stdin>", aws_line(35).as_bytes());
+    assert_eq!(only(&text).status, TargetStatus::Scanned);
+    assert!(only(&text).scores[&secret()] >= 95.0);
+    // Bytes of no known format, text that starts like an image or like
+    // bzip2, and an image itself are scanned as before.
+    let mut lookalike = b"GIF8 notes\n".to_vec();
+    lookalike.extend_from_slice(aws_line(36).as_bytes());
+    let mut bzh = b"BZh9 is a note\n".to_vec();
+    bzh.extend_from_slice(aws_line(37).as_bytes());
+    let mut binary = b"\0\x01\x02 ".to_vec();
+    binary.extend_from_slice(aws_line(38).as_bytes());
+    for (what, bytes) in [
+        ("text that starts like a GIF", lookalike),
+        ("text that starts like bzip2", bzh),
+        ("binary of no known format", binary),
+        ("a PNG", synth::png_1x1()),
+    ] {
+        let r = g.scan_bytes("<stdin>", &bytes);
+        assert_eq!(only(&r).status, TargetStatus::Scanned, "{what}");
+    }
+}
+
 #[test]
 fn unreadable_reports_error_kind() {
     let d = tempfile::tempdir().unwrap();

@@ -29,7 +29,9 @@ fn target_line(t: &TargetReport) -> Option<String> {
         .map(|(c, s)| format!("{} {:.1}", c.0, round1(*s)))
         .collect();
     match &t.status {
-        TargetStatus::Unscanned { reason } => Some(format!("{}  unscanned: {reason}", t.target)),
+        TargetStatus::Unscanned { reason } if scores.is_empty() => {
+            Some(format!("{}  unscanned: {reason}", t.target))
+        }
         _ if scores.is_empty() => match &t.status {
             TargetStatus::Partial { not_read } => {
                 Some(format!("{}  partial: {not_read}", t.target))
@@ -44,8 +46,15 @@ fn target_line(t: &TargetReport) -> Option<String> {
                 scores.join("  "),
                 evidence.join("; ")
             );
-            if let TargetStatus::Partial { not_read } = status {
-                let _ = write!(line, "  (partial: {not_read})");
+            match status {
+                TargetStatus::Partial { not_read } => {
+                    let _ = write!(line, "  (partial: {not_read})");
+                }
+                // Standard input that starts like an archive is scanned as bytes.
+                TargetStatus::Unscanned { reason } => {
+                    let _ = write!(line, "  (unscanned: {reason})");
+                }
+                _ => {}
             }
             Some(line)
         }

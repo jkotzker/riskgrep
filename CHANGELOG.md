@@ -7,6 +7,7 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 ### Fixed
 
 - A file or archive member that only starts like an image is no longer reported as one. Each format is recognised by more than its first bytes (the full PNG signature and an `IHDR` chunk, `GIF87a` or `GIF89a` with a screen descriptor and a first block, a JPEG marker segment, a `WEBP` chunk, a valid `ftyp` box size, and a TIFF directory offset that fits the file). Text that begins `GIF8` or `\x89PNG` was `skipped` as an image and never read; it is now scanned, and data that begins with an image's signature but holds NUL bytes is `skipped` as a binary of unknown format. A valid image with text after its end is still skipped.
+- Standard input that starts like an archive, a database, or a compressed stream (zip, tar, gzip, SQLite, 7z, PDF, bzip2, xz, zstd, and the other formats RiskGrep names for files) is reported `unscanned` with the format's name (`tar not scanned on standard input`) instead of `scanned`, so `on_error` applies and a pipeline gate such as `curl … | riskgrep scan - --fail-at secret=80` exits 2 on it. Its bytes are still scanned, and findings in them are reported.
 
 ### Changed
 
