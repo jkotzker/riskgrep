@@ -143,7 +143,25 @@ fn schema_v1_rows_are_dropped() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 4);
+    assert_eq!(v, 5);
+}
+
+#[test]
+fn schema_v4_rows_are_dropped_for_the_allowlist_flag() {
+    // Version 4 (1.2.0) rows do not say whether a path allowlist applied or
+    // what kinds a container's members were; a row read without them would
+    // report neither, so they are discarded.
+    let d = tempfile::tempdir().unwrap();
+    {
+        let c = open(d.path());
+        c.put_evidence([5; 32], "b1", &[ev("r", [0; 32])]);
+    }
+    {
+        let conn = rusqlite::Connection::open(d.path().join("evidence.sqlite")).unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+    }
+    let c = open(d.path());
+    assert!(c.evidence([5; 32], "b1").is_none());
 }
 
 #[test]
@@ -185,11 +203,16 @@ fn container_rows_round_trip() {
         members: 3,
         scanned: 2,
         skipped: 1,
+        path_allowlisted: 1,
+        allowlisted_listed: vec!["inner.zip!/config/.env".into()],
+        skipped_kinds: [("png".to_string(), 1)].into(),
+        opened_formats: [("zip".to_string(), 1)].into(),
     };
-    c.put_entry([3; 32], "b1", &[e.clone()], Some(&counts));
+    c.put_entry([3; 32], "b1", &[e.clone()], Some(&counts), true);
     let got = c.entry([3; 32], "b1").unwrap();
     assert_eq!(got.evidence, vec![e]);
     assert_eq!(got.container, Some(counts));
+    assert!(got.path_allowlisted);
     // A plain row has no container.
     c.put_evidence([4; 32], "b1", &[ev("r", [0; 32])]);
     assert_eq!(c.entry([4; 32], "b1").unwrap().container, None);

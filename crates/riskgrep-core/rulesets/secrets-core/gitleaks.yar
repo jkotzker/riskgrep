@@ -6,36 +6,41 @@
 // provider context 80, generic 50.
 
 // gitleaks' global path allowlist; every rule below excludes these paths.
+// It applies while the `path_allowlist` setting is on, and the report says
+// when it did (`path_allowlist = true`).
 private rule gitleaks_global_path_allowlist {
   meta:
     category = "secret"
     weight = 0
+    path_allowlist = true
   condition:
-    path matches /gitleaks\.toml/ or
-    path matches /(?i)\.(?:bmp|gif|jpe?g|png|svg|tiff?)$/ or
-    path matches /(?i)\.(?:eot|[ot]tf|woff2?)$/ or
-    path matches /(?i)\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$/ or
-    path matches /go\.(?:mod|sum|work(?:\.sum)?)$/ or
-    path matches /(?:^|\/)vendor\/modules\.txt$/ or
-    path matches /(?:^|\/)vendor\/(?:github\.com|golang\.org\/x|google\.golang\.org|gopkg\.in|istio\.io|k8s\.io|sigs\.k8s\.io)(?:\/.*)?$/ or
-    path matches /(?:^|\/)gradlew(?:\.bat)?$/ or
-    path matches /(?:^|\/)gradle\.lockfile$/ or
-    path matches /(?:^|\/)mvnw(?:\.cmd)?$/ or
-    path matches /(?:^|\/)\.mvn\/wrapper\/MavenWrapperDownloader\.java$/ or
-    path matches /(?:^|\/)node_modules(?:\/.*)?$/ or
-    path matches /(?:^|\/)(?:deno\.lock|npm-shrinkwrap\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/ or
-    path matches /(?:^|\/)bower_components(?:\/.*)?$/ or
-    path matches /(?:^|\/)(?:angular|bootstrap|jquery(?:-?ui)?|plotly|swagger-?ui)[a-zA-Z0-9.-]*(?:\.min)?\.js(?:\.map)?$/ or
-    path matches /(?:^|\/)javascript\.json$/ or
-    path matches /(?:^|\/)(?:Pipfile|poetry)\.lock$/ or
-    path matches /(?i)(?:^|\/)(?:v?env|virtualenv)\/lib(?:64)?(?:\/.*)?$/ or
-    path matches /(?i)(?:^|\/)(?:lib(?:64)?\/python[23](?:\.\d{1,2})+|python\/[23](?:\.\d{1,2})+\/lib(?:64)?)(?:\/.*)?$/ or
-    path matches /(?i)(?:^|\/)[a-z0-9_.]+-[0-9.]+\.dist-info(?:\/.+)?$/ or
-    path matches /(?:^|\/)vendor\/(?:bundle|ruby)(?:\/.*?)?$/ or
-    path matches /\.gem$/ or
-    path matches /verification-metadata\.xml/ or
-    path matches /Database.refactorlog/ or
-    path matches /(?:^|\/)\.git$/
+    path_allowlist_enabled and (
+      path matches /gitleaks\.toml/ or
+      path matches /(?i)\.(?:bmp|gif|jpe?g|png|svg|tiff?)$/ or
+      path matches /(?i)\.(?:eot|[ot]tf|woff2?)$/ or
+      path matches /(?i)\.(?:docx?|xlsx?|pdf|bin|socket|vsidx|v2|suo|wsuo|.dll|pdb|exe|gltf)$/ or
+      path matches /go\.(?:mod|sum|work(?:\.sum)?)$/ or
+      path matches /(?:^|\/)vendor\/modules\.txt$/ or
+      path matches /(?:^|\/)vendor\/(?:github\.com|golang\.org\/x|google\.golang\.org|gopkg\.in|istio\.io|k8s\.io|sigs\.k8s\.io)(?:\/.*)?$/ or
+      path matches /(?:^|\/)gradlew(?:\.bat)?$/ or
+      path matches /(?:^|\/)gradle\.lockfile$/ or
+      path matches /(?:^|\/)mvnw(?:\.cmd)?$/ or
+      path matches /(?:^|\/)\.mvn\/wrapper\/MavenWrapperDownloader\.java$/ or
+      path matches /(?:^|\/)node_modules(?:\/.*)?$/ or
+      path matches /(?:^|\/)(?:deno\.lock|npm-shrinkwrap\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/ or
+      path matches /(?:^|\/)bower_components(?:\/.*)?$/ or
+      path matches /(?:^|\/)(?:angular|bootstrap|jquery(?:-?ui)?|plotly|swagger-?ui)[a-zA-Z0-9.-]*(?:\.min)?\.js(?:\.map)?$/ or
+      path matches /(?:^|\/)javascript\.json$/ or
+      path matches /(?:^|\/)(?:Pipfile|poetry)\.lock$/ or
+      path matches /(?i)(?:^|\/)(?:v?env|virtualenv)\/lib(?:64)?(?:\/.*)?$/ or
+      path matches /(?i)(?:^|\/)(?:lib(?:64)?\/python[23](?:\.\d{1,2})+|python\/[23](?:\.\d{1,2})+\/lib(?:64)?)(?:\/.*)?$/ or
+      path matches /(?i)(?:^|\/)[a-z0-9_.]+-[0-9.]+\.dist-info(?:\/.+)?$/ or
+      path matches /(?:^|\/)vendor\/(?:bundle|ruby)(?:\/.*?)?$/ or
+      path matches /\.gem$/ or
+      path matches /verification-metadata\.xml/ or
+      path matches /Database.refactorlog/ or
+      path matches /(?:^|\/)\.git$/
+    )
 }
 
 // 1password-secret-key: fixed provider prefix (95)

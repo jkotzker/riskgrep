@@ -4,7 +4,7 @@ use crate::input::HookInput;
 use ignore::overrides::OverrideBuilder;
 use ignore::types::TypesBuilder;
 use ignore::WalkBuilder;
-use serde_json::Value;
+use riskgrep_core::paths::{absolute, expand_tilde, readable_file};
 use std::path::{Path, PathBuf};
 
 /// Directories Claude Code 2.1.301 excludes from every `Grep` search: it
@@ -17,15 +17,6 @@ pub struct GrepFiles {
     pub files: Vec<PathBuf>,
     /// The walk stopped at the file limit; `files` is incomplete.
     pub limit_hit: bool,
-}
-
-fn absolute(p: &str, cwd: &Path) -> PathBuf {
-    let p = Path::new(p);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
-    }
 }
 
 /// The globs a `Grep` call's `glob` field adds, split as Claude Code
@@ -51,19 +42,6 @@ pub fn grep_path(p: &str, home: Option<&str>) -> String {
     expand_tilde(p.trim(), home)
 }
 
-/// `p` with a leading `~` or `~/` replaced by `home`, as [`grep_path`]
-/// does, but untrimmed.
-fn expand_tilde(p: &str, home: Option<&str>) -> String {
-    let rest = match p.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
-        _ => return p.to_string(),
-    };
-    match home.filter(|h| !h.is_empty()) {
-        Some(home) => format!("{home}{rest}"),
-        None => p.to_string(),
-    }
-}
-
 /// The file a `Read` or `NotebookRead` call names. A path that does not
 /// exist, or that names a directory, is dropped: the tool fails on it and
 /// reads nothing.
@@ -75,24 +53,6 @@ pub fn read_target(input: &HookInput, cwd: &Path) -> Option<PathBuf> {
         _ => input.str_field("file_path"),
     }?;
     readable_file(absolute(field, cwd))
-}
-
-/// `path` unless it names a directory or nothing, which a read fails on.
-fn readable_file(path: PathBuf) -> Option<PathBuf> {
-    match std::fs::metadata(&path) {
-        Ok(meta) if meta.is_dir() => None,
-        Ok(_) => Some(path),
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
-        {
-            None
-        }
-        // It exists but cannot be inspected; the scan reports why.
-        Err(_) => Some(path),
-    }
 }
 
 /// The files `Grep` would search under `path` (default `cwd`), mirroring
@@ -160,44 +120,6 @@ pub fn grep_files(
         out.files.push(entry.into_path());
     }
     out
-}
-
-/// The paths in the `tool_input` fields `fields` of an MCP call, made
-/// absolute against `cwd` with a leading `~` or `~/` expanded from `home`
-/// (the filesystem server expands it) and, unlike a `Grep` path, not
-/// trimmed. `None` when they cannot be determined: no listed field is
-/// present, or a present one is neither a string nor a list of strings.
-pub fn mcp_paths(
-    input: &HookInput,
-    fields: &[String],
-    cwd: &Path,
-    home: Option<&str>,
-) -> Option<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    let mut found = false;
-    for f in fields {
-        let Some(v) = input.tool_input.get(f.as_str()) else {
-            continue;
-        };
-        found = true;
-        let items: Vec<&str> = match v {
-            Value::String(s) => vec![s.as_str()],
-            Value::Array(a) => a.iter().map(Value::as_str).collect::<Option<_>>()?,
-            _ => return None,
-        };
-        out.extend(
-            items
-                .into_iter()
-                .map(|p| absolute(&expand_tilde(p, home), cwd)),
-        );
-    }
-    found.then_some(out)
-}
-
-/// The files among `paths` that a read would open, as [`read_target`]
-/// treats one path.
-pub fn existing_files(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    paths.into_iter().filter_map(readable_file).collect()
 }
 
 /// A `Glob` call's search root and pattern: `path` (default `cwd`, `~`
@@ -333,9 +255,9 @@ mod tests {
         assert!(split_grep_glob(" , ").is_empty());
     }
 
-    fn mcp(input: serde_json::Value) -> HookInput {
+    fn hook(input: serde_json::Value) -> HookInput {
         HookInput {
-            tool_name: "mcp__s__t".into(),
+            tool_name: "Glob".into(),
             tool_input: input,
             cwd: None,
             event: None,
@@ -343,42 +265,10 @@ mod tests {
     }
 
     #[test]
-    fn mcp_paths_reads_strings_and_lists() {
-        use serde_json::json;
-        let cwd = Path::new("/w");
-        let f = |v, fields: &[&str]| {
-            let fields: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
-            mcp_paths(&mcp(v), &fields, cwd, Some("/h"))
-        };
-        let p = |s: &str| PathBuf::from(s);
-        assert_eq!(f(json!({"path": "a"}), &["path"]), Some(vec![p("/w/a")]));
-        assert_eq!(
-            f(json!({"paths": ["/x", "~/y"]}), &["paths"]),
-            Some(vec![p("/x"), p("/h/y")])
-        );
-        assert_eq!(f(json!({"b": "x"}), &["a", "b"]), Some(vec![p("/w/x")]));
-        assert_eq!(f(json!({"paths": []}), &["paths"]), Some(vec![]));
-        // Unlike a `Grep` path, an MCP path is not trimmed.
-        assert_eq!(
-            f(json!({"path": " a "}), &["path"]),
-            Some(vec![p("/w/ a ")])
-        );
-        assert_eq!(f(json!({"path": "~"}), &["path"]), Some(vec![p("/h")]));
-        for bad in [
-            json!({}),
-            json!({"path": 1}),
-            json!({"path": ["a", 2]}),
-            json!(null),
-        ] {
-            assert_eq!(f(bad.clone(), &["path"]), None, "{bad}");
-        }
-    }
-
-    #[test]
     fn glob_root_splits_absolute_patterns() {
         use serde_json::json;
         let cwd = Path::new("/w");
-        let g = |v| glob_root(&mcp(v), cwd, Some("/h"));
+        let g = |v| glob_root(&hook(v), cwd, Some("/h"));
         let r = |a: &str, b: &str| Some((PathBuf::from(a), b.to_string()));
         assert_eq!(g(json!({"pattern": "**/*.p12"})), r("/w", "**/*.p12"));
         assert_eq!(g(json!({"pattern": "*", "path": "~/k"})), r("/h/k", "*"));

@@ -2160,7 +2160,8 @@ pub fn workspace_root() -> PathBuf {
 
 // ---- running -----------------------------------------------------------------
 
-const USAGE: &str = "usage: cargo xtask eval [--skip-oss] [--write-baseline] [--keep-corpus DIR]";
+const USAGE: &str = "usage: cargo xtask eval [--skip-oss] [--write-baseline] [--keep-corpus DIR] \
+                     [--path-allowlist off]";
 
 /// Metric values are stored rounded, so reruns compare equal.
 fn round4(x: f64) -> f64 {
@@ -2232,13 +2233,20 @@ fn hit_list(t: &Target, category: &str) -> String {
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {
-    let (mut skip_oss, mut write_baseline) = (false, false);
+    let (mut skip_oss, mut write_baseline, mut allowlist_off) = (false, false, false);
     let mut keep: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--skip-oss" => skip_oss = true,
             "--write-baseline" => write_baseline = true,
+            // Measures the corpus with path allowlists off (the
+            // `path_allowlist` setting); never a baseline.
+            "--path-allowlist" => match it.next().map(String::as_str) {
+                Some("off") => allowlist_off = true,
+                Some("on") => allowlist_off = false,
+                _ => return Err(format!("--path-allowlist needs `on` or `off`\n{USAGE}")),
+            },
             "--keep-corpus" => {
                 let d = PathBuf::from(
                     it.next()
@@ -2257,6 +2265,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unknown argument `{other}`\n{USAGE}")),
         }
     }
+    if allowlist_off && write_baseline {
+        return Err("--write-baseline measures the defaults; drop --path-allowlist off".into());
+    }
     let root = workspace_root();
     let bin = build_release(&root)?;
     let tmp = tempfile::Builder::new()
@@ -2267,9 +2278,14 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let cfg_dir = home.join(".config/riskgrep");
     fs::create_dir_all(&cfg_dir).map_err(|e| e.to_string())?;
     // Repositories are larger than the default walk limit.
+    let top = if allowlist_off {
+        "path_allowlist = false\n"
+    } else {
+        ""
+    };
     fs::write(
         cfg_dir.join("config.toml"),
-        "[limits]\nwalk_files = 10000000\n",
+        format!("{top}[limits]\nwalk_files = 10000000\n"),
     )
     .map_err(|e| e.to_string())?;
     let out_dir = target_dir(&root).join("eval");

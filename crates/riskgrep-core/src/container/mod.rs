@@ -17,7 +17,6 @@ use crate::classify::{self, Content, FileClass, Limits, Source};
 use crate::model::TargetStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
@@ -367,6 +366,13 @@ pub struct Extracted {
     pub skipped: u64,
     /// Nested containers opened; their members are counted as members.
     pub opened: u64,
+    /// `skipped` by kind: an image's format (`png`), [`UNKNOWN_KIND`], or
+    /// [`LINK_KIND`]. Each member counts once, at any nesting level, so the
+    /// counts add up to `skipped`. No member is named.
+    pub skipped_kinds: BTreeMap<&'static str, u64>,
+    /// `opened` by the extractor that read each nested container (`zip`,
+    /// `tar`, `gzip`, `sqlite`), counted as `skipped_kinds` is.
+    pub opened_formats: BTreeMap<&'static str, u64>,
     pub unread: Vec<Unread>,
     /// Bytes of the container, nested ones included, outside every member
     /// (see [`Walk::unaccounted`]).
@@ -401,6 +407,26 @@ impl Extracted {
             &self.directories,
             self.error.as_deref(),
         )
+    }
+}
+
+/// The kind of a skipped member of no format the scanner recognises.
+pub const UNKNOWN_KIND: &str = "unknown";
+/// The kind of a skipped entry with nothing to read (a link or a device).
+pub const LINK_KIND: &str = "link_or_device";
+
+/// Add one to `kind` in `map`.
+fn bump(map: &mut BTreeMap<&'static str, u64>, kind: &'static str) {
+    *map.entry(kind).or_insert(0) += 1;
+}
+
+/// Take one from `kind` in `map`, dropping a kind that reaches 0.
+fn unbump(map: &mut BTreeMap<&'static str, u64>, kind: &'static str) {
+    if let Some(n) = map.get_mut(kind) {
+        *n -= 1;
+        if *n == 0 {
+            map.remove(kind);
+        }
     }
 }
 
@@ -533,15 +559,7 @@ pub fn describe(
 /// `!!/` so a joined path splits unambiguously, and at most [`NAME_MAX`]
 /// bytes (a longer name is cut and ends with `…#` and its position).
 pub fn escape_name(name: &str, seq: u64) -> String {
-    let mut s = String::with_capacity(name.len());
-    for ch in name.chars() {
-        if ch.is_control() {
-            let _ = write!(s, "{}", ch.escape_default());
-        } else {
-            s.push(ch);
-        }
-    }
-    let mut s = s.replace("!/", "!!/");
+    let mut s = crate::model::escape_controls(name).replace("!/", "!!/");
     if s.ends_with('!') {
         // Else `a!` joined to a nested member `x` (`a!!/x`) would read as
         // the escaped name `a!/x`.
@@ -596,8 +614,10 @@ struct Last {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Placed {
     Kept,
-    Skipped,
-    Opened,
+    /// Skipped, of this kind (see [`Extracted::skipped_kinds`]).
+    Skipped(&'static str),
+    /// A nested container opened by this extractor.
+    Opened(&'static str),
     NotRead,
 }
 
@@ -657,6 +677,8 @@ fn extract_with(
             total: 0,
             skipped: 0,
             opened: 0,
+            skipped_kinds: BTreeMap::new(),
+            opened_formats: BTreeMap::new(),
             unread: Vec::new(),
             uncovered: 0,
             directories: BTreeMap::new(),
@@ -838,6 +860,7 @@ impl Walk for Walker<'_> {
         match self.admit() {
             Ok(_) => {
                 self.out.skipped += 1;
+                bump(&mut self.out.skipped_kinds, LINK_KIND);
                 Flow::Continue
             }
             Err(cause) => {
@@ -893,9 +916,10 @@ impl Walk for Walker<'_> {
     fn stored_value(&mut self, head: &[u8], size: u64) -> StoredValue {
         let head = &head[..head.len().min(self.limits.sniff)];
         match crate::scanner::classify_member("", head, size) {
-            FileClass::Image(_) => {
+            FileClass::Image(kind) => {
                 self.out.total += 1;
                 self.out.skipped += 1;
+                bump(&mut self.out.skipped_kinds, kind);
                 StoredValue::Skipped
             }
             FileClass::KnownBinary(_) | FileClass::Container(_) => StoredValue::Member,
@@ -917,8 +941,14 @@ impl Walk for Walker<'_> {
         };
         // Read in part now, whatever else it was.
         match last.placed {
-            Placed::Skipped => self.out.skipped -= 1,
-            Placed::Opened => self.out.opened -= 1,
+            Placed::Skipped(kind) => {
+                self.out.skipped -= 1;
+                unbump(&mut self.out.skipped_kinds, kind);
+            }
+            Placed::Opened(format) => {
+                self.out.opened -= 1;
+                unbump(&mut self.out.opened_formats, format);
+            }
             Placed::Kept | Placed::NotRead => {}
         }
         last.placed = Placed::Kept;
@@ -1028,7 +1058,8 @@ impl Walker<'_> {
             return match r {
                 Ok(()) => {
                     self.out.opened += 1;
-                    Placed::Opened
+                    bump(&mut self.out.opened_formats, ext.id());
+                    Placed::Opened(ext.id())
                 }
                 Err(ContainerError(e)) => {
                     self.unread(seq, Some(path), Cause::Nested(e), false);
@@ -1036,9 +1067,15 @@ impl Walker<'_> {
                 }
             };
         }
-        if matches!(class, FileClass::Image(_) | FileClass::UnknownBinary) {
+        let skipped = match class {
+            FileClass::Image(kind) => Some(kind),
+            FileClass::UnknownBinary => Some(UNKNOWN_KIND),
+            _ => None,
+        };
+        if let Some(kind) = skipped {
             self.out.skipped += 1;
-            return Placed::Skipped;
+            bump(&mut self.out.skipped_kinds, kind);
+            return Placed::Skipped(kind);
         }
         self.keep(seq, path, &class, &bytes, truncated)
     }

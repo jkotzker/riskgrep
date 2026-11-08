@@ -2,7 +2,29 @@
 //! rule ids, counts, offsets, and structural facts only.
 
 use serde::{Deserialize, Serialize, Serializer};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
+/// A file name or path as written in text output and decision messages:
+/// control characters (newline, tab, escape, and the C1 range) become
+/// `\n`, `\t`, `\u{1b}`, and so on, so a name cannot forge a line or move a
+/// terminal's cursor. Other characters, including non-ASCII ones, are kept.
+/// Archive member names get the same escaping.
+pub fn escape_controls(name: &str) -> Cow<'_, str> {
+    if !name.chars().any(char::is_control) {
+        return Cow::Borrowed(name);
+    }
+    let mut s = String::with_capacity(name.len() + 8);
+    for ch in name.chars() {
+        if ch.is_control() {
+            let _ = write!(s, "{}", ch.escape_default());
+        } else {
+            s.push(ch);
+        }
+    }
+    Cow::Owned(s)
+}
 
 /// Round to one decimal, half away from zero.
 pub fn round1(x: f64) -> f64 {
@@ -117,6 +139,13 @@ pub struct TargetReport {
     /// applies to both (see [`TargetReport::unseen_part`]).
     #[serde(skip)]
     pub read_failed: bool,
+    /// A path allowlist applied (gitleaks' global path allowlist): the rules
+    /// that exclude its paths, every converted gitleaks rule among them, did
+    /// not run on this file, so a score of 0 does not say they found nothing.
+    /// For a container, set when it applied to at least one member (see
+    /// [`ContainerReport::path_allowlisted`]). Serialized only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub path_allowlisted: bool,
 }
 
 impl TargetReport {
@@ -150,10 +179,27 @@ pub struct ContainerReport {
     /// Members of formats that are not scanned (images, binary files of
     /// unknown format).
     pub skipped: u64,
+    /// `skipped` by kind: an image's format (`png`, `jpeg`), `unknown` for a
+    /// binary of no format the scanner recognises, or `link_or_device` for
+    /// an entry with nothing to read. Each member counts once, at any
+    /// nesting level, so the counts add up to `skipped`; no member is named.
+    /// Serialized only when not empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub skipped_kinds: BTreeMap<String, u64>,
     /// Members not read or not scanned at all.
     pub not_read: u64,
     /// Nested containers opened; what they hold is counted as members.
     pub opened: u64,
+    /// `opened` by the format that read each nested container (`zip`, `tar`,
+    /// `gzip`, `sqlite`), counted as `skipped_kinds` is. A tar inside a gzip
+    /// stream is read with the stream, as one container, so it is not
+    /// counted. Serialized only when not empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub opened_formats: BTreeMap<String, u64>,
+    /// Members scanned (whole or in part) to which a path allowlist applied;
+    /// counted, not named. Serialized only when not 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub path_allowlisted: u64,
     /// Members with evidence, then members not read whole, at most
     /// [`crate::container::LISTED_MAX`].
     pub listed: Vec<MemberReport>,
@@ -169,6 +215,14 @@ pub struct MemberReport {
     /// all of its members together.
     #[serde(serialize_with = "ser_scores")]
     pub scores: BTreeMap<Category, f64>,
+    /// A path allowlist applied to this member, as
+    /// [`TargetReport::path_allowlisted`]. Serialized only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub path_allowlisted: bool,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -241,5 +295,24 @@ mod threshold_tests {
         // Raw 79.94 shows as 79.9, so it does not.
         assert!(!meets_threshold(79.94, 80.0));
         assert!(meets_threshold(79.94, 79.9));
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::escape_controls;
+
+    #[test]
+    fn controls_are_escaped_and_other_text_is_not() {
+        assert_eq!(
+            escape_controls("a\nb\tc\u{1b}[2J\u{85}"),
+            "a\\nb\\tc\\u{1b}[2J\\u{85}"
+        );
+        assert_eq!(
+            escape_controls("caf\u{e9} \u{6a21}\u{578b} a!/b"),
+            "caf\u{e9} \u{6a21}\u{578b} a!/b"
+        );
+        // Escaping twice changes nothing more.
+        assert_eq!(escape_controls(&escape_controls("a\nb")), "a\\nb");
     }
 }

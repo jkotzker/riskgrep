@@ -7,6 +7,7 @@ cargo xtask eval                    # synthetic corpus and OSS repositories
 cargo xtask eval --skip-oss         # synthetic corpus only (no network, seconds)
 cargo xtask eval --write-baseline   # rewrite baseline-metrics.json (from any run)
 cargo xtask eval --keep-corpus DIR  # also keep the synthetic corpus in DIR (an empty or new directory)
+cargo xtask eval --path-allowlist off  # measure with path allowlists off (never with --write-baseline)
 ```
 
 ## How it runs

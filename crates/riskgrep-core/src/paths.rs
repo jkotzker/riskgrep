@@ -1,4 +1,5 @@
-//! Cache locations and private-directory handling.
+//! Cache locations, private-directory handling, and path helpers shared by
+//! the agent integrations.
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, Permissions};
@@ -46,4 +47,45 @@ pub fn ensure_private_dir(p: &Path) -> io::Result<()> {
         fs::set_permissions(p, Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+/// `p` made absolute against `cwd` when it is relative.
+pub fn absolute(p: &str, cwd: &Path) -> PathBuf {
+    let p = Path::new(p);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    }
+}
+
+/// `p` with a leading `~` or `~/` replaced by `home`, untrimmed. `~user` is
+/// left as it is, as is `~` when `home` is unset or empty.
+pub fn expand_tilde(p: &str, home: Option<&str>) -> String {
+    let rest = match p.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
+        _ => return p.to_string(),
+    };
+    match home.filter(|h| !h.is_empty()) {
+        Some(home) => format!("{home}{rest}"),
+        None => p.to_string(),
+    }
+}
+
+/// `path` unless it names a directory or nothing, which a read fails on. A
+/// path that exists but cannot be inspected is kept: the scan reports why.
+pub fn readable_file(path: PathBuf) -> Option<PathBuf> {
+    match fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => None,
+        Ok(_) => Some(path),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            None
+        }
+        Err(_) => Some(path),
+    }
 }
