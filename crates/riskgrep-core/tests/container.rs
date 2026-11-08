@@ -2074,6 +2074,31 @@ fn a_container_of_only_skipped_members_is_skipped_and_keeps_its_counts() {
 }
 
 #[test]
+fn a_member_is_an_image_only_when_its_structure_says_so() {
+    let mut gif8 = text("GIF8 notes for the rollout\n");
+    gif8.extend(aws_file(62));
+    let mut nul_png = b"\x89PNG\r\n\x1a\n".to_vec();
+    nul_png.resize(72, 0);
+    let z = synth::zip(&[
+        ("gif8.txt", gif8),
+        ("pixel.png", synth::png_1x1()),
+        ("nul.png", nul_png),
+    ]);
+    let t = scan_zip(&z);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    // Only the real image and the binary of unknown format are skipped; the
+    // text that starts like a GIF is read, and its key is found.
+    assert_eq!(buckets(&t), (3, 1, 0, 2, 0, 0));
+    assert!(t.scores[&secret()] >= 95.0);
+    let e = t
+        .evidence
+        .iter()
+        .find(|e| e.rule == "aws_access_token")
+        .expect("aws evidence");
+    assert_eq!(e.member.as_deref(), Some("gif8.txt"));
+}
+
+#[test]
 fn a_container_with_any_member_read_stays_scanned() {
     let d = tempfile::tempdir().unwrap();
     let z = synth::zip(&[("logo.png", PNG.to_vec()), ("a.txt", text("plain\n"))]);

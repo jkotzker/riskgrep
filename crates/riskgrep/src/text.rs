@@ -38,7 +38,9 @@ fn target_line(t: &TargetReport) -> Option<String> {
         .map(|(c, s)| format!("{} {:.1}", c.0, round1(*s)))
         .collect();
     match &t.status {
-        TargetStatus::Unscanned { reason } => Some(format!("{target}  unscanned: {reason}")),
+        TargetStatus::Unscanned { reason } if scores.is_empty() => {
+            Some(format!("{target}  unscanned: {reason}"))
+        }
         _ if scores.is_empty() => match &t.status {
             TargetStatus::Partial { not_read } => Some(format!("{target}  partial: {not_read}")),
             _ => None,
@@ -51,8 +53,15 @@ fn target_line(t: &TargetReport) -> Option<String> {
                 scores.join("  "),
                 evidence.join("; ")
             );
-            if let TargetStatus::Partial { not_read } = status {
-                let _ = write!(line, "  (partial: {not_read})");
+            match status {
+                TargetStatus::Partial { not_read } => {
+                    let _ = write!(line, "  (partial: {not_read})");
+                }
+                // Standard input that starts like an archive is scanned as bytes.
+                TargetStatus::Unscanned { reason } => {
+                    let _ = write!(line, "  (unscanned: {reason})");
+                }
+                _ => {}
             }
             Some(line)
         }
@@ -168,6 +177,24 @@ mod tests {
         assert_eq!(evidence_text(&ev("path_rule", vec![])), "path_rule ×1");
         let many = ev("m", (1..=8).map(|n| loc(n, n)).collect());
         assert_eq!(evidence_text(&many), "m ×8, lines 1,2,3,4,5,…");
+    }
+
+    #[test]
+    fn an_unscanned_target_with_scores_escapes_its_name() {
+        let t = target(
+            "a\nforged\u{1b}[31m",
+            TargetStatus::Unscanned {
+                reason: "tar not scanned on standard input".into(),
+            },
+            95.0,
+            vec![ev("r", vec![loc(1, 1)])],
+        );
+        let line = target_line(&t).unwrap();
+        assert_eq!(
+            line,
+            "a\\nforged\\u{1b}[31m  secret 95.0  [r ×1, lines 1]  (unscanned: tar not scanned on standard input)"
+        );
+        assert!(!line.contains('\n') && !line.contains('\u{1b}'), "{line:?}");
     }
 
     #[test]

@@ -636,14 +636,19 @@ impl RiskGrep {
     /// UTF-32 text is recognised from the first bytes as for a file and
     /// transcoded, with evidence offsets in the input's bytes. Any other
     /// input is scanned as text, including bytes a file of that kind would
-    /// skip as binary of unknown format.
+    /// skip as binary of unknown format. Input that starts like an archive,
+    /// a database, or a compressed stream is scanned as bytes too, since its
+    /// members are not read, and is reported `unscanned` with the format's
+    /// name, so that a gate which treats `unscanned` as an error does not
+    /// take the word `scanned` to mean that the members were read.
     pub fn scan_bytes(&mut self, name: &str, bytes: &[u8]) -> Report {
         let head = &bytes[..bytes.len().min(self.cfg.limits.sniff)];
-        let class = match classify(name, head, bytes.len() as u64) {
-            c @ FileClass::EncodedText(_) => c,
-            _ => FileClass::Text,
+        let (class, container) = match classify(name, head, bytes.len() as u64) {
+            c @ FileClass::EncodedText(_) => (c, None),
+            FileClass::Container(kind) => (FileClass::Text, Some(kind)),
+            _ => (FileClass::Text, None),
         };
-        let raw = match classify::slice_for_scan(bytes, &class, &self.cfg.limits) {
+        let mut raw = match classify::slice_for_scan(bytes, &class, &self.cfg.limits) {
             Err(e) => Raw::status(name.to_string(), unreadable(&e)),
             Ok(content) => self.scan_now(Pending {
                 target: name.to_string(),
@@ -657,6 +662,12 @@ impl RiskGrep {
                 container: None,
             }),
         };
+        if let (Some(kind), TargetStatus::Scanned | TargetStatus::Partial { .. }) =
+            (container, &raw.status)
+        {
+            raw.status = unscanned(&format!("{} not scanned on standard input", kind.name()));
+            raw.text = false;
+        }
         let targets = self.finalize(vec![raw]);
         self.report(targets)
     }

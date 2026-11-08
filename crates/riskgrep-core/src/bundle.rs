@@ -107,7 +107,7 @@ fn collect_meta(rules: &yara_x::Rules, rulesets: &[&Ruleset]) -> Result<HashMap<
         let ns = rule.namespace();
         let meta = RuleMeta::from_yara(&rule).map_err(|e| err(format!("ruleset {ns}: {e}")))?;
         for p in &meta.post {
-            if let PostSpec::Stopwords { list } = p {
+            if let PostSpec::Stopwords { list, .. } = p {
                 let found = rulesets
                     .iter()
                     .find(|r| r.id == ns)

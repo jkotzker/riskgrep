@@ -239,6 +239,44 @@ fn stdin_dash() {
 }
 
 #[test]
+fn an_archive_on_stdin_is_unscanned_and_follows_on_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 14);
+    let tar = synth::tar(&[("a.txt", format!("let id = \"{key}\";\n").into_bytes())]);
+    // The pipeline gate of the issue: `--fail-at` makes `on_error` block.
+    let out = riskgrep(dir.path())
+        .args(["scan", "-", "--format", "json", "--fail-at", "secret=99"])
+        .write_stdin(tar.clone())
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["targets"][0]["status"], "unscanned");
+    assert_eq!(
+        v["targets"][0]["reason"],
+        "tar not scanned on standard input"
+    );
+    assert_eq!(v["summary"]["unscanned"], 1);
+    assert!(!String::from_utf8_lossy(&out).contains(&key));
+    // Without a gate, `on_error` allows. Text output names the reason and
+    // still reports what the bytes held.
+    let out = riskgrep(dir.path())
+        .args(["scan", "-"])
+        .write_stdin(tar)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("tar not scanned on standard input"), "{text}");
+    assert!(text.contains("secret 95"), "{text}");
+    assert!(!text.contains(&key));
+}
+
+#[test]
 fn stdin_decodes_utf16_and_utf32_like_a_file() {
     let dir = tempfile::tempdir().unwrap();
     let key = synth::fake_secret("aws_access_key", 13);
