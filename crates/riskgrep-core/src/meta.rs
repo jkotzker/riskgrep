@@ -38,6 +38,9 @@ pub enum PostSpec {
     },
     Stopwords {
         list: String,
+        /// Keep a match made only of hex digits without checking the list.
+        #[serde(default)]
+        skip_hex: bool,
     },
     AllowRegex {
         regex: String,
@@ -249,6 +252,7 @@ impl RuleMeta {
             },
             "stopwords" => PostSpec::Stopwords {
                 list: raw.need(raw.string("stopwords")?, "stopwords", name)?,
+                skip_hex: raw.boolean("stopwords_skip_hex")?.unwrap_or(false),
             },
             "allow_regex" => PostSpec::AllowRegex {
                 regex: raw.need(raw.string("allow_regex")?, "allow_regex", name)?,

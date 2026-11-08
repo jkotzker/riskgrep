@@ -97,11 +97,11 @@ pub fn build(
     Ok(match spec {
         PostSpec::Span { regex, group } => Box::new(Span::new(re("span_regex", regex)?, *group)),
         PostSpec::Entropy { min } => Box::new(Entropy { min: *min }),
-        PostSpec::Stopwords { list } => {
+        PostSpec::Stopwords { list, skip_hex } => {
             let words = stopwords
                 .get(list)
                 .ok_or(("stopwords", format!("list `{list}` not found")))?;
-            Box::new(Stopwords::new(words))
+            Box::new(Stopwords::new(words).skip_hex(*skip_hex))
         }
         PostSpec::AllowRegex { regex } => Box::new(AllowRegex::new(re("allow_regex", regex)?)),
         PostSpec::CodeLines { min_codes } => Box::new(CodeLines {

@@ -39,7 +39,8 @@ name_regex = "weight$""#,
             },
             PostSpec::Entropy { min: 3.5 },
             PostSpec::Stopwords {
-                list: "common".into()
+                list: "common".into(),
+                skip_hex: false
             },
             PostSpec::AllowRegex { regex: "^x".into() },
             PostSpec::NpyHeader {
@@ -221,4 +222,22 @@ allow_regex = "^\\d+$""#,
 fn meta_rejects_non_utf8_string() {
     let e = parse("category = \"secret\"\nweight = 50\nfamily = \"\\xff\"").unwrap_err();
     assert!(e.0.contains("`family` must be a string"), "{e}");
+}
+
+#[test]
+fn stopwords_skip_hex_is_an_optional_boolean() {
+    let with = |extra: &str| {
+        parse(&format!(
+            "category = \"secrets\"\nweight = 1\npost = \"stopwords\"\nstopwords = \"common\"\n{extra}"
+        ))
+    };
+    let skip = |m: RuleMeta| match &m.post[..] {
+        [PostSpec::Stopwords { skip_hex, .. }] => *skip_hex,
+        other => panic!("unexpected post {other:?}"),
+    };
+    assert!(skip(with("stopwords_skip_hex = true").unwrap()));
+    assert!(!skip(with("stopwords_skip_hex = false").unwrap()));
+    assert!(!skip(with("").unwrap()));
+    let e = with("stopwords_skip_hex = \"yes\"").unwrap_err();
+    assert!(e.to_string().contains("stopwords_skip_hex"), "{e}");
 }

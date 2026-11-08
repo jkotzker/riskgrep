@@ -4,6 +4,10 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Fixed
+
+- A credential-named value made only of hex digits is no longer dropped because it contains a word of the stopword list (`dead`, `feed`) in `credential_key_hex_value` and the four rules in `config.yar` (new rule key `stopwords_skip_hex`; `rulesets/README.md`). Stopwords matched anywhere inside a value, so a random 32-digit hex value was missed about once in 1,151 draws, and the 1.2.0 entry below ("found whatever its entropy above 3.0") held only for values with no listed word. A placeholder such as `deadbeef` repeated is still dropped by the entropy floor. The floor itself drops 1 in 9,468 random 32-digit hex values (exact), not the 1 in 7,400 the rule comments gave. Values of letters and digits, and hex values found only by `generic_api_key`, are still checked against the list; `docs/known-limitations.md` now states this (#116).
+
 ### Changed
 
 - Upgraded the YARA-X engine from 1.22.0 to 1.23.0. Detection results and scores are unchanged on the evaluation corpus. YARA-X 1.23.0 pins its own `yara-x-macros` and `yara-x-parser` crates to the same version, so `riskgrep-core` no longer pins them. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.

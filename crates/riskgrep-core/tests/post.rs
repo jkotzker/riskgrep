@@ -103,6 +103,33 @@ fn stopwords_drop() {
 }
 
 #[test]
+fn stopwords_skip_hex_keeps_a_value_of_hex_digits_only() {
+    let words = ["dead".to_string(), "vpn".to_string()];
+    let plain = Stopwords::new(&words);
+    let skip = Stopwords::new(&words).skip_hex(true);
+    for hex in [&b"3fa9dead51c07b2e"[..], b"3FA9DEAD51C07B2E"] {
+        assert_eq!(plain.apply(hex, 0..hex.len()), PostResult::Drop);
+        assert_eq!(
+            skip.apply(hex, 0..hex.len()),
+            PostResult::Keep(0..hex.len())
+        );
+    }
+    // One character that is not a hex digit puts the value back under the list.
+    let word = b"3fa9dead51c07b2g";
+    assert_eq!(skip.apply(word, 0..word.len()), PostResult::Drop);
+    let vpn = b"3fa951c07b2evpn";
+    assert_eq!(skip.apply(vpn, 0..vpn.len()), PostResult::Drop);
+    // Only the matched range counts, and an empty range is not a hex value.
+    let content = b"dead-3fa951c07b2e";
+    assert_eq!(skip.apply(content, 0..content.len()), PostResult::Drop);
+    assert_eq!(
+        skip.apply(content, 5..content.len()),
+        PostResult::Keep(5..content.len())
+    );
+    assert_eq!(skip.apply(content, 0..0), PostResult::Keep(0..0));
+}
+
+#[test]
 fn npy_float_kept_int_dropped() {
     let p = NpyHeader {
         min_dim: 192,

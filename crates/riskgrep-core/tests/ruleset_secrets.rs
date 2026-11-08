@@ -1677,3 +1677,134 @@ fn shipped_rule_sources_do_not_trip_the_rules() {
         "secret evidence in shipped files: {hits:?}"
     );
 }
+
+// ---- hex credential values and word stopwords (#116) --------------------------
+
+/// A random hex value of `len` digits from the seeded generator: entropy at
+/// least 3.4 and none of the words the stopword list holds that are made of
+/// hex digits, so that a test adds exactly the word it is about.
+fn hex_value(len: usize, seed: u64) -> String {
+    for attempt in 0..1000 {
+        let mut rng = synth::Rng::new(seed * 1000 + attempt);
+        let mut bytes = vec![0u8; len / 2];
+        rng.fill(&mut bytes);
+        let v: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let lower = v.to_ascii_lowercase();
+        if entropy_of(v.as_bytes()) >= 3.4
+            && !lower.contains("dead")
+            && !lower.contains("feed")
+            && !lower.contains("0123456")
+            && !lower.contains("abcdef")
+            && v.bytes().any(|b| b.is_ascii_digit())
+            && v.bytes().any(|b| b.is_ascii_lowercase())
+        {
+            return v;
+        }
+    }
+    panic!("no value for seed {seed}");
+}
+
+/// The three layouts of the issue: an XML element, a member of a
+/// credential-named JSON object, and a `key = value` line.
+fn hex_layouts(value: &str) -> [(&'static str, String, &'static str); 3] {
+    [
+        (
+            "config.xml",
+            format!("<Config>\n  <ApiKey>{value}</ApiKey>\n</Config>\n"),
+            "xml_credential_element",
+        ),
+        (
+            "settings.json",
+            format!("{{\"apiKeys\": {{\"primary\": \"{value}\"}}}}\n"),
+            "json_credential_object_member",
+        ),
+        (
+            "settings.conf",
+            format!("api_key = {value}\n"),
+            "credential_key_hex_value",
+        ),
+    ]
+}
+
+/// The secret score of `value` in each layout, with the rule that must find it.
+fn hex_scores(value: &str) -> Vec<(&'static str, Option<f64>, bool)> {
+    hex_layouts(value)
+        .into_iter()
+        .map(|(path, text, rule)| {
+            let ev = scan(path, text.as_bytes());
+            let found = ev.iter().any(|e| e.rule == rule);
+            (path, secret_score(&ev), found)
+        })
+        .collect()
+}
+
+#[test]
+fn hex_value_holding_a_stopword_is_found() {
+    for len in [32, 40, 64] {
+        let base = hex_value(len, len as u64);
+        for (name, v) in [
+            ("unchanged", base.clone()),
+            ("dead", format!("dead{}", &base[4..])),
+            ("feed", format!("feed{}", &base[4..])),
+            ("dead inside", format!("{}dead{}", &base[..10], &base[14..])),
+            (
+                "uppercase",
+                format!("dead{}", &base[4..]).to_ascii_uppercase(),
+            ),
+        ] {
+            assert!(entropy_of(v.as_bytes()) >= 3.0, "{name}: test value");
+            for (path, score, found) in hex_scores(&v) {
+                assert_eq!(score, Some(80.0), "{len} digits, {name}, {path}");
+                assert!(found, "{len} digits, {name}, {path}: rule");
+            }
+        }
+    }
+}
+
+#[test]
+fn hex_placeholder_and_low_entropy_values_stay_dropped() {
+    let placeholder = "deadbeef".repeat(4);
+    let low: String = {
+        let mut rng = synth::Rng::new(5);
+        let mut bytes = [0u8; 32];
+        rng.fill(&mut bytes);
+        bytes
+            .iter()
+            .map(|b| ["a", "b", "1", "2"][(*b & 3) as usize])
+            .collect()
+    };
+    assert!(entropy_of(low.as_bytes()) < 3.0, "test value");
+    for (what, v) in [("deadbeef", placeholder), ("four symbols", low)] {
+        for (path, score, _) in hex_scores(&v) {
+            assert_eq!(score, None, "{what}, {path}");
+        }
+    }
+}
+
+#[test]
+fn stopwords_still_drop_a_value_that_is_not_only_hex() {
+    // The exemption is for values of hex digits; `dead` inside a longer token
+    // still drops the value in the layouts that read letters and digits.
+    let base = synth::fake_secret("github_pat", 3)[4..24].to_string();
+    assert!(!base.to_ascii_lowercase().contains("dead"), "test value");
+    assert!(base.bytes().any(|b| !b.is_ascii_hexdigit()), "test value");
+    let with_word = format!("{}dead{}", &base[..8], &base[12..]);
+    for (path, text) in [
+        (
+            "config.xml",
+            format!("<Config><ApiKey>{base}</ApiKey></Config>\n"),
+        ),
+        (
+            "settings.json",
+            format!("{{\"apiKeys\": {{\"primary\": \"{base}\"}}}}\n"),
+        ),
+    ] {
+        assert_eq!(
+            secret_score(&scan(path, text.as_bytes())),
+            Some(80.0),
+            "{path}: control"
+        );
+        let text = text.replace(&base, &with_word);
+        assert_eq!(secret_score(&scan(path, text.as_bytes())), None, "{path}");
+    }
+}
