@@ -17,6 +17,7 @@ pub mod ruleset;
 mod ruleset_digest;
 pub mod scanner;
 pub mod score;
+pub mod show;
 pub mod suppress;
 #[doc(hidden)]
 pub mod synth;
