@@ -2,17 +2,22 @@
 //!
 //! Runs every case of `cargo xtask bench` (the same fixtures, isolated HOME,
 //! and warm rules bundle) under an instruction counter, and compares the
-//! smallest count of each case with `bench/instructions-<os>-<counter>.json`.
-//! Instruction counts depend far less on what else the machine is doing than
-//! wall-clock time does, so this answers "did this change make it slower?" on
-//! any machine, hosted CI runners included. Whether it is fast enough in
-//! absolute terms is still `cargo xtask bench` on fixed hardware.
+//! smallest count of each case with
+//! `bench/instructions-<os>-<arch>-<counter>.json`. Instruction counts depend
+//! far less on what else the machine is doing than wall-clock time does, so
+//! this answers "did this change make it slower?"; whether it is fast enough
+//! in absolute terms is still `cargo xtask bench` on fixed hardware.
 //!
-//! Counters: `perf` (Linux, `perf stat -e instructions:u`, user space of the
-//! benchmarked process only), `callgrind` (Linux, Valgrind's instruction
-//! count `Ir`, the benchmarked process only), and `time` (macOS,
-//! `/usr/bin/time -l` "instructions retired"). Counts from different counters
-//! or operating systems are not comparable, so each pair has its own baseline.
+//! Counters: `callgrind` (Linux, Valgrind's instruction count `Ir` of the
+//! benchmarked process only), `perf` (Linux, `perf stat -e instructions:u`,
+//! the benchmarked process only; needs a hardware counter, which hosted CI
+//! virtual machines do not expose), and `time` (macOS, `/usr/bin/time -l`
+//! "instructions retired"; hosted macOS runners report none). Counts from
+//! different counters, operating systems, or architectures are not
+//! comparable, so each has its own baseline. Callgrind counts the same on
+//! different CPU models, so its Linux x86_64 baseline is the one committed
+//! and checked in CI; a `perf` or `time` baseline compares two builds on one
+//! machine.
 
 use crate::bench::{self, CaseSpec, Prepared};
 use std::collections::BTreeMap;
@@ -23,8 +28,9 @@ use std::process::{Command, Stdio};
 const USAGE: &str = "usage: cargo xtask instructions [--counter auto|perf|callgrind|time] [--runs N] [--no-build] [--json FILE] [--write-baseline] [--check]";
 const DEFAULT_RUNS: u32 = 5;
 /// A case whose smallest count is more than this fraction above its baseline
-/// is a regression.
-pub const THRESHOLD: f64 = 0.02;
+/// is a regression. Callgrind counts of one commit on 10 hosted Ubuntu runner
+/// virtual machines (four CPU models) differed by at most 0.18% per case.
+pub const THRESHOLD: f64 = 0.01;
 
 /// User configuration for the counted runs: time budgets no case reaches.
 const GENEROUS_BUDGETS: &str =
@@ -201,15 +207,49 @@ pub fn check(
     failures
 }
 
-pub fn baseline_path(root: &Path, os: &str, counter: Counter) -> PathBuf {
-    root.join(format!("bench/instructions-{os}-{}.json", counter.name()))
+pub fn baseline_path(root: &Path, os: &str, arch: &str, counter: Counter) -> PathBuf {
+    root.join(format!(
+        "bench/instructions-{os}-{arch}-{}.json",
+        counter.name()
+    ))
 }
 
-/// The counter to use when none is named: `time` on macOS; on Linux, `perf`
-/// when it can count user-space instructions here, else `callgrind`.
+/// The `--json` report: every count, and under `baseline` the smallest count
+/// per case in the baseline file's format.
+pub fn report_json(
+    os: &str,
+    arch: &str,
+    counter: Counter,
+    runs: u32,
+    counts: &BTreeMap<String, Vec<u64>>,
+) -> serde_json::Value {
+    let baseline: BTreeMap<&str, u64> = counts
+        .iter()
+        .map(|(k, v)| (k.as_str(), Summary::of(v).min))
+        .collect();
+    serde_json::json!({
+        "os": os,
+        "arch": arch,
+        "counter": counter.name(),
+        "runs": runs,
+        "cases": counts,
+        "baseline": baseline,
+    })
+}
+
+/// The counter to use when none is named: `time` on macOS; on Linux,
+/// `callgrind` when Valgrind is installed (the committed baseline), else
+/// `perf` when it can count user-space instructions here.
 fn auto_counter(scratch: &Path) -> Result<Counter, String> {
     if cfg!(target_os = "macos") {
         return Ok(Counter::Time);
+    }
+    let valgrind = Command::new("valgrind")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .status();
+    if matches!(valgrind, Ok(s) if s.success()) {
+        return Ok(Counter::Callgrind);
     }
     let report = scratch.join("perf-probe.txt");
     let probe = Counter::Perf
@@ -220,14 +260,7 @@ fn auto_counter(scratch: &Path) -> Result<Counter, String> {
     if matches!(probe, Ok(s) if s.success()) && Counter::Perf.read("", &report).is_ok() {
         return Ok(Counter::Perf);
     }
-    let valgrind = Command::new("valgrind")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .status();
-    if matches!(valgrind, Ok(s) if s.success()) {
-        return Ok(Counter::Callgrind);
-    }
-    Err("no instruction counter: install perf (with kernel.perf_event_paranoid at most 2) or valgrind, or name one with --counter".into())
+    Err("no instruction counter: install valgrind, or perf with a hardware counter and kernel.perf_event_paranoid at most 2, or name one with --counter".into())
 }
 
 /// Runs `case` once, counted when `counter` is set.
@@ -306,8 +339,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
         p.bench
             .recompile_bundle(&["valgrind", "--tool=none", "--quiet"])?;
     }
-    let os = std::env::consts::OS;
-    println!("counter: {} on {os}, {runs} runs per case", counter.name());
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    println!(
+        "counter: {} on {os} {arch}, {runs} runs per case",
+        counter.name()
+    );
 
     let mut counts: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     for case in &p.cases {
@@ -325,16 +361,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .collect();
 
     if let Some(path) = &json {
-        let doc = serde_json::json!({
-            "os": os,
-            "counter": counter.name(),
-            "runs": runs,
-            "cases": counts,
-        });
+        let doc = report_json(os, arch, counter, runs, &counts);
         fs::write(path, format!("{doc:#}\n")).map_err(|e| format!("{}: {e}", path.display()))?;
     }
 
-    let path = baseline_path(&p.root, os, counter);
+    let path = baseline_path(&p.root, os, arch, counter);
     let shown = path
         .strip_prefix(&p.root)
         .unwrap_or(&path)
@@ -390,7 +421,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "instruction counts failed against {shown}:\n  {}\nIf the increase is deliberate, rewrite the baseline with `cargo xtask instructions --counter {} --write-baseline` on {os} and state the reason in the pull request.",
+            "instruction counts failed against {shown}:\n  {}\nIf the increase is deliberate, rewrite the baseline with `cargo xtask instructions --counter {} --write-baseline` on {os} {arch}, or copy the `baseline` object of the CI job's `instruction-counts` artifact into it, and state the reason in the pull request.",
             failures.join("\n  "),
             counter.name()
         ))
@@ -487,7 +518,33 @@ mod tests {
 
     #[test]
     fn baseline_is_per_os_and_counter() {
-        let p = baseline_path(Path::new("/r"), "linux", Counter::Perf);
-        assert_eq!(p, Path::new("/r/bench/instructions-linux-perf.json"));
+        let p = baseline_path(Path::new("/r"), "linux", "x86_64", Counter::Callgrind);
+        assert_eq!(
+            p,
+            Path::new("/r/bench/instructions-linux-x86_64-callgrind.json")
+        );
+    }
+
+    #[test]
+    fn report_carries_a_ready_baseline() {
+        let counts: BTreeMap<String, Vec<u64>> =
+            [("a".to_string(), vec![12, 10, 11])].into_iter().collect();
+        let doc = report_json("linux", "x86_64", Counter::Callgrind, 3, &counts);
+        assert_eq!(doc["counter"], "callgrind");
+        assert_eq!(doc["arch"], "x86_64");
+        assert_eq!(doc["cases"]["a"], serde_json::json!([12, 10, 11]));
+        assert_eq!(doc["baseline"], serde_json::json!({"a": 10}));
+    }
+
+    #[test]
+    fn committed_baseline_covers_every_case() {
+        let root = crate::eval::workspace_root();
+        let path = baseline_path(&root, "linux", "x86_64", Counter::Callgrind);
+        let b: BTreeMap<String, u64> =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let mut ours: Vec<&str> = bench::CASE_NAMES.to_vec();
+        ours.sort();
+        assert_eq!(b.keys().map(String::as_str).collect::<Vec<_>>(), ours);
+        assert!(b.values().all(|n| *n > 0));
     }
 }

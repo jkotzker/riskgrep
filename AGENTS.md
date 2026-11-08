@@ -12,7 +12,7 @@ RiskGrep is a local scanner that scores files from 0 to 100 per sensitive-data c
 - `crates/riskgrep-core`: the library (classification, rules bundle, scanning, scoring, cache, configuration, baselines). The built-in rulesets live in `crates/riskgrep-core/rulesets/` and are embedded at build time; their format is in [`crates/riskgrep-core/rulesets/README.md`](crates/riskgrep-core/rulesets/README.md).
 - `crates/riskgrep`: the `riskgrep` command line and the git `pre-commit` hook.
 - `crates/riskgrep-claude`: the Claude Code `PreToolUse` hook ([`docs/claude-code.md`](docs/claude-code.md)).
-- `xtask`: `cargo xtask eval`, `cargo xtask bench`, and `cargo xtask convert-gitleaks` (not published).
+- `xtask`: `cargo xtask eval`, `cargo xtask bench`, `cargo xtask instructions`, and `cargo xtask convert-gitleaks` (not published).
 
 ## Setup
 
@@ -40,7 +40,8 @@ Test output must have no warnings. Write the failing test first, then the change
 ## Gates
 
 - **Accuracy.** `cargo xtask eval --skip-oss` runs the synthetic corpus in seconds and is what CI runs. Any change to rules, classification, or scoring also needs the full `cargo xtask eval`, which clones 13 pinned public repositories into `eval/oss/` (gitignored, about 850 MB, needs network access). The release bar must pass, and `eval/baseline-metrics.json` changes only through `--write-baseline` with the reason stated in the pull request. See [`eval/README.md`](eval/README.md).
-- **Latency.** `cargo xtask bench` (needs `hyperfine`) checks the p95 targets in `bench/targets.toml` and the stored per-OS baseline. Run it on an otherwise idle machine. Relaxing a target needs the maintainer's approval.
+- **Latency regressions.** `cargo xtask instructions` answers "did this change make it slower?". It counts the instructions of every case in `bench/targets.toml` and fails when a case's count is more than 1% over the committed baseline. CI's `instruction counts` job runs it on Linux x86_64 with Valgrind's callgrind against `bench/instructions-linux-x86_64-callgrind.json`; run the same with `cargo xtask instructions --counter callgrind` on any Linux x86_64 machine with Valgrind, under any load. A deliberate increase rewrites the baseline in the pull request that causes it (`--write-baseline` on Linux x86_64, or the `baseline` object of the job's `instruction-counts` artifact), with the reason stated. On macOS the counter is `/usr/bin/time -l`, which compares two local builds but has no committed baseline, and hosted macOS runners report no instruction count.
+- **Latency targets.** `cargo xtask bench` (needs `hyperfine`) answers "is it fast enough?": it checks the p95 targets in `bench/targets.toml` and the stored per-OS baseline. Run it on an otherwise idle machine. Relaxing a target needs the maintainer's approval.
 - **Repository scan.** CI runs `riskgrep scan . --fail-at secret=80,biometric=75 --on-error block` with the committed `.riskgrep.toml`. Add an `[ignore]` entry only for deliberate content (rule sources, upstream example keys, test data), scoped as narrowly as possible and commented with why it is safe.
 
 ## Rulesets
