@@ -4,6 +4,8 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [1.3.0] – 2026-11-08
+
 ### Upgrading
 
 - YARA `include` statements are not supported in rulesets: a ruleset that uses one now fails to compile, and the files it would scan are reported `unscanned`. Put the included rules in the ruleset's own `*.yar` files. See `crates/riskgrep-core/rulesets/README.md`.
@@ -160,7 +162,8 @@ p95 latency targets, checked by `cargo xtask bench` on the release build with a 
 | `riskgrep scan -`, 1 MB | 50 ms | 17.05 ms |
 | `riskgrep git pre-commit`, 20 staged text files, uncached | 100 ms | 90.15 ms |
 
-[Unreleased]: https://github.com/jkotzker/riskgrep/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/jkotzker/riskgrep/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/jkotzker/riskgrep/releases/tag/v1.3.0
 [1.2.0]: https://github.com/jkotzker/riskgrep/releases/tag/v1.2.0
 [1.1.0]: https://github.com/jkotzker/riskgrep/releases/tag/v1.1.0
 [1.0.1]: https://github.com/jkotzker/riskgrep/releases/tag/v1.0.1
