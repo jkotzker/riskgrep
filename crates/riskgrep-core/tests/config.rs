@@ -755,6 +755,20 @@ fn show_takes_a_repositorys_rules_only_when_it_is_trusted() {
 }
 
 #[test]
+fn show_quotes_a_config_error_only_from_a_file_the_user_vouches_for() {
+    use riskgrep_core::config::load_show;
+    const QUIET: &str = "cannot be read as configuration";
+    let e = env(None, Some("not toml =\n"));
+    assert!(load_show(Some(e.root())).unwrap_err().0.contains(QUIET));
+    drop(e);
+    let e = env(Some("trusted_repos = [\"{repo}\"]\n"), Some("not toml =\n"));
+    assert!(!load_show(Some(e.root())).unwrap_err().0.contains(QUIET));
+    drop(e);
+    let e = env(Some("not toml =\n"), None);
+    assert!(!load_show(Some(e.root())).unwrap_err().0.contains(QUIET));
+}
+
+#[test]
 fn show_limits_of_zero_are_errors() {
     use riskgrep_core::config::load_show;
     for t in ["[show]\nmax_bytes = 0\n", "[show]\ntime_budget_ms = 0\n"] {
