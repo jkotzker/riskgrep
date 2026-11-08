@@ -5,23 +5,10 @@ use crate::{stdout_result, CliError};
 use riskgrep_core::config;
 use riskgrep_core::show::{show_file, Marker, ShowOptions, Shown};
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 
 /// Exit status when the view is refused.
 pub const EXIT_REFUSED: i32 = 2;
-
-/// `s` with control characters written as escapes, so a file name cannot
-/// move the cursor or hide text in the terminal.
-fn escape_controls(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_control() {
-            out.extend(c.escape_default());
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
 
 pub fn show(a: ShowArgs) -> Result<i32, CliError> {
     let root = crate::scan::repo_root();
@@ -38,7 +25,7 @@ pub fn show(a: ShowArgs) -> Result<i32, CliError> {
         Ok(Shown::Masked { text, .. }) => text,
         Ok(Shown::Summary(s)) => s.into_bytes(),
         Err(r) => {
-            let name = escape_controls(&a.file.display().to_string());
+            let name = crate::git::display(a.file.as_os_str().as_bytes());
             eprintln!("riskgrep show: {name}: not shown: {r}");
             return Ok(EXIT_REFUSED);
         }

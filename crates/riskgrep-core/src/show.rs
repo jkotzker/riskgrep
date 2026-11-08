@@ -292,12 +292,16 @@ pub fn parse_lines(s: &str) -> Result<(u64, u64), String> {
 }
 
 /// The configuration a `show` scan uses: the defaults, every rule
-/// `cfg` adds, the command's own limits, and no evidence cache.
-fn scan_config(cfg: &ShowConfig, size: u64) -> Config {
+/// `cfg` adds, the command's own time limit, and no evidence cache. The
+/// text limit is `text_max`: for text, the size was checked against
+/// `[show] max_bytes` before the read, and the masked text, which the
+/// rescans read, can be longer than the file (markers naming rules are
+/// longer than short matches), so text is never sampled.
+fn scan_config(cfg: &ShowConfig, text_max: u64) -> Config {
     Config {
         extra_ruleset_dirs: cfg.extra_ruleset_dirs.clone(),
         limits: Limits {
-            text_max: cfg.max_bytes.max(size),
+            text_max,
             time_budget: cfg.time_budget,
             ..Limits::default()
         },
@@ -352,20 +356,19 @@ pub fn show_file(
         .unwrap_or_default();
     let head = &bytes[..bytes.len().min(Limits::default().sniff)];
     let class = crate::scanner::classify(&name, head, bytes.len() as u64);
-    let mut rg = RiskGrep::with_cache_dir(scan_config(cfg, bytes.len() as u64), None, cache_dir)
+    let text = matches!(class, FileClass::Text | FileClass::EncodedText(_));
+    // A format read from disk by structure keeps the size cap as its text
+    // limit, should the file grow before that read.
+    let text_max = if text { u64::MAX } else { cfg.max_bytes };
+    let mut rg = RiskGrep::with_cache_dir(scan_config(cfg, text_max), None, cache_dir)
         .or_else(|e| refuse(format!("could not start the scanner ({})", e.0)))?;
     let target = path.display().to_string();
-    let shown = match class {
-        FileClass::Text | FileClass::EncodedText(_) => {
-            masked(&mut rg, &target, &real, &bytes, &class, opts)
-        }
-        _ => {
-            drop(bytes);
-            summary(&mut rg, path, &class)
-        }
-    };
-    std::mem::forget(rg);
-    shown
+    if text {
+        masked(&mut rg, &target, &real, &bytes, &class, opts)
+    } else {
+        drop(bytes);
+        summary(&mut rg, path, &class)
+    }
 }
 
 /// The rule ids that match the file's name alone: their location-free
@@ -484,7 +487,7 @@ fn masked(
         let found = spans_of(rg, &c.evidence, &path_rules, text.len())?;
         let outside: Vec<Span> = found
             .into_iter()
-            .filter(|s| !marks.iter().any(|m| m.start <= s.start && s.end <= m.end))
+            .filter(|s| !inside_marker(&marks, s))
             .collect();
         if outside.is_empty() {
             let masks = marks.len();
@@ -499,6 +502,12 @@ fn masked(
     refuse(format!(
         "matches remained outside the markers after {ROUNDS} rounds of masking"
     ))
+}
+
+/// Whether `s` lies wholly inside one of `marks` (sorted, disjoint).
+fn inside_marker(marks: &[Range<usize>], s: &Span) -> bool {
+    let i = marks.partition_point(|m| m.start <= s.start);
+    i > 0 && s.end <= marks[i - 1].end
 }
 
 fn format_name(class: &FileClass) -> String {
@@ -609,6 +618,15 @@ mod tests {
         let (text, _) = render(&more, Marker::Fixed);
         assert_eq!(text, b"a<redacted>\n\ncd");
         assert_eq!(text.iter().filter(|&&b| b == b'\n').count(), 2);
+    }
+
+    #[test]
+    fn containment_in_a_marker() {
+        let marks = vec![2..5, 8..12];
+        let inside = |a, b| inside_marker(&marks, &sp(a, b, "r"));
+        assert!(inside(2, 5) && inside(3, 4) && inside(8, 12) && inside(9, 12));
+        assert!(!inside(1, 3) && !inside(4, 6) && !inside(5, 8) && !inside(0, 1));
+        assert!(!inside(11, 13) && !inside(2, 9) && !inside(12, 13));
     }
 
     #[test]

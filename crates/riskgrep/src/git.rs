@@ -301,7 +301,7 @@ fn split_sections(patch: &[u8]) -> Vec<&[u8]> {
 }
 
 /// Lossy path text with control characters escaped.
-fn display(path: &[u8]) -> String {
+pub(crate) fn display(path: &[u8]) -> String {
     let mut s = String::new();
     for ch in String::from_utf8_lossy(path).chars() {
         if ch.is_control() {

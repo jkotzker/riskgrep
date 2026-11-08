@@ -334,3 +334,112 @@ fn lines_parse_and_select() {
     assert_eq!(select_lines(t, 3, 9), b"l3\nl4");
     assert_eq!(select_lines(t, 7, 9), b"");
 }
+
+/// A ruleset directory adding three rules: one that matches plain content,
+/// one that matches only next to a marker (so only a rescan finds it), and
+/// one that matches the letter before a marker (so every rescan finds one
+/// more).
+fn extra_rules() -> TempDir {
+    let d = tempfile::tempdir().unwrap();
+    fs::write(
+        d.path().join("ruleset.toml"),
+        "id = \"show_test\"\nversion = \"0.1.0\"\nlicence = \"MIT\"\n\
+         description = \"test rules\"\ncategories = [\"secret\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        d.path().join("rules.yar"),
+        r#"rule added_word {
+  meta:
+    category = "secret"
+    weight = 10
+  strings:
+    $re = "zebra-quokka"
+  condition:
+    $re
+}
+rule near_marker {
+  meta:
+    category = "secret"
+    weight = 10
+  strings:
+    $re = "near <redacted>"
+  condition:
+    $re
+}
+rule creeping {
+  meta:
+    category = "secret"
+    weight = 10
+  strings:
+    $re = /[a-z]<redacted>/
+  condition:
+    $re
+}
+"#,
+    )
+    .unwrap();
+    d
+}
+
+fn show_with(rules: &Path, path: &Path) -> Result<Shown, String> {
+    let cfg = ShowConfig {
+        extra_ruleset_dirs: vec![rules.to_path_buf()],
+        ..ShowConfig::default()
+    };
+    show_file(&cfg, path, &ShowOptions::default(), Some(cache())).map_err(|r| r.0)
+}
+
+#[test]
+fn added_rules_mask_and_rescans_mask_what_masking_reveals() {
+    let rules = extra_rules();
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("github_pat", 21);
+    let p = write(
+        &dir,
+        "app.txt",
+        format!("pet = zebra-quokka\nnear {key} tail\n").as_bytes(),
+    );
+    let Ok(Shown::Masked { text, masks }) = show_with(rules.path(), &p) else {
+        panic!("not masked");
+    };
+    assert!(!contains(&text, key.as_bytes()));
+    assert_eq!(masks, 2);
+    // `near ` joined the key's marker on the rescan.
+    assert!(text == format!("pet = {FIXED_MARKER}\n{FIXED_MARKER} tail\n").into_bytes());
+}
+
+#[test]
+fn matches_left_after_every_round_refuse_the_view() {
+    let rules = extra_rules();
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("github_pat", 22);
+    let p = write(&dir, "creep.txt", format!("abcdefgh{key}\n").as_bytes());
+    let r = show_with(rules.path(), &p).unwrap_err();
+    assert!(r.contains("rounds"), "{r}");
+}
+
+#[test]
+fn markers_longer_than_their_matches_do_not_refuse_a_file_at_the_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let keys: Vec<String> = (0..20)
+        .map(|i| synth::fake_secret("aws_access_key", 100 + i))
+        .collect();
+    let text = keys.join("\n") + "\n";
+    let p = write(&dir, "keys.txt", text.as_bytes());
+    let cfg = ShowConfig {
+        max_bytes: text.len() as u64,
+        ..ShowConfig::default()
+    };
+    let opts = ShowOptions {
+        marker: Marker::RuleIds,
+        lines: None,
+    };
+    let shown = show_file(&cfg, &p, &opts, Some(cache())).map_err(|r| r.0);
+    let Ok(Shown::Masked { text: out, masks }) = shown else {
+        panic!("not masked: {:?}", shown.err());
+    };
+    assert_eq!(masks, 20);
+    assert!(out.len() > text.len(), "the markers are the longer text");
+    assert!(keys.iter().all(|k| !contains(&out, k.as_bytes())));
+}
