@@ -1311,6 +1311,122 @@ fn show_masks_paths_the_allowlist_covers() {
     assert!(has(&out, "<redacted>"));
 }
 
+/// One ruleset, `probe`, holding `source`, in `dir`.
+fn write_ruleset(dir: &Path, source: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join("ruleset.toml"),
+        "id = \"probe\"\nversion = \"1\"\nlicence = \"MIT\"\n\
+         description = \"test\"\ncategories = [\"secret\"]\n",
+    )
+    .unwrap();
+    fs::write(dir.join("rules.yar"), source).unwrap();
+}
+
+fn write_user_config(home: &Path, text: &str) {
+    let cfg = home.join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), text).unwrap();
+}
+
+#[test]
+fn a_ruleset_using_include_fails_to_compile() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let line = synth::fake_secret("generic_api_key_assignment", 13);
+    let value = line.split('"').nth(1).unwrap().to_string();
+    let included = work.path().join("data.txt");
+    fs::write(&included, format!("{line}\n")).unwrap();
+    let rules = work.path().join("rules");
+    write_ruleset(&rules, &format!("include \"{}\"\n", included.display()));
+    write_user_config(
+        home.path(),
+        &format!("extra_ruleset_dirs = [\"{}\"]\n", rules.display()),
+    );
+    let target = work.path().join("note.txt");
+    fs::write(&target, "nothing to see\n").unwrap();
+
+    let name = target.to_str().unwrap();
+    for args in [
+        vec!["scan", name, "--on-error", "block"],
+        vec!["show", name],
+    ] {
+        let out = riskgrep_in(home.path(), work.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{}: compile must fail", args[0]);
+        assert!(err.contains("include"), "{}: says why", args[0]);
+        assert!(!has(&out.stdout, &value), "{}: stdout", args[0]);
+        assert!(!has(&out.stderr, &value), "{}: stderr", args[0]);
+    }
+}
+
+#[test]
+fn show_reports_an_untrusted_repository_config_without_its_text() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let line = synth::fake_secret("generic_api_key_assignment", 13);
+    let value = line.split('"').nth(1).unwrap().to_string();
+    let data = other.path().join("data.txt");
+    fs::write(&data, format!("{}\n", line.replace('"', ""))).unwrap();
+    std::os::unix::fs::symlink(&data, dir.path().join(".riskgrep.toml")).unwrap();
+    fs::write(dir.path().join("note.txt"), "nothing\n").unwrap();
+    let out = riskgrep_in(home.path(), dir.path())
+        .args(["show", "note.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains(".riskgrep.toml"));
+    assert!(!has(&out.stdout, &value));
+    assert!(!has(&out.stderr, &value), "the error quoted the file");
+}
+
+#[test]
+fn show_uses_a_repositorys_rules_only_when_it_is_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    write_ruleset(
+        &dir.path().join("rules"),
+        "rule word {\n  meta:\n    category = \"secret\"\n    weight = 10\n\
+         \x20 strings:\n    $re = /pelican-marmot/\n  condition:\n    $re\n}\n",
+    );
+    fs::write(
+        dir.path().join(".riskgrep.toml"),
+        "extra_ruleset_dirs = [\"rules\"]\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("note.txt"), "name = pelican-marmot\n").unwrap();
+
+    let untrusted = tempfile::tempdir().unwrap();
+    let out = riskgrep_in(untrusted.path(), dir.path())
+        .args(["show", "--rule-ids", "note.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, "probe:word"), "untrusted rules must not apply");
+
+    let trusted = tempfile::tempdir().unwrap();
+    write_user_config(
+        trusted.path(),
+        &format!("trusted_repos = [\"{}\"]\n", dir.path().display()),
+    );
+    let out = riskgrep_in(trusted.path(), dir.path())
+        .args(["show", "--rule-ids", "note.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(has(&out, "<redacted: probe:word>"), "trusted rules apply");
+    assert!(!has(&out, "pelican-marmot"));
+}
+
 #[test]
 fn show_rejects_a_zero_limit() {
     let home = tempfile::tempdir().unwrap();

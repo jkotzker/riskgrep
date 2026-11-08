@@ -20,10 +20,13 @@
 //! - The first word is the canonical path of the trusted binary
 //!   ([`trusted_riskgrep`]), exactly: a different binary named `riskgrep`,
 //!   a relative name found through `PATH`, or a wrapper (`command`, `env`,
-//!   `exec`) is not exempt. A shell function cannot take its place, because
-//!   no definition can precede it in a single simple command, and shell
-//!   state (functions, aliases, exported variables) does not persist between
-//!   Claude Code `Bash` calls (measured with Claude Code 2.1.318).
+//!   `exec`) is not exempt. The command itself cannot define a shell
+//!   function to take its place, because no definition can precede it in a
+//!   single simple command, and shell state (functions, aliases, exported
+//!   variables) does not persist between Claude Code `Bash` calls (measured
+//!   with Claude Code 2.1.318). A function named after the trusted path in a
+//!   shell startup file can take its place, in bash and in zsh: the exemption
+//!   does not cover a shell whose startup files are not the user's own.
 //! - The options are `--rule-ids` and `--lines FIRST:LAST`, each at most
 //!   once, in any order, then an optional `--`, then exactly one file that
 //!   does not start with `-` (unless after `--`).

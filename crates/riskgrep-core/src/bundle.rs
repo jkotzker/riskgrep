@@ -85,6 +85,8 @@ fn merge_stopwords(rulesets: &[&Ruleset]) -> Result<BTreeMap<String, Vec<String>
 
 fn compile(rulesets: &[&Ruleset]) -> Result<yara_x::Rules> {
     let mut c = yara_x::Compiler::new();
+    // A ruleset is its own files: its sources cannot pull in any other.
+    c.enable_includes(false);
     c.define_global("path", "")
         .map_err(|e| err(format!("define_global: {e}")))?;
     // Whether path allowlists apply (`Config::path_allowlist_applies`); set

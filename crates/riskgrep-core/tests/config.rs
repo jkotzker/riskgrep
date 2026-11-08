@@ -695,16 +695,77 @@ fn show_config_adds_rule_dirs_from_every_file_and_reads_its_limits() {
     assert_eq!(
         c.extra_ruleset_dirs,
         vec![e.home.path().join(".config/riskgrep/user-rules")],
-        "a repository list adds to the user list, never replaces it"
     );
     assert_eq!(c.max_bytes, 4096);
     assert_eq!(c.time_budget, Duration::from_millis(1500));
     drop(e);
     let e = env(None, Some("extra_ruleset_dirs = [\"r\"]\n"));
     let c = load_show(Some(e.root())).unwrap();
-    assert_eq!(c.extra_ruleset_dirs, vec![e.root().join("r")]);
     assert_eq!(c.max_bytes, SHOW_MAX_BYTES);
     assert_eq!(ShowConfig::default().max_bytes, 64 << 20);
+}
+
+#[test]
+fn show_takes_a_repositorys_rules_only_when_it_is_trusted() {
+    use riskgrep_core::config::load_show;
+    let repo = "extra_ruleset_dirs = [\"r\"]\n[show]\nmax_bytes = 2048\n";
+
+    let e = env(None, Some(repo));
+    let c = load_show(Some(e.root())).unwrap();
+    assert!(c.extra_ruleset_dirs.is_empty(), "no user file: not trusted");
+    assert_eq!(c.max_bytes, 2048, "its limits still apply");
+    drop(e);
+
+    // Listed by another repository only.
+    let e = env(Some("trusted_repos = [\"/elsewhere\"]\n"), Some(repo));
+    let c = load_show(Some(e.root())).unwrap();
+    assert!(c.extra_ruleset_dirs.is_empty());
+    drop(e);
+
+    // A repository cannot trust itself.
+    let own = "trusted_repos = [\".\"]\nextra_ruleset_dirs = [\"r\"]\n";
+    let e = env(None, Some(own));
+    let c = load_show(Some(e.root())).unwrap();
+    assert!(c.extra_ruleset_dirs.is_empty());
+    drop(e);
+
+    // The user file's own rules apply whether or not it is trusted.
+    let e = env(Some("extra_ruleset_dirs = [\"mine\"]\n"), Some(repo));
+    let c = load_show(Some(e.root())).unwrap();
+    assert_eq!(
+        c.extra_ruleset_dirs,
+        vec![e.home.path().join(".config/riskgrep/mine")]
+    );
+    drop(e);
+
+    let e = env(
+        Some("extra_ruleset_dirs = [\"mine\"]\ntrusted_repos = [\"{repo}\"]\n"),
+        Some(repo),
+    );
+    let c = load_show(Some(e.root())).unwrap();
+    assert_eq!(
+        c.extra_ruleset_dirs,
+        vec![
+            e.home.path().join(".config/riskgrep/mine"),
+            e.root().join("r")
+        ],
+        "a trusted repository's list adds to the user list"
+    );
+    assert_eq!(c.max_bytes, 2048);
+}
+
+#[test]
+fn show_quotes_a_config_error_only_from_a_file_the_user_vouches_for() {
+    use riskgrep_core::config::load_show;
+    const QUIET: &str = "cannot be read as configuration";
+    let e = env(None, Some("not toml =\n"));
+    assert!(load_show(Some(e.root())).unwrap_err().0.contains(QUIET));
+    drop(e);
+    let e = env(Some("trusted_repos = [\"{repo}\"]\n"), Some("not toml =\n"));
+    assert!(!load_show(Some(e.root())).unwrap_err().0.contains(QUIET));
+    drop(e);
+    let e = env(Some("not toml =\n"), None);
+    assert!(!load_show(Some(e.root())).unwrap_err().0.contains(QUIET));
 }
 
 #[test]
