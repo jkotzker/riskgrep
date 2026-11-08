@@ -57,6 +57,8 @@ Pattern identifiers starting with `$re`, `$hdr`, or `$hit` are evidence anchors:
 
 Header conditions that read integers (`uint32(0)`, `uint32(4)`) must guard against short files and unrelated data themselves: the safetensors rules check `uint32(4) == 0` (a header length below 2^32), `uint32(0) > 1`, and `uint32(0) + 8 <= filesize` before the post-processor parses the header.
 
+`include` is not supported: a ruleset is its own files, and one that uses `include` fails to compile (`include statements not allowed`). Checked by `cargo test -p riskgrep --test cli a_ruleset_using_include_fails_to_compile`.
+
 Regexes are compiled without Unicode, so use `(?i)` for ASCII case folding; YARA-X regexes have no lookaround.
 
 A regex in a condition (`path matches /…/`) is compiled by each scanner on its first use, so a scanner that handles one file, as `riskgrep git pre-commit` does, pays about 1M to 3M instructions per regex for every file, whether or not the name matches (`eval/README.md`, round 9). In a path rule, prefer the string operators (`iequals`, `iendswith`, `icontains`), or put a string prefilter before the regex.

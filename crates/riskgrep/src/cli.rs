@@ -37,7 +37,7 @@ pub enum Command {
 structural summary: format, tensor data types and shapes, member counts, and scores, never \
 names or values.\n\n\
 The file is read once and scanned whole by every built-in rule and any rules \
-`extra_ruleset_dirs` adds; categories, rulesets, weight overrides, ignore entries, \
+`extra_ruleset_dirs` adds (a repository's only when it is in `trusted_repos`); categories, rulesets, weight overrides, ignore entries, \
 baselines, and path allowlists (`path_allowlist`) never narrow the mask. The masked text is scanned again before it is printed. \
 Values the rules do not detect are printed.\n\n\
 Exit codes: 0 printed; 2 refused, with the reason on standard error and nothing on \

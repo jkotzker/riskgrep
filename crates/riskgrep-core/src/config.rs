@@ -663,9 +663,10 @@ pub struct ShowConfig {
     /// `[show] time_budget_ms`: the time limit of each scan, and of the
     /// command: no rescan starts once it is spent. Running out refuses.
     pub time_budget: Duration,
-    /// Every `extra_ruleset_dirs` entry of the user file and the repository
-    /// file together, in that order, without duplicates: a later file adds
-    /// to an earlier one's list instead of replacing it.
+    /// Every `extra_ruleset_dirs` entry of the user file and, when the
+    /// repository is in the user file's `trusted_repos`, of the repository
+    /// file, in that order, without duplicates: a later file adds to an
+    /// earlier one's list instead of replacing it.
     pub extra_ruleset_dirs: Vec<PathBuf>,
 }
 
@@ -680,28 +681,49 @@ impl Default for ShowConfig {
 }
 
 /// The `riskgrep show` configuration: defaults, then the user file, then
-/// the repository file (read in every case: it can only add rules or
-/// change the command's limits). A file that does not parse is an error,
-/// as for every other command.
+/// the repository file. The repository file's `[show]` limits always apply
+/// (they can only change when the command refuses); its
+/// `extra_ruleset_dirs` apply only when the repository is in the user
+/// file's `trusted_repos`, since rules decide what the command masks and
+/// refuses. `trusted_repos` in a repository file is ignored. A file that
+/// does not parse is an error, as for every other command; for an untrusted
+/// repository's file, the error does not quote the text.
 pub fn load_show(repo_root: Option<&Path>) -> Result<ShowConfig, ConfigError> {
     let mut out = ShowConfig::default();
-    let mut paths: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut paths: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
     if let Some(p) = user_config_path() {
         if let Some(dir) = p.parent() {
-            paths.push((p.clone(), dir.to_path_buf()));
+            paths.push((p.clone(), dir.to_path_buf(), false));
         }
     }
     if let Some(root) = repo_root {
-        paths.push((root.join(REPO_CONFIG), root.to_path_buf()));
+        paths.push((root.join(REPO_CONFIG), root.to_path_buf(), true));
     }
-    for (path, base) in paths {
-        let Some(mut layer) = read_layer(&path)? else {
+    let mut trusted = Vec::new();
+    for (path, base, from_repo) in paths {
+        let untrusted = from_repo && !repo_root.is_some_and(|r| is_trusted(r, &trusted));
+        let read = read_layer(&path).map_err(|e| {
+            if untrusted {
+                ConfigError(format!(
+                    "invalid config {}: cannot be read as configuration",
+                    path.display()
+                ))
+            } else {
+                e
+            }
+        })?;
+        let Some(mut layer) = read else {
             continue;
         };
         layer.resolve_paths(&base);
-        for d in layer.extra_ruleset_dirs.unwrap_or_default() {
-            if !out.extra_ruleset_dirs.contains(&d) {
-                out.extra_ruleset_dirs.push(d);
+        if !from_repo {
+            trusted = layer.trusted_repos.take().unwrap_or_default();
+        }
+        if !untrusted {
+            for d in layer.extra_ruleset_dirs.unwrap_or_default() {
+                if !out.extra_ruleset_dirs.contains(&d) {
+                    out.extra_ruleset_dirs.push(d);
+                }
             }
         }
         if let Some(s) = layer.show {
