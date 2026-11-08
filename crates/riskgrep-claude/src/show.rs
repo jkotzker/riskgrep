@@ -145,9 +145,11 @@ pub fn masked_view_command(trusted: &str, file: &str) -> Option<String> {
 
 /// The `riskgrep` binary the hook trusts to show masked views: the regular
 /// file named `riskgrep` in the directory of this hook's own executable,
-/// by canonical path. An agent able to replace it could replace the hook
-/// itself, so trusting it adds no exposure. `None` when there is none, or
-/// its path is not absolute or cannot be written as a shell word.
+/// after links to the hook are followed. It must not itself be a link,
+/// which could point anywhere: in the hook's own directory, whoever can
+/// replace it can replace the hook too, so trusting it adds no exposure.
+/// `None` when there is none, or its path cannot be written as a shell
+/// word.
 pub fn trusted_riskgrep() -> Option<String> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     trusted_beside(&exe)
@@ -155,8 +157,8 @@ pub fn trusted_riskgrep() -> Option<String> {
 
 /// [`trusted_riskgrep`] for the executable at `exe`.
 pub fn trusted_beside(exe: &Path) -> Option<String> {
-    let p = exe.parent()?.join("riskgrep").canonicalize().ok()?;
-    if !p.is_absolute() || !std::fs::metadata(&p).ok()?.is_file() {
+    let p = exe.parent()?.canonicalize().ok()?.join("riskgrep");
+    if !p.is_absolute() || !std::fs::symlink_metadata(&p).ok()?.is_file() {
         return None;
     }
     let s = p.to_str()?.to_string();
@@ -263,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn the_trusted_binary_is_the_canonical_sibling() {
+    fn the_trusted_binary_is_a_regular_file_beside_the_hook() {
         let d = tempfile::tempdir().unwrap();
         let bin = d.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -273,13 +275,14 @@ mod tests {
         std::fs::create_dir(bin.join("riskgrep")).unwrap();
         assert_eq!(trusted_beside(&hook), None, "a directory is not trusted");
         std::fs::remove_dir(bin.join("riskgrep")).unwrap();
+        // A link would move the trusted binary out of the hook's directory.
         let real = d.path().join("real-riskgrep");
         std::fs::write(&real, b"").unwrap();
         std::os::unix::fs::symlink(&real, bin.join("riskgrep")).unwrap();
+        assert_eq!(trusted_beside(&hook), None, "a link is not trusted");
+        std::fs::remove_file(bin.join("riskgrep")).unwrap();
+        std::fs::write(bin.join("riskgrep"), b"").unwrap();
         let t = trusted_beside(&hook).unwrap();
-        assert_eq!(Path::new(&t), real.canonicalize().unwrap());
-        // The link's own path is not the trusted word.
-        let link = bin.join("riskgrep").to_str().unwrap().to_string();
-        assert!(!is_masked_view(&format!("{link} show a"), &t));
+        assert_eq!(Path::new(&t), bin.canonicalize().unwrap().join("riskgrep"));
     }
 }

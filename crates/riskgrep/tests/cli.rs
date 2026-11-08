@@ -1129,6 +1129,15 @@ fn show_lines_and_rule_ids() {
         .clone();
     assert!(!has(&out, &key));
     assert!(out == b"let id = \"<redacted: secrets_core:aws_access_token>\";\n");
+    // Every element of the shape the Claude Code hook exempts and offers.
+    let out = riskgrep(dir.path())
+        .args(["show", "--rule-ids", "--lines", "7:7", "--", "key.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(out == b"let id = \"<redacted: secrets_core:aws_access_token>\";\n");
     riskgrep(dir.path())
         .args(["show", "key.txt", "--lines", "3:1"])
         .assert()

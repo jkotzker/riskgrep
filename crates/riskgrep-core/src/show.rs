@@ -30,6 +30,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// The marker that replaces a masked span by default. It names no rule.
 pub const FIXED_MARKER: &str = "<redacted>";
@@ -364,7 +365,15 @@ pub fn show_file(
         .or_else(|e| refuse(format!("could not start the scanner ({})", e.0)))?;
     let target = path.display().to_string();
     if text {
-        masked(&mut rg, &target, &real, &bytes, &class, opts)
+        masked(
+            &mut rg,
+            &target,
+            &real,
+            &bytes,
+            &class,
+            opts,
+            cfg.time_budget,
+        )
     } else {
         drop(bytes);
         summary(&mut rg, path, &class)
@@ -450,7 +459,11 @@ fn masked(
     bytes: &[u8],
     class: &FileClass,
     opts: &ShowOptions,
+    budget: Duration,
 ) -> Result<Shown, Refusal> {
+    // The budget is for the command: each scan is bounded by it, and no
+    // rescan starts once it is spent.
+    let deadline = Instant::now() + budget;
     let report = rg.scan_text_file(target, real, bytes, false);
     let t = only(&report.targets)?;
     if t.status != TargetStatus::Scanned {
@@ -475,6 +488,12 @@ fn masked(
         _ => mask_source(bytes, spans, &|b| b.to_vec()),
     };
     for _ in 0..ROUNDS {
+        if Instant::now() >= deadline {
+            return refuse(
+                "the masked text could not be checked: the time budget ran out \
+                 ([show] time_budget_ms)",
+            );
+        }
         let (text, marks) = render(&pieces, opts.marker);
         let check = rg.scan_text_file(target, real, &text, true);
         let c = only(&check.targets)?;
@@ -533,7 +552,7 @@ fn summary(rg: &mut RiskGrep, path: &Path, class: &FileClass) -> Result<Shown, R
     let mut s = String::new();
     let _ = writeln!(s, "format: {}", format_name(class));
     let _ = writeln!(s, "content: not shown (not text)");
-    let _ = writeln!(s, "status: {}", status_reason_of(&t.status));
+    let _ = writeln!(s, "status: {}", status_reason(t));
     let tensors: Vec<(&str, &[u64])> = t
         .evidence
         .iter()
@@ -571,15 +590,6 @@ fn summary(rg: &mut RiskGrep, path: &Path, class: &FileClass) -> Result<Shown, R
         let _ = writeln!(s, "scores: {}", scores.join(", "));
     }
     Ok(Shown::Summary(s))
-}
-
-fn status_reason_of(status: &TargetStatus) -> String {
-    match status {
-        TargetStatus::Partial { not_read } => format!("partial ({not_read})"),
-        TargetStatus::Skipped { reason } => format!("skipped ({reason})"),
-        TargetStatus::Unscanned { reason } => format!("unscanned ({reason})"),
-        TargetStatus::Scanned => "scanned".into(),
-    }
 }
 
 #[cfg(test)]

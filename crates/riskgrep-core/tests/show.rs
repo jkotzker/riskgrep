@@ -367,6 +367,13 @@ rule near_marker {
   condition:
     $re
 }
+rule content_flag {
+  meta:
+    category = "secret"
+    weight = 10
+  condition:
+    filesize > 0 and uint8(0) == 0x51
+}
 rule creeping {
   meta:
     category = "secret"
@@ -442,4 +449,16 @@ fn markers_longer_than_their_matches_do_not_refuse_a_file_at_the_cap() {
     assert_eq!(masks, 20);
     assert!(out.len() > text.len(), "the markers are the longer text");
     assert!(keys.iter().all(|k| !contains(&out, k.as_bytes())));
+}
+
+#[test]
+fn a_content_match_without_a_location_refuses_the_view() {
+    let rules = extra_rules();
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(&dir, "flag.txt", b"Q starts this file\n");
+    let r = show_with(rules.path(), &p).unwrap_err();
+    assert!(
+        r.contains("content_flag matched the content without a location"),
+        "{r}"
+    );
 }

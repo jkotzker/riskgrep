@@ -594,8 +594,8 @@ pub const SHOW_TIME_BUDGET_MS: u64 = 60_000;
 pub struct ShowConfig {
     /// `[show] max_bytes`: files larger than this are refused.
     pub max_bytes: u64,
-    /// `[show] time_budget_ms`: the scan time limit; a scan that runs out
-    /// is refused.
+    /// `[show] time_budget_ms`: the time limit of each scan, and of the
+    /// command: no rescan starts once it is spent. Running out refuses.
     pub time_budget: Duration,
     /// Every `extra_ruleset_dirs` entry of the user file and the repository
     /// file together, in that order, without duplicates: a later file adds
