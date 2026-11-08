@@ -120,7 +120,7 @@ SQLite databases are read under the same limits, through the file format rather 
 
 Other keys select rulesets (`rulesets`, `extra_ruleset_dirs`), adjust rule weights (`weight_overrides`), and list paths and rules to ignore (`[ignore]`). `path_allowlist = false` turns off gitleaks' global path allowlist, which the converted secret rules apply to lockfiles, vendored directories such as `node_modules/`, and image, font, and document names; `path_allowlist` under `[claude_code]` or `[git]`, or `riskgrep scan --path-allowlist on|off`, overrides it for that integration. A target the allowlist applied to reports `path_allowlisted`. See [the allowlist](docs/known-limitations.md#gitleaks-global-path-allowlist-skips-lockfiles-node_modules-and-similar).
 
-`riskgrep show` reads only its own table and `extra_ruleset_dirs`. A repository file's `extra_ruleset_dirs` count only when the repository is in the user file's `trusted_repos`; those entries are added to the user file's rather than replacing them. The repository file's `[show]` limits always apply, and an error about an untrusted repository's file does not quote its text:
+`riskgrep show` reads only its own table and `extra_ruleset_dirs`. A repository file's `extra_ruleset_dirs` count only when the repository is in the user file's `trusted_repos`; those entries are added to the user file's rather than replacing them. The repository file's `[show]` limits always apply:
 
 ```toml
 [show]
@@ -128,7 +128,7 @@ max_bytes = 67108864    # default (64 MiB); a larger file is refused
 time_budget_ms = 60000  # default; bounds each scan, and no rescan starts after it
 ```
 
-Trust: the Claude Code hook reads a repository's `.riskgrep.toml` and `.riskgrep-baseline.json` only when the repository is listed in `trusted_repos` in the user config. An agent can write files in a repository, so an untrusted repository file is never allowed to loosen the checks. The command line and the git hook read the repository files without this restriction, except that `riskgrep show` takes a repository's `extra_ruleset_dirs` only when it is listed in `trusted_repos`. `trusted_repos` in a repository file is ignored.
+Trust: the Claude Code hook reads a repository's `.riskgrep.toml` and `.riskgrep-baseline.json` only when the repository is listed in `trusted_repos` in the user config. An agent can write files in a repository, so an untrusted repository file is never allowed to loosen the checks. The command line and the git hook read the repository files without this restriction, except that `riskgrep show` takes a repository's `extra_ruleset_dirs` only when it is listed in `trusted_repos`. An error about a file an untrusted repository supplies (its `.riskgrep.toml`, or a `ruleset.toml` or `*.yar` file of its rulesets) names the file and does not quote it, in every command. `trusted_repos` in a repository file is ignored.
 
 The cache (compiled rules and per-file evidence, with no file content) is in `~/Library/Caches/riskgrep` on macOS and `$XDG_CACHE_HOME/riskgrep` or `~/.cache/riskgrep` on Linux.
 

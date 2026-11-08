@@ -203,10 +203,19 @@ fn git_mode_reads_repo_config() {
 
 #[test]
 fn unknown_key_is_error() {
-    let e = env(None, Some("[claude_code]\non_eror = \"allow\"\n"));
+    let repo = "[claude_code]\non_eror = \"allow\"\n";
+    let e = env(Some("trusted_repos = [\"{repo}\"]\n"), Some(repo));
     let err = load(Mode::Git, Some(e.root()), Overrides::default()).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("on_eror"), "{msg}");
+    assert!(msg.contains(".riskgrep.toml"), "{msg}");
+    drop(e);
+
+    // An untrusted repository's file is named and not quoted.
+    let e = env(None, Some(repo));
+    let err = load(Mode::Git, Some(e.root()), Overrides::default()).unwrap_err();
+    let msg = err.to_string();
+    assert!(!msg.contains("on_eror"), "{msg}");
     assert!(msg.contains(".riskgrep.toml"), "{msg}");
     drop(e);
 
@@ -756,7 +765,7 @@ fn show_takes_a_repositorys_rules_only_when_it_is_trusted() {
 #[test]
 fn show_quotes_a_config_error_only_from_a_file_the_user_vouches_for() {
     use riskgrep_core::config::load_show;
-    const QUIET: &str = "cannot be read as configuration";
+    const QUIET: &str = "could not be read as configuration";
     let e = env(None, Some("not toml =\n"));
     assert!(load_show(Some(e.root())).unwrap_err().0.contains(QUIET));
     drop(e);

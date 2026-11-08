@@ -96,8 +96,12 @@ fn compile(rulesets: &[&Ruleset]) -> Result<yara_x::Rules> {
     for rs in rulesets {
         c.new_namespace(&rs.id);
         for (file, src) in &rs.sources {
-            c.add_source(src.as_ref())
-                .map_err(|e| err(format!("ruleset {} ({file}): {e}", rs.id)))?;
+            c.add_source(src.as_ref()).map_err(|e| {
+                err(match rs.untrusted_dir() {
+                    Some(d) => format!("ruleset {}: could not be compiled", d.join(file).display()),
+                    None => format!("ruleset {} ({file}): {e}", rs.id),
+                })
+            })?;
         }
     }
     Ok(c.build())

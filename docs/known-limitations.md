@@ -8,6 +8,7 @@ RiskGrep scores files with rules and simple structural checks, not with a model 
 - [File handling](#file-handling)
 - [Claude Code hook](#claude-code-hook)
 - [Git hook](#git-hook)
+- [Configuration](#configuration)
 - [Cache](#cache)
 
 ## Scope and threat model
@@ -203,6 +204,14 @@ Setting `on_unresolved = "ask"` or `"deny"` under `[claude_code]` prompts or blo
 - **Not covered:** a staged path that became a symlink through a type change (a regular file replaced by a symlink), and submodule pointers (gitlinks). Newly added or modified symlinks are scanned, and a type change into a regular file is scanned whole.
 - **Why:** the hook does not score a type change whose new side is a symlink, and a gitlink holds a commit id, not content.
 - **How it shows up:** nothing is scanned for those paths.
+
+## Configuration
+
+### Errors about an untrusted repository's files give less detail
+
+- **Not covered:** the line and column of a mistake in a `.riskgrep.toml`, `ruleset.toml`, or `*.yar` file supplied by a repository that is not in the user file's `trusted_repos`. The error names the file and says it could not be read or compiled, and does not quote it.
+- **Why:** an untrusted repository decides what those files are, so output does not repeat their text.
+- **How it shows up:** to see the detail, add the repository to `trusted_repos`. Errors about a trusted repository's files and the user's own ruleset directories keep it. Checked by `cargo test -p riskgrep --test cli errors_`.
 
 ## Cache
 
