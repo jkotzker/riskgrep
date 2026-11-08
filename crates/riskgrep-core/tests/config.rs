@@ -547,21 +547,40 @@ fn mcp_on_unresolved_and_decisions_load() {
 
 #[test]
 fn mcp_decision_entries_rejected_when_mixed() {
-    for bad in [
-        "[mcp.servers.x.tools.y]\ndecision = \"ask\"\npaths = [\"p\"]\n",
-        "[mcp.servers.x.tools.y]\ndecision = \"ask\"\nkind = \"none\"\n",
-        "[mcp.servers.x.tools.y]\ndecision = \"ask\"\nmax_depth = 1\n",
-        "[mcp.servers.x.tools.y]\ndecision = \"maybe\"\n",
-        "[mcp]\non_unresolved = \"maybe\"\n",
-        "[claude_code.mcp.servers.x.tools.y]\nkind = \"read\"\n",
-        "[claude_code.mcp_tools.\"mcp__x__y\"]\ndecision = \"ask\"\npaths = [\"p\"]\n",
+    let mixed = "an entry with `decision` takes no `paths`, `kind`, or `max_depth`";
+    for (bad, why) in [
+        (
+            "[mcp.servers.x.tools.y]\ndecision = \"ask\"\npaths = [\"p\"]\n",
+            mixed,
+        ),
+        (
+            "[mcp.servers.x.tools.y]\ndecision = \"ask\"\nkind = \"none\"\n",
+            mixed,
+        ),
+        (
+            "[mcp.servers.x.tools.y]\ndecision = \"ask\"\nmax_depth = 1\n",
+            mixed,
+        ),
+        (
+            "[claude_code.mcp_tools.\"mcp__x__y\"]\ndecision = \"ask\"\npaths = [\"p\"]\n",
+            mixed,
+        ),
+        (
+            "[mcp.servers.x.tools.y]\ndecision = \"maybe\"\n",
+            "unknown variant `maybe`",
+        ),
+        (
+            "[mcp]\non_unresolved = \"maybe\"\n",
+            "unknown variant `maybe`",
+        ),
+        (
+            "[claude_code.mcp.servers.x.tools.y]\nkind = \"read\"\n",
+            "claude_code.mcp.servers.\"x\".tools.\"y\": needs `paths`",
+        ),
     ] {
         let _e = env(Some(bad), None);
         let err = load(Mode::ClaudeCode, None, Overrides::default()).unwrap_err();
-        assert!(
-            err.0.contains("invalid config") || err.0.contains("claude_code.mcp"),
-            "{bad}: {err}"
-        );
+        assert!(err.0.contains(why), "{bad}: {err}");
     }
 }
 
