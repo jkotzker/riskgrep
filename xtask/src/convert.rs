@@ -1017,15 +1017,18 @@ fn generate(config: &[u8], tag: &str) -> Result<Generated, String> {
         writeln!(
             yar,
             "\n// gitleaks' global path allowlist; every rule below excludes these paths.\n\
-             private rule {GLOBAL_PATH_RULE} {{\n  meta:\n    category = \"secret\"\n    weight = 0\n  condition:"
+             // It applies while the `path_allowlist` setting is on, and the report says\n\
+             // when it did (`path_allowlist = true`).\n\
+             private rule {GLOBAL_PATH_RULE} {{\n  meta:\n    category = \"secret\"\n    weight = 0\n    \
+             path_allowlist = true\n  condition:\n    path_allowlist_enabled and ("
         )
         .unwrap();
         let conds: Vec<String> = global
             .paths
             .iter()
-            .map(|p| Ok(format!("    path matches {}", yara_regex(p)?)))
+            .map(|p| Ok(format!("      path matches {}", yara_regex(p)?)))
             .collect::<Result<_, String>>()?;
-        writeln!(yar, "{}\n}}", conds.join(" or\n")).unwrap();
+        writeln!(yar, "{}\n    )\n}}", conds.join(" or\n")).unwrap();
     }
 
     let mut idents = BTreeSet::new();
@@ -1305,7 +1308,7 @@ fn upstream_md(
          - `entropy` becomes the `entropy` post-processor on the secret. gitleaks drops a secret whose entropy is at most the threshold; the post-processor drops one below it.\n\
          - Allowlist stopwords become `stopwords/secrets_core_<rule>.txt` (rule and global stopwords) or `stopwords/secrets_core_global.txt` (global only).\n\
          - Allowlist regexes that target the secret become one `allow_regex` alternation (rule and global regexes).\n\
-         - Allowlist paths become `not path matches` conditions; the global ones are the private rule `{GLOBAL_PATH_RULE}`.\n\
+         - Allowlist paths become `not path matches` conditions; the global ones are the private rule `{GLOBAL_PATH_RULE}`, marked `path_allowlist = true` so the report says when it applied, and conditioned on the `path_allowlist_enabled` global, which the `path_allowlist` setting turns off.\n\
          - A rule `path` becomes a `path matches` condition; a rule with only a path yields one evidence item.\n\
          - A regex that would match its own rule text has its last literal letter or digit wrapped in a one-character class (`abc` becomes `ab[c]`), in both `$re` and `span_regex`. It matches the same secrets, and the shipped ruleset does not report itself.",
         cfg.rules.len()

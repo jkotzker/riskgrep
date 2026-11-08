@@ -85,6 +85,8 @@ pub struct ClaudeCodeConfig {
     /// A target with content that was not read (see [`OnPartial`]).
     pub on_partial: OnPartial,
     pub on_unresolved: Action,
+    /// Overrides [`Config::path_allowlist`] for the Claude Code hook.
+    pub path_allowlist: Option<bool>,
     pub time_budget_ms: u64,
     /// MCP tools whose input names files, keyed by tool name (see
     /// [`McpTool`]).
@@ -98,6 +100,8 @@ pub struct GitConfig {
     pub on_skipped: Action,
     /// A target with content that was not read (see [`OnPartial`]).
     pub on_partial: OnPartial,
+    /// Overrides [`Config::path_allowlist`] for the git hook.
+    pub path_allowlist: Option<bool>,
     pub full_files: bool,
 }
 
@@ -129,6 +133,12 @@ pub struct Config {
     pub weight_overrides: BTreeMap<String, f64>,
     pub limits: Limits,
     pub ignore: IgnoreRules,
+    /// Whether rulesets' path allowlists apply (gitleaks' global path
+    /// allowlist, which the converted secret rules and the rules written to
+    /// match them skip): the `path_allowlist_enabled` rule global. On by
+    /// default; `[claude_code]` and `[git]` may override it, and
+    /// [`Config::path_allowlist_applies`] gives the value for [`Config::mode`].
+    pub path_allowlist: bool,
     pub claude_code: ClaudeCodeConfig,
     pub git: GitConfig,
     pub trusted_repos: Vec<PathBuf>,
@@ -148,6 +158,8 @@ pub struct Overrides {
     pub categories: Option<Vec<Category>>,
     pub rulesets: Option<Vec<String>>,
     pub no_cache: bool,
+    /// `riskgrep scan --path-allowlist`: replaces [`Config::path_allowlist`].
+    pub path_allowlist: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +183,7 @@ impl Default for Config {
             weight_overrides: BTreeMap::new(),
             limits: Limits::default(),
             ignore: IgnoreRules::default(),
+            path_allowlist: true,
             claude_code: ClaudeCodeConfig {
                 thresholds: BTreeMap::from([
                     (
@@ -192,6 +205,7 @@ impl Default for Config {
                 on_skipped: Action::Allow,
                 on_partial: OnPartial::Error,
                 on_unresolved: Action::Allow,
+                path_allowlist: None,
                 time_budget_ms: 2000,
                 mcp_tools: default_mcp_tools(),
             },
@@ -200,6 +214,7 @@ impl Default for Config {
                 on_error: Action::Block,
                 on_skipped: Action::Allow,
                 on_partial: OnPartial::Error,
+                path_allowlist: None,
                 full_files: false,
             },
             trusted_repos: Vec::new(),
@@ -238,6 +253,7 @@ struct ClaudeLayer {
     on_skipped: Option<Action>,
     on_partial: Option<OnPartial>,
     on_unresolved: Option<Action>,
+    path_allowlist: Option<bool>,
     time_budget_ms: Option<u64>,
     mcp_tools: Option<BTreeMap<String, McpTool>>,
 }
@@ -249,6 +265,7 @@ struct GitLayer {
     on_error: Option<Action>,
     on_skipped: Option<Action>,
     on_partial: Option<OnPartial>,
+    path_allowlist: Option<bool>,
     full_files: Option<bool>,
 }
 
@@ -274,6 +291,7 @@ struct Layer {
     extra_ruleset_dirs: Option<Vec<PathBuf>>,
     weight_overrides: Option<BTreeMap<String, f64>>,
     trusted_repos: Option<Vec<PathBuf>>,
+    path_allowlist: Option<bool>,
     limits: Option<LimitsLayer>,
     ignore: Option<IgnoreLayer>,
     claude_code: Option<ClaudeLayer>,
@@ -337,6 +355,9 @@ impl Config {
             if let Some(v) = l.trusted_repos {
                 self.trusted_repos = v;
             }
+        }
+        if let Some(v) = l.path_allowlist {
+            self.path_allowlist = v;
         }
         if let Some(x) = l.limits {
             if let Some(v) = x.text_max {
@@ -402,6 +423,9 @@ impl Config {
             if let Some(v) = x.on_unresolved {
                 self.claude_code.on_unresolved = v;
             }
+            if let Some(v) = x.path_allowlist {
+                self.claude_code.path_allowlist = Some(v);
+            }
             if let Some(v) = x.time_budget_ms {
                 self.claude_code.time_budget_ms = v;
             }
@@ -430,10 +454,25 @@ impl Config {
             if let Some(v) = x.on_partial {
                 self.git.on_partial = v;
             }
+            if let Some(v) = x.path_allowlist {
+                self.git.path_allowlist = Some(v);
+            }
             if let Some(v) = x.full_files {
                 self.git.full_files = v;
             }
         }
+    }
+
+    /// Whether path allowlists apply for this configuration's integration:
+    /// `[claude_code]` or `[git]` `path_allowlist` when set, else the
+    /// top-level `path_allowlist`.
+    pub fn path_allowlist_applies(&self) -> bool {
+        let integration = match self.mode {
+            Mode::ClaudeCode => self.claude_code.path_allowlist,
+            Mode::Git => self.git.path_allowlist,
+            Mode::Cli => None,
+        };
+        integration.unwrap_or(self.path_allowlist)
     }
 
     /// Set `weight` on each bundle rule named in `weight_overrides`
@@ -555,6 +594,9 @@ pub fn load(
     }
     if cli_overrides.no_cache {
         cfg.no_cache = true;
+    }
+    if let Some(v) = cli_overrides.path_allowlist {
+        cfg.path_allowlist = v;
     }
     Ok(cfg)
 }

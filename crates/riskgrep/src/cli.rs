@@ -66,6 +66,12 @@ pub enum OnPartial {
     Block,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Switch {
+    On,
+    Off,
+}
+
 #[derive(Args, Debug)]
 pub struct ScanArgs {
     /// Files and directories to scan; `-` reads standard input as `<stdin>`.
@@ -102,6 +108,12 @@ pub struct ScanArgs {
     /// --on-error
     #[arg(long, value_enum, default_value = "error")]
     pub on_partial: OnPartial,
+    /// Whether rulesets' path allowlists apply (gitleaks' global path
+    /// allowlist: vendored code, lock files, image and document names), which
+    /// the converted secret rules skip. Default: the `path_allowlist` setting
+    /// (on)
+    #[arg(long, value_enum, value_name = "on|off")]
+    pub path_allowlist: Option<Switch>,
     /// Do not read or write the evidence cache
     #[arg(long)]
     pub no_cache: bool,

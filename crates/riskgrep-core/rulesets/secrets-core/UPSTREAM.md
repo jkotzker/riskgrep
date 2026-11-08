@@ -31,7 +31,7 @@ cargo xtask convert-gitleaks --config xtask/upstream/gitleaks.toml --tag v8.30.1
 - `entropy` becomes the `entropy` post-processor on the secret. gitleaks drops a secret whose entropy is at most the threshold; the post-processor drops one below it.
 - Allowlist stopwords become `stopwords/secrets_core_<rule>.txt` (rule and global stopwords) or `stopwords/secrets_core_global.txt` (global only).
 - Allowlist regexes that target the secret become one `allow_regex` alternation (rule and global regexes).
-- Allowlist paths become `not path matches` conditions; the global ones are the private rule `gitleaks_global_path_allowlist`.
+- Allowlist paths become `not path matches` conditions; the global ones are the private rule `gitleaks_global_path_allowlist`, marked `path_allowlist = true` so the report says when it applied, and conditioned on the `path_allowlist_enabled` global, which the `path_allowlist` setting turns off.
 - A rule `path` becomes a `path matches` condition; a rule with only a path yields one evidence item.
 - A regex that would match its own rule text has its last literal letter or digit wrapped in a one-character class (`abc` becomes `ab[c]`), in both `$re` and `span_regex`. It matches the same secrets, and the shipped ruleset does not report itself.
   Rewritten: `aws-amazon-bedrock-api-key-short-lived`.

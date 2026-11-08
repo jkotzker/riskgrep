@@ -1,6 +1,6 @@
 //! The `scan` and `baseline` commands.
 
-use crate::cli::{threshold_map, BaselineArgs, Format, OnError, OnPartial, ScanArgs};
+use crate::cli::{threshold_map, BaselineArgs, Format, OnError, OnPartial, ScanArgs, Switch};
 use crate::{text, CliError};
 use riskgrep_core::config::{self, Config, Mode, Overrides};
 use riskgrep_core::model::meets_threshold;
@@ -129,6 +129,7 @@ pub fn scan(a: ScanArgs) -> Result<i32, CliError> {
             .then(|| a.category.iter().cloned().map(Category).collect()),
         rulesets: (!a.ruleset.is_empty()).then(|| a.ruleset.clone()),
         no_cache: a.no_cache,
+        path_allowlist: a.path_allowlist.map(|s| s == Switch::On),
     };
     let (cfg, root) = load_config(overrides)?;
     let known = known_categories(&cfg, root.as_deref())?;
@@ -296,6 +297,7 @@ mod tests {
             text: true,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         }
     }
 
@@ -334,6 +336,9 @@ mod tests {
             skipped: 0,
             not_read: 1,
             opened: 0,
+            path_allowlisted: 0,
+            skipped_kinds: BTreeMap::new(),
+            opened_formats: BTreeMap::new(),
             listed: vec![],
         });
         let r = Report::from_targets("0", "b", vec![c]);

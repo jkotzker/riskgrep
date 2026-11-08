@@ -1682,6 +1682,8 @@ fn a_lone_skipped_member_with_hidden_bytes_is_partial_and_keeps_its_counts() {
         assert_eq!(partial(&t), reason);
         assert!(t.unseen_part().is_some());
         assert_eq!(buckets(&t), (1, 0, 1, 0, 0, 0));
+        // No longer skipped, so no longer counted by kind.
+        assert!(t.container.as_ref().unwrap().skipped_kinds.is_empty());
     }
 }
 

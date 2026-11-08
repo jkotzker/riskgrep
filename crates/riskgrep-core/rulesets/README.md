@@ -22,6 +22,7 @@ Every rule needs these `meta:` keys:
 | `family` | Optional group name; weights in a family combine first |
 | `family_cap` | Optional 0..=100 ceiling for the family's combined weight. Give every rule of a family the same cap: when the rules that fired carry different caps, the cap of the last of them in evidence order applies (a rule without a cap leaves the family's cap unchanged) |
 | `post` | Optional comma-separated post-processors, applied in order |
+| `path_allowlist` | Optional `true`: the rule is a path allowlist that other rules exclude with `not <rule>`, usually a `private` rule, conditioned on `path_allowlist_enabled` (below). It yields no evidence; when it matches, the target (or container member) reports `path_allowlisted`, so a consumer can tell that the rules excluding it did not run there. gitleaks' global path allowlist, `gitleaks_global_path_allowlist` in `secrets-core/gitleaks.yar`, is one |
 
 Keys not listed here and in the post-processor table below are ignored without a warning, so a misspelt optional key (`min_entorpy`) silently leaves the default in place; a misspelt required key fails the load.
 
@@ -50,7 +51,9 @@ Pattern identifiers starting with `$re`, `$hdr`, or `$hit` are evidence anchors:
 
 ## Externals
 
-`path` holds the path being scanned, for path heuristics (`path matches /.../i`).
+`path` holds the path being scanned, for path heuristics (`path matches /.../i`). For a file inside a git repository it is the path from the repository's root (`config/app.ini`), whatever the working directory; for a file outside any repository it is the absolute path (`/srv/app/config/app.ini`). So the same file gives the same result from any working directory, and a rule that matches a parent directory's name (`(?:^|/)node_modules/`) sees the directories above the file only up to the repository root. The repository is the nearest ancestor of the file's directory (symbolic links resolved) holding a `.git` directory or file, found with the checks that decide which repository's configuration is read: the walk stops at a `GIT_CEILING_DIRECTORIES` entry, at the parent of `$HOME`, and at a filesystem boundary unless `GIT_DISCOVERY_ACROSS_FILESYSTEM` is set, a file inside a `.git` directory has no repository, and a repository whose root or `.git` entry another user owns does not count, so its files are seen by their absolute path. A git blob checked by `riskgrep git pre-commit` is seen by its path in the index, which is the same form. A container member is the container's path, `!/`, and the member's path inside it (`backup.zip!/config/app.ini`, nested `backup.zip!/inner.tar!/x`; a SQLite column `app.db!/table/column`). Standard input is `<stdin>`. Suppressions (`[ignore]`, baselines) use their own form: relative to the root of the repository the scan was started in, else to the working directory. Checked by `cargo test -p riskgrep-core --test path_allowlist` and `cargo test -p riskgrep --test cli the_working_directory_does_not_change_a_files_result`; the search's own checks are tested in `crates/riskgrep-core/src/repo.rs`.
+
+`path_allowlist_enabled` is `true` unless the `path_allowlist` setting is off for the integration (`path_allowlist = false` at the top level of a configuration file, overridden by `path_allowlist` under `[claude_code]` or `[git]`, or `riskgrep scan --path-allowlist off`). A path allowlist rule (meta `path_allowlist`, above) puts it first in its condition, so turning the setting off makes every rule that excludes the allowlist apply on those paths.
 
 Header conditions that read integers (`uint32(0)`, `uint32(4)`) must guard against short files and unrelated data themselves: the safetensors rules check `uint32(4) == 0` (a header length below 2^32), `uint32(0) > 1`, and `uint32(0) + 8 <= filesize` before the post-processor parses the header.
 
@@ -69,7 +72,7 @@ A ruleset directory may hold a `tests.toml`; `riskgrep rules test` runs it again
 | `rule` | Bare rule id the case is about (must exist in the ruleset) |
 | `synth` | Generator spec for the sample's content (below) |
 | `expect` | A score: the rule must fire and the rule's category must score that (to 0.1). `"none"`: the rule must not fire |
-| `path` | Optional. Sample file name, relative to a scratch directory that is the working directory for the scan; this is the path that path rules see. Default `sample.txt` |
+| `path` | Optional. Sample file name, written to `caseN/<path>` in a scratch directory that is a repository root, so path rules see `caseN/<path>`. Default `sample.txt` |
 
 Samples are generated at run time from fixed seeds, so nothing sensitive is stored. A sample also passes through file classification, so a case whose content classification skips (an unknown binary) has no evidence at all: a `"none"` case passes vacuously for any rule, and a positive case fails. Check that a negative case's content is scanned (for example with `riskgrep scan --format json`, status `scanned`) before relying on it. Positive cases count towards the "rules have a passing positive case" figure that `rules test` prints; the secrets ruleset's generated gitleaks rules are covered only where a generator below can produce a matching sample.
 
