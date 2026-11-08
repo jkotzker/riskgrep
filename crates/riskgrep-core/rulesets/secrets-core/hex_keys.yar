@@ -8,9 +8,9 @@
 // The key names and separators of `generic_api_key` (as the converter rewrites
 // them; `UPSTREAM.md`, "Local changes"), with a value of 32 to 128 hex digits
 // at entropy 3.0 instead of 3.5: a random 32-character hex value falls below
-// 3.5 about once in five and below 3.0 once in 9,468 (exact: all 16^32
-// strings counted by digit counts), so without this rule `api_key: <hex>` was
-// found about four times in five (`eval/hex_entropy_floor.py` counts the 9,468).
+// 3.5 about once in five and below 3.0 once in 9,468 (exact, counted over all
+// 16^32 strings by `eval/hex_entropy_floor.py`), so without this rule
+// `api_key: <hex>` was found about four times in five.
 // The stopword list applies only through words of 8 or more characters
 // (`stopwords_hex_min_len`), unlike `generic_api_key`: its words spelt with hex
 // digits and shorter than that (`dead`, `feed`) occur by chance in a random

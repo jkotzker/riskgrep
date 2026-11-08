@@ -38,5 +38,7 @@ def below(n, floor):
     return total
 
 n, floor = int(sys.argv[1]), float(sys.argv[2])
+if n > 64:
+    sys.exit("more than 64 digits: the number of digit-count multisets to enumerate grows too fast")
 b = below(n, floor)
 print(f"{b} of 16^{n}: 1 in {16**n / b:,.0f}")

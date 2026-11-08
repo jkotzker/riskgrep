@@ -231,7 +231,7 @@ impl RuleMeta {
             }
         }
 
-        if raw.uint("stopwords_hex_min_len")?.is_some()
+        if raw.get("stopwords_hex_min_len").is_some()
             && !post.iter().any(|p| matches!(p, PostSpec::Stopwords { .. }))
         {
             return Err(raw.err("`stopwords_hex_min_len` requires post `stopwords`"));

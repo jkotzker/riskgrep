@@ -1,6 +1,6 @@
 """Miss rate of random credential values through the scanner, one file per value.
 
-Usage: python3 eval/random_value_miss_rate.py <riskgrep binary> <scratch dir> <values per case> <stopword list>
+Usage: python3 eval/random_value_miss_rate.py <riskgrep binary> <new scratch dir> <values per case> <stopword list>
 (for example: target/release/riskgrep /tmp/miss 8000
 crates/riskgrep-core/rulesets/secrets-core/stopwords/secrets_core_generic_api_key.txt).
 For 32, 40, and 64 hex digits and 40 letters and digits, writes <values> files per
@@ -16,6 +16,8 @@ BIN = sys.argv[1]
 OUT = sys.argv[2]
 N = int(sys.argv[3])
 WORDS = sys.argv[4]
+# The scan reads no user or repository configuration: HOME and the working directory are empty.
+ENV = {**os.environ, "HOME": OUT, "XDG_CONFIG_HOME": OUT}
 
 def entropy(s):
     return -sum(n / len(s) * math.log2(n / len(s)) for n in Counter(s).values())
@@ -34,7 +36,9 @@ LAYOUTS = {
 }
 CASES = [("hex32", lambda: hexv(32)), ("hex40", lambda: hexv(40)), ("hex64", lambda: hexv(64)), ("alnum40", lambda: alnum(40))]
 
-shutil.rmtree(OUT, ignore_errors=True)
+if os.path.exists(OUT) and os.listdir(OUT):
+    sys.exit(f"{OUT} exists and is not empty; pass a new directory")
+os.makedirs(OUT, exist_ok=True)
 meta = {}
 for cname, gen in CASES:
     for lname, (fname, tmpl) in LAYOUTS.items():
@@ -48,7 +52,7 @@ for cname, gen in CASES:
 targets = []
 for cname, _ in CASES:
     for lname in LAYOUTS:
-        res = subprocess.run([BIN, "scan", "--no-cache", "--format", "json", os.path.join(OUT, cname, lname)], capture_output=True, text=True)
+        res = subprocess.run([BIN, "scan", "--no-cache", "--format", "json", os.path.join(OUT, cname, lname)], capture_output=True, text=True, cwd=OUT, env=ENV)
         d = json.loads(res.stdout)
         assert d["summary"]["unscanned"] == 0 and d["summary"]["scanned"] == N, d["summary"]
         targets += d["targets"]
