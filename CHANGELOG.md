@@ -12,6 +12,10 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 - Upgraded the YARA-X engine from 1.22.0 to 1.23.0. Detection results and scores are unchanged on the evaluation corpus. YARA-X 1.23.0 pins its own `yara-x-macros` and `yara-x-parser` crates to the same version, so `riskgrep-core` no longer pins them. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.
 
+### Fixed
+
+- Known limitations said a SQLite database with a write-ahead log beside it is `partial`, as the 1.2.0 entry below does. That holds once the database's own pages hold a table; a new database in WAL mode before its first checkpoint holds only an empty first page, so nothing in it is read, and it is `unscanned`, which follows `on_error` rather than `on_partial` (`cargo test -p riskgrep-core --test container_sqlite a_wal_database_before`). The behaviour is unchanged; the documentation now states it.
+
 ## [1.2.0] – 2026-11-02
 
 ### Upgrading
