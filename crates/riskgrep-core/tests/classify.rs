@@ -258,7 +258,12 @@ fn images_by_structure() {
         classify("img", &synth::png_1x1()),
         FileClass::Image("png"),
         "a whole PNG"
-    );
+    ); // Apple's optimised PNG puts a `CgBI` chunk (4 bytes of data) before IHDR.
+    let png = synth::png_1x1();
+    let mut cgbi = png[..8].to_vec();
+    cgbi.extend_from_slice(b"\0\0\0\x04CgBI\x50\0\x20\x06\xAA\xBB\xCC\xDD");
+    cgbi.extend_from_slice(&png[8..]);
+    assert_eq!(classify("img", &cgbi), FileClass::Image("png"), "CgBI PNG");
 }
 
 /// What the issue's table starts files with: the first bytes of an image

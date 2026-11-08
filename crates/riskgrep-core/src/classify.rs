@@ -235,11 +235,14 @@ fn le_u32(head: &[u8], at: usize) -> Option<u32> {
 }
 
 /// The 8-byte PNG signature, then the `IHDR` chunk, which comes first and
-/// holds 13 bytes.
+/// holds 13 bytes. Apple's optimised PNG puts a 4-byte `CgBI` chunk (and its
+/// checksum) before it.
 fn is_png(head: &[u8]) -> bool {
+    let chunk = |at: usize, len: u32, kind: &[u8; 4]| {
+        be_u32(head, at) == Some(len) && head.get(at + 4..at + 8) == Some(kind)
+    };
     head.starts_with(b"\x89PNG\r\n\x1a\n")
-        && be_u32(head, 8) == Some(13)
-        && head.get(12..16) == Some(b"IHDR")
+        && (chunk(8, 13, b"IHDR") || (chunk(8, 4, b"CgBI") && chunk(24, 13, b"IHDR")))
 }
 
 /// The start-of-image marker, then a marker segment: `FF` and a marker byte
