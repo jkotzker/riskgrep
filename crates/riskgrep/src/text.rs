@@ -1,7 +1,7 @@
 //! Text output: one line per target with findings, then a summary line.
 //! Reports carry no matched content, so neither does this output.
 
-use riskgrep_core::model::round1;
+use riskgrep_core::model::{escape_controls, round1};
 use riskgrep_core::{Evidence, Report, TargetReport, TargetStatus};
 use std::fmt::Write;
 
@@ -22,6 +22,7 @@ pub fn render(report: &Report) -> String {
 }
 
 fn target_line(t: &TargetReport) -> Option<String> {
+    let target = escape_controls(&t.target);
     let scores: Vec<String> = t
         .scores
         .iter()
@@ -29,23 +30,30 @@ fn target_line(t: &TargetReport) -> Option<String> {
         .map(|(c, s)| format!("{} {:.1}", c.0, round1(*s)))
         .collect();
     match &t.status {
-        TargetStatus::Unscanned { reason } => Some(format!("{}  unscanned: {reason}", t.target)),
+        TargetStatus::Unscanned { reason } if scores.is_empty() => {
+            Some(format!("{target}  unscanned: {reason}"))
+        }
         _ if scores.is_empty() => match &t.status {
-            TargetStatus::Partial { not_read } => {
-                Some(format!("{}  partial: {not_read}", t.target))
-            }
+            TargetStatus::Partial { not_read } => Some(format!("{target}  partial: {not_read}")),
             _ => None,
         },
         status => {
             let evidence: Vec<String> = t.evidence.iter().map(evidence_text).collect();
             let mut line = format!(
                 "{}  {}  [{}]",
-                t.target,
+                target,
                 scores.join("  "),
                 evidence.join("; ")
             );
-            if let TargetStatus::Partial { not_read } = status {
-                let _ = write!(line, "  (partial: {not_read})");
+            match status {
+                TargetStatus::Partial { not_read } => {
+                    let _ = write!(line, "  (partial: {not_read})");
+                }
+                // Standard input that starts like an archive is scanned as bytes.
+                TargetStatus::Unscanned { reason } => {
+                    let _ = write!(line, "  (unscanned: {reason})");
+                }
+                _ => {}
             }
             Some(line)
         }
@@ -160,6 +168,24 @@ mod tests {
         assert_eq!(evidence_text(&ev("path_rule", vec![])), "path_rule ×1");
         let many = ev("m", (1..=8).map(|n| loc(n, n)).collect());
         assert_eq!(evidence_text(&many), "m ×8, lines 1,2,3,4,5,…");
+    }
+
+    #[test]
+    fn an_unscanned_target_with_scores_escapes_its_name() {
+        let t = target(
+            "a\nforged\u{1b}[31m",
+            TargetStatus::Unscanned {
+                reason: "tar not scanned on standard input".into(),
+            },
+            95.0,
+            vec![ev("r", vec![loc(1, 1)])],
+        );
+        let line = target_line(&t).unwrap();
+        assert_eq!(
+            line,
+            "a\\nforged\\u{1b}[31m  secret 95.0  [r ×1, lines 1]  (unscanned: tar not scanned on standard input)"
+        );
+        assert!(!line.contains('\n') && !line.contains('\u{1b}'), "{line:?}");
     }
 
     #[test]

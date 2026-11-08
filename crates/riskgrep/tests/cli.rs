@@ -239,6 +239,44 @@ fn stdin_dash() {
 }
 
 #[test]
+fn an_archive_on_stdin_is_unscanned_and_follows_on_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 14);
+    let tar = synth::tar(&[("a.txt", format!("let id = \"{key}\";\n").into_bytes())]);
+    // The pipeline gate of the issue: `--fail-at` makes `on_error` block.
+    let out = riskgrep(dir.path())
+        .args(["scan", "-", "--format", "json", "--fail-at", "secret=99"])
+        .write_stdin(tar.clone())
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["targets"][0]["status"], "unscanned");
+    assert_eq!(
+        v["targets"][0]["reason"],
+        "tar not scanned on standard input"
+    );
+    assert_eq!(v["summary"]["unscanned"], 1);
+    assert!(!String::from_utf8_lossy(&out).contains(&key));
+    // Without a gate, `on_error` allows. Text output names the reason and
+    // still reports what the bytes held.
+    let out = riskgrep(dir.path())
+        .args(["scan", "-"])
+        .write_stdin(tar)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("tar not scanned on standard input"), "{text}");
+    assert!(text.contains("secret 95"), "{text}");
+    assert!(!text.contains(&key));
+}
+
+#[test]
 fn stdin_decodes_utf16_and_utf32_like_a_file() {
     let dir = tempfile::tempdir().unwrap();
     let key = synth::fake_secret("aws_access_key", 13);
@@ -1092,4 +1130,83 @@ fn a_sampled_file_and_the_same_file_in_an_archive_follow_on_partial() {
     run("big.zip").code(2).stdout(predicate::str::contains(
         "member 1 sampled (bytes 256..3840 not read)",
     ));
+}
+
+/// File names with control characters are written escaped in text output,
+/// for a finding and for an unscanned file; ordinary non-ASCII names are
+/// written as they are.
+#[test]
+fn text_output_escapes_control_characters_in_file_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 11);
+    let body = format!("let id = \"{key}\";\n");
+    let names = [
+        ("nl\nforged.env", "nl\\nforged.env"),
+        ("esc\u{1b}[2Jx.env", "esc\\u{1b}[2Jx.env"),
+        ("tab\tx.env", "tab\\tx.env"),
+        ("caf\u{e9}.env", "caf\u{e9}.env"),
+        ("\u{6a21}\u{578b}.env", "\u{6a21}\u{578b}.env"),
+    ];
+    for (name, shown) in names {
+        fs::write(dir.path().join(name), &body).unwrap();
+        let out = riskgrep(dir.path())
+            .args(["scan", name])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.starts_with(&format!("{shown}  ")),
+            "{name:?}: {text:?}"
+        );
+        assert!(!text.contains('\u{1b}') && !text.contains('\t'), "{text:?}");
+        // One target line and the summary line: a name cannot add a line.
+        assert_eq!(text.lines().count(), 2, "{text:?}");
+        fs::remove_file(dir.path().join(name)).unwrap();
+    }
+}
+
+#[test]
+fn text_output_escapes_control_characters_in_unscanned_names() {
+    if running_as_root() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let name = "locked\nforged line\u{1b}[31m.txt";
+    let file = dir.path().join(name);
+    fs::write(&file, "hello\n").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    let out = riskgrep(dir.path())
+        .args(["scan", name, "--on-error", "block"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.starts_with("locked\\nforged line\\u{1b}[31m.txt  unscanned: "),
+        "{text:?}"
+    );
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert_eq!(text.lines().count(), 2, "{text:?}");
+}
+
+/// JSON output carries the name as data, JSON-escaped by the serializer.
+#[test]
+fn json_output_keeps_the_raw_file_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 11);
+    fs::write(dir.path().join("a\nb.env"), format!("x = \"{key}\"\n")).unwrap();
+    let out = riskgrep(dir.path())
+        .args(["scan", "a\nb.env", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["targets"][0]["target"], "a\nb.env");
 }
