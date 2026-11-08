@@ -1447,3 +1447,52 @@ fn an_archive_of_only_unknown_binaries_follows_on_skipped() {
     assert_eq!(d, "ask", "{reason}");
     assert!(reason.contains("unknown format"), "{reason}");
 }
+
+/// A file name with control characters is written escaped in the decision
+/// message, so it can neither forge a line nor move a cursor; ordinary
+/// non-ASCII names are written as they are.
+#[test]
+fn decision_message_escapes_control_characters_in_file_names() {
+    let names = [
+        ("nl\nforged.env", "nl\\nforged.env"),
+        ("esc\u{1b}[2Jx.env", "esc\\u{1b}[2Jx.env"),
+        ("tab\tx.env", "tab\\tx.env"),
+        ("caf\u{e9}.env", "caf\u{e9}.env"),
+        ("\u{6a21}\u{578b}.env", "\u{6a21}\u{578b}.env"),
+    ];
+    for (name, shown) in names {
+        let e = Env::new();
+        let f = e.write(name, aws_file().as_bytes());
+        let (d, reason) = e.run("Read", json!({ "file_path": f })).decision();
+        assert_eq!(d, "deny", "{name:?}");
+        assert!(
+            reason.contains(&format!("RiskGrep: {}/{shown} scored", e.dir().display())),
+            "{name:?}: {reason:?}"
+        );
+        assert!(
+            !reason.contains('\n') && !reason.contains('\u{1b}') && !reason.contains('\t'),
+            "{reason:?}"
+        );
+    }
+}
+
+#[test]
+fn unscanned_message_escapes_control_characters_in_file_names() {
+    if running_as_root() {
+        return;
+    }
+    let e = Env::new();
+    e.user_config("[claude_code]\non_error = \"deny\"\n");
+    let f = e.write("locked\nforged\u{1b}[31m.txt", b"hello\n");
+    fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let (d, reason) = e.run("Read", json!({ "file_path": f })).decision();
+    assert_eq!(d, "deny");
+    assert!(
+        reason.contains("locked\\nforged\\u{1b}[31m.txt"),
+        "{reason:?}"
+    );
+    assert!(
+        !reason.contains('\n') && !reason.contains('\u{1b}'),
+        "{reason:?}"
+    );
+}
