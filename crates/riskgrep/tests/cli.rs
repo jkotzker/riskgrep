@@ -1093,3 +1093,144 @@ fn a_sampled_file_and_the_same_file_in_an_archive_follow_on_partial() {
         "member 1 sampled (bytes 256..3840 not read)",
     ));
 }
+
+// ---- show ----
+
+fn has(hay: &[u8], needle: &str) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
+#[test]
+fn show_prints_the_file_masked() {
+    let (dir, _, key) = key_dir();
+    let out = riskgrep(dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, &key), "the key is in the output");
+    assert!(
+        out == b"one\ntwo\nthree\nfour\nfive\nsix\nlet id = \"<redacted>\";\neight\n",
+        "masked output differs"
+    );
+}
+
+#[test]
+fn show_lines_and_rule_ids() {
+    let (dir, _, key) = key_dir();
+    let out = riskgrep(dir.path())
+        .args(["show", "key.txt", "--lines", "7:7", "--rule-ids"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, &key));
+    assert!(out == b"let id = \"<redacted: secrets_core:aws_access_token>\";\n");
+    riskgrep(dir.path())
+        .args(["show", "key.txt", "--lines", "3:1"])
+        .assert()
+        .code(3);
+}
+
+#[test]
+fn show_refuses_a_file_over_its_cap_and_prints_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[show]\nmax_bytes = 16\n").unwrap();
+    let (dir, _, _) = key_dir();
+    riskgrep_in(home.path(), dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("max_bytes"));
+}
+
+#[test]
+fn show_summarises_binary_formats() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("emb.safetensors"),
+        synth::safetensors(&[("speaker_alice", "F32", &[64, 256])]),
+    )
+    .unwrap();
+    riskgrep(dir.path())
+        .args(["show", "emb.safetensors"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("F32 [64, 256]"))
+        .stdout(predicate::str::contains("speaker_alice").not());
+}
+
+#[test]
+fn show_masks_what_configuration_tries_to_unmask() {
+    // Every way configuration narrows a scan (categories, rulesets, weight
+    // overrides, ignore entries in both files, and a baseline) leaves the
+    // masked view unchanged.
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(
+        cfg.join("config.toml"),
+        "categories = [\"biometric\"]\nrulesets = [\"biometric_embeddings\"]\n\
+         [weight_overrides]\n\"secrets_core:aws_access_token\" = 0\n\
+         [ignore]\npaths = [\"key.txt\"]\n",
+    )
+    .unwrap();
+    let (dir, _, key) = key_dir();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .env("GIT_CEILING_DIRECTORIES", dir.path().parent().unwrap())
+        .status()
+        .unwrap();
+    riskgrep(dir.path())
+        .args(["baseline", "key.txt"])
+        .assert()
+        .code(0);
+    fs::write(
+        dir.path().join(".riskgrep.toml"),
+        "[ignore]\npaths = [\"*.txt\"]\n[[ignore.rules]]\npath = \"**\"\nrules = [\"aws_access_token\"]\n",
+    )
+    .unwrap();
+    // The scan sees nothing under this configuration ...
+    let json = riskgrep_in(home.path(), dir.path())
+        .args(["scan", "key.txt", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !has(&json, "aws_access_token"),
+        "the scan still finds the key"
+    );
+    // ... and the masked view still masks the key.
+    let out = riskgrep_in(home.path(), dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, &key), "configuration unmasked the key");
+    assert!(has(&out, "<redacted>"));
+}
+
+#[test]
+fn show_rejects_a_zero_limit() {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[show]\nmax_bytes = 0\n").unwrap();
+    let (dir, _, _) = key_dir();
+    riskgrep_in(home.path(), dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::is_empty());
+}

@@ -4,3 +4,4 @@ pub mod bash;
 pub mod decide;
 pub mod input;
 pub mod resolve;
+pub mod show;

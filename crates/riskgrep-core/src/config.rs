@@ -261,6 +261,13 @@ struct CacheLayer {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ShowLayer {
+    max_bytes: Option<u64>,
+    time_budget_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IgnoreLayer {
     paths: Option<Vec<String>>,
     rules: Option<Vec<RuleIgnore>>,
@@ -279,6 +286,7 @@ struct Layer {
     claude_code: Option<ClaudeLayer>,
     git: Option<GitLayer>,
     cache: Option<CacheLayer>,
+    show: Option<ShowLayer>,
 }
 
 fn read_layer(path: &Path) -> Result<Option<Layer>, ConfigError> {
@@ -567,6 +575,90 @@ pub fn baseline_path(mode: Mode, repo_root: Option<&Path>, cfg: &Config) -> Opti
         return None;
     }
     Some(root.join(BASELINE_FILE))
+}
+
+// ---- `riskgrep show` ----
+
+/// Largest file `riskgrep show` reads, by default (64 MiB).
+pub const SHOW_MAX_BYTES: u64 = 64 << 20;
+/// Time `riskgrep show` gives each scan, by default.
+pub const SHOW_TIME_BUDGET_MS: u64 = 60_000;
+
+/// What `riskgrep show` takes from configuration. It is deliberately
+/// narrow: the masked view masks every match of every built-in rule, so
+/// configuration may only add rules (`extra_ruleset_dirs`) and set the
+/// command's own limits, which can only make it refuse. `categories`,
+/// `rulesets`, `weight_overrides`, `[ignore]`, baselines, and `[limits]`
+/// never apply to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowConfig {
+    /// `[show] max_bytes`: files larger than this are refused.
+    pub max_bytes: u64,
+    /// `[show] time_budget_ms`: the scan time limit; a scan that runs out
+    /// is refused.
+    pub time_budget: Duration,
+    /// Every `extra_ruleset_dirs` entry of the user file and the repository
+    /// file together, in that order, without duplicates: a later file adds
+    /// to an earlier one's list instead of replacing it.
+    pub extra_ruleset_dirs: Vec<PathBuf>,
+}
+
+impl Default for ShowConfig {
+    fn default() -> Self {
+        ShowConfig {
+            max_bytes: SHOW_MAX_BYTES,
+            time_budget: Duration::from_millis(SHOW_TIME_BUDGET_MS),
+            extra_ruleset_dirs: Vec::new(),
+        }
+    }
+}
+
+/// The `riskgrep show` configuration: defaults, then the user file, then
+/// the repository file (read in every case: it can only add rules or
+/// change the command's limits). A file that does not parse is an error,
+/// as for every other command.
+pub fn load_show(repo_root: Option<&Path>) -> Result<ShowConfig, ConfigError> {
+    let mut out = ShowConfig::default();
+    let mut paths: Vec<(PathBuf, PathBuf)> = Vec::new();
+    if let Some(p) = user_config_path() {
+        if let Some(dir) = p.parent() {
+            paths.push((p.clone(), dir.to_path_buf()));
+        }
+    }
+    if let Some(root) = repo_root {
+        paths.push((root.join(REPO_CONFIG), root.to_path_buf()));
+    }
+    for (path, base) in paths {
+        let Some(mut layer) = read_layer(&path)? else {
+            continue;
+        };
+        layer.resolve_paths(&base);
+        for d in layer.extra_ruleset_dirs.unwrap_or_default() {
+            if !out.extra_ruleset_dirs.contains(&d) {
+                out.extra_ruleset_dirs.push(d);
+            }
+        }
+        if let Some(s) = layer.show {
+            for (name, v) in [
+                ("max_bytes", s.max_bytes),
+                ("time_budget_ms", s.time_budget_ms),
+            ] {
+                if v == Some(0) {
+                    return Err(ConfigError(format!(
+                        "invalid config {}: [show] {name} must be at least 1",
+                        path.display()
+                    )));
+                }
+            }
+            if let Some(v) = s.max_bytes {
+                out.max_bytes = v;
+            }
+            if let Some(v) = s.time_budget_ms {
+                out.time_budget = Duration::from_millis(v);
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ---- Claude Code: MCP tools that read files ----

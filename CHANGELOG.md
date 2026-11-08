@@ -4,7 +4,15 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- `riskgrep show FILE` prints a text file with every match of every rule replaced by `<redacted>`, or with `--rule-ids` by `<redacted: ruleset:rule>`, keeping line numbers aligned; `--lines FIRST:LAST` prints only those lines. The file is read once and scanned whole up to `[show] max_bytes` (64 MiB) by every built-in rule plus `extra_ruleset_dirs`; thresholds, `categories`, `rulesets`, `weight_overrides`, `[ignore]`, and baselines never narrow the mask, and the masked text is scanned again before it is printed. It refuses with exit status 2 and nothing on standard output when the file is too large, a scan fails or reads only part of it, or a match has no location. Files that are not text get a structural summary (format, tensor data types and shapes, member counts, scores). New `[show]` table: `max_bytes` and `time_budget_ms`.
+- The Claude Code hook offers `riskgrep show` in the reason for a flagged text file, naming the `riskgrep` binary beside the hook by its canonical path, and gives no decision to exactly that command shape in a `Bash` call (see `docs/claude-code.md`, "Masked view").
+- `riskgrep-core`: the `show` module (`show_file`, `mask`, `Span`, `Marker`, `ShowOptions`, `Shown`, `Refusal`, `select_lines`, `parse_lines`) and `config::ShowConfig` with `config::load_show`. `riskgrep-claude`: the `show` module and `decide::decide_offering`.
+
 ### Changed
+
+- `riskgrep-claude print-config` adds `"onFailure": "block"` to the hook entry (Claude Code 2.1.295 or later), so a hook that fails to start, crashes, or times out blocks the call; `--no-block-on-failure` leaves it out.
 
 - Upgraded the YARA-X engine from 1.22.0 to 1.23.0. Detection results and scores are unchanged on the evaluation corpus. YARA-X 1.23.0 pins its own `yara-x-macros` and `yara-x-parser` crates to the same version, so `riskgrep-core` no longer pins them. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.
 

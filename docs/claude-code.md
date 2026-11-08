@@ -8,7 +8,7 @@ v1 protects against accidental exposure by a cooperative agent, which is what ha
 
 ## Installation
 
-`riskgrep-claude print-config` prints a `settings.json` fragment (a hook entry and a permission rule) on stdout and a one-line instruction on stderr. Merge it into `~/.claude/settings.json` by hand. The hook entry uses matcher `^(Read|NotebookRead|Grep|Glob|Bash|mcp__.*)$` and timeout 5 (seconds). Claude Code evaluates a matcher holding characters other than letters, digits, `_`, `-`, spaces, `,`, and `|` as an unanchored JavaScript regular expression, so the matcher is anchored to keep it to these tool names; `mcp__.*` sends every MCP tool call to the hook. An installation made with the earlier matcher `Read|NotebookRead|Grep|Bash` gates neither `Glob` nor MCP tools until the matcher is updated.
+`riskgrep-claude print-config` prints a `settings.json` fragment (a hook entry and a permission rule) on stdout and a one-line instruction on stderr. Merge it into `~/.claude/settings.json` by hand. The hook entry uses matcher `^(Read|NotebookRead|Grep|Glob|Bash|mcp__.*)$` and timeout 5 (seconds). Claude Code evaluates a matcher holding characters other than letters, digits, `_`, `-`, spaces, `,`, and `|` as an unanchored JavaScript regular expression, so the matcher is anchored to keep it to these tool names; `mcp__.*` sends every MCP tool call to the hook. An installation made with the earlier matcher `Read|NotebookRead|Grep|Bash` gates neither `Glob` nor MCP tools until the matcher is updated. The hook entry also sets `"onFailure": "block"`: Claude Code 2.1.295 or later then treats a hook that cannot start, exits with a status other than 0 or 2, times out, or prints invalid output as a blocking error (as exit status 2 does) instead of letting the call proceed. `riskgrep-claude print-config --no-block-on-failure` prints the entry without it, for a Claude Code that does not accept the field or for a user who prefers calls to proceed when the hook fails.
 
 ## Behaviour
 
@@ -71,6 +71,10 @@ When no partial read is possible (below), no lines are named and the reason ends
 
 `Do not read this file by other means (Bash, Grep, scripts). No partial read is available for this file; ask the user.`
 
+When the file can be shown masked, the reason also offers that, between the two sentences (see [Masked view](#masked-view)):
+
+`Do not read this file by other means (Bash, Grep, scripts). For a view with every match masked, run \`/path/to/riskgrep show /path/to/app.env\`. No partial read is available for this file; ask the user.`
+
 A `Grep` or `Bash` reason that lists several files uses the plural forms (`these files`, `Read each with offset and limit ranges`), or, when only some of the files have known lines, `Read a file with listed lines using offset and limit ranges that exclude them; no partial read is available for the others; ask the user.` The `deny` reason reaches the model; the `ask` reason is shown to the user in the permission prompt.
 
 A `Read` call with `offset`, `limit`, or both asks for lines `offset` through `offset + limit - 1` (`offset` defaults to 1, and without `limit` the range runs to the end of the file). The hook widens that range by one line on each side, so a difference of one in line numbering can only make it stricter. A category whose flagged lines the widened range does not touch is dropped from the decision; every other finding still applies, including `on_error` for a target that could not be scanned and `on_partial` for a target read in part, whatever range the call asks for. A `Read` with neither field is judged on the whole file, as is one whose `offset` or `limit` is not a positive integer (0, negative, fractional, a string, or null). `Grep`, `Bash`, and `NotebookRead` are always judged on whole files, whatever their input holds. The flagged lines come from the evidence already in the report, so a cached file is not scanned again.
@@ -83,6 +87,21 @@ No partial read is possible, and the whole file is judged, when any of these hol
 - the file name ends in `.ipynb` (any case): Claude Code 2.1.301 ignores `offset` and `limit` for notebooks and returns every cell.
 
 Evidence in a category below every threshold does not count. Only findings of the winning grade are listed, so a `deny` reason does not name the lines of an `ask` finding in the same file; a partial read that avoids the denied lines but touches the others gets the `ask`, with those lines named. Covered by `cargo test -p riskgrep-claude` (`src/decide.rs` unit tests and the `read_range_*`, `no_partial_read_*`, and `cached_runs_decide_as_uncached_runs` tests in `tests/hook.rs`). The rule marks are checked by `cargo test -p xtask --test convert line_complete` and `cargo test -p riskgrep-core --test ruleset_secrets line_complete`.
+
+## Masked view
+
+`riskgrep show FILE` prints the file with every match of every rule masked, or a structural summary of a file that is not text (see the [README](../README.md#command-line)). Running it on a flagged file is safe only when the command really runs the `riskgrep` binary with nothing else attached, so the hook recognises one command shape and analyses anything else as usual, which flags the file it names:
+
+```text
+TRUSTED show [--rule-ids] [--lines FIRST:LAST] [--] FILE
+```
+
+- `TRUSTED` is the canonical path of the regular file named `riskgrep` in the directory of the hook's own executable (where `cargo install` puts both binaries). Without one, nothing is offered or let through. A relative name found through `PATH`, another binary named `riskgrep`, a symbolic link to the trusted one, or a wrapper (`command`, `env`, `exec`, an assignment such as `HOME=…`) is not the trusted path. An agent able to replace that file could replace the hook itself.
+- The command is one line of words separated by spaces or tabs. Each word is plain (letters, digits, and `_ . / - + , @ % :`) or wholly single-quoted with no control character inside, so there is no second command, pipe, redirect, substitution, expansion, glob, or comment.
+- The options are `--rule-ids` and `--lines FIRST:LAST`, each at most once and in any order, then an optional `--`, then exactly one file, which must not start with `-` unless it follows `--`. Options that would change what is scanned do not exist on `show`.
+- A shell function named after the trusted path cannot run instead of it: no definition can come before it in a single simple command, and shell functions, aliases, and exported variables defined in one Claude Code `Bash` call were absent from the next (measured with Claude Code 2.1.318: a function named `/usr/bin/true` shadowed the binary within its own call only).
+
+The hook gives that command no decision and does not scan the file. A reason offers the command for each listed file that was read as text (whole or in part, since the command reads up to 64 MiB whole), is not an archive, and has no evidence with structural facts, when its path can be written as a word of that shape (a path holding a single quote or a control character is not offered); with several such files it names the form `TRUSTED show FILE`. The command still refuses whatever it cannot mask. Covered by `cargo test -p riskgrep-claude` (`src/show.rs` and `src/decide.rs` unit tests, and `the_offered_masked_view_is_let_through_and_nothing_else` in `tests/hook.rs`).
 
 ## Cold rules cache
 

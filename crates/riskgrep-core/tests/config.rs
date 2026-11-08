@@ -546,3 +546,45 @@ on_partial = "allow"
     let bad = env(Some("[git]\non_partial = \"sometimes\"\n"), None);
     assert!(load(Mode::Git, Some(bad.root()), Overrides::default()).is_err());
 }
+
+#[test]
+fn show_config_adds_rule_dirs_from_every_file_and_reads_its_limits() {
+    use riskgrep_core::config::{load_show, ShowConfig, SHOW_MAX_BYTES};
+    let e = env(
+        Some("extra_ruleset_dirs = [\"user-rules\"]\n[show]\nmax_bytes = 4096\n"),
+        Some(
+            "extra_ruleset_dirs = []\ncategories = [\"biometric\"]\n\
+             [show]\ntime_budget_ms = 1500\n[ignore]\npaths = [\"*\"]\n",
+        ),
+    );
+    let c = load_show(Some(e.root())).unwrap();
+    assert_eq!(
+        c.extra_ruleset_dirs,
+        vec![e.home.path().join(".config/riskgrep/user-rules")],
+        "a repository list adds to the user list, never replaces it"
+    );
+    assert_eq!(c.max_bytes, 4096);
+    assert_eq!(c.time_budget, Duration::from_millis(1500));
+    drop(e);
+    let e = env(None, Some("extra_ruleset_dirs = [\"r\"]\n"));
+    let c = load_show(Some(e.root())).unwrap();
+    assert_eq!(c.extra_ruleset_dirs, vec![e.root().join("r")]);
+    assert_eq!(c.max_bytes, SHOW_MAX_BYTES);
+    assert_eq!(ShowConfig::default().max_bytes, 64 << 20);
+}
+
+#[test]
+fn show_limits_of_zero_are_errors() {
+    use riskgrep_core::config::load_show;
+    for t in ["[show]\nmax_bytes = 0\n", "[show]\ntime_budget_ms = 0\n"] {
+        let e = env(Some(t), None);
+        assert!(load_show(Some(e.root())).is_err(), "{t}");
+    }
+    {
+        let e = env(Some("[show]\nunknown = 1\n"), None);
+        assert!(load_show(Some(e.root())).is_err());
+    }
+    // The table is accepted by the other commands' loader.
+    let e = env(Some("[show]\nmax_bytes = 10\n"), None);
+    assert!(load(Mode::Cli, Some(e.root()), Overrides::default()).is_ok());
+}
