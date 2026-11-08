@@ -1,9 +1,9 @@
 {
-  "claude_read_cached": 10581837,
-  "claude_read_tar_gz_uncached": 210767434,
-  "claude_read_uncached": 52006838,
-  "claude_read_zip_uncached": 226196665,
-  "git_pre_commit_20_files": 365515711,
-  "scan_stdin_1mb": 214711432,
-  "scan_stdin_4kb": 50264286
+  "claude_read_cached": 10817329,
+  "claude_read_tar_gz_uncached": 211453050,
+  "claude_read_uncached": 52326653,
+  "claude_read_zip_uncached": 226945030,
+  "git_pre_commit_20_files": 366096223,
+  "scan_stdin_1mb": 214764353,
+  "scan_stdin_4kb": 50336183
 }
