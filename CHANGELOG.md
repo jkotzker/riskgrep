@@ -4,6 +4,10 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Changed
+
+- Upgraded the YARA-X engine from 1.22.0 to 1.23.0. Detection results and scores are unchanged on the evaluation corpus. YARA-X 1.23.0 pins its own `yara-x-macros` and `yara-x-parser` crates to the same version, so `riskgrep-core` no longer pins them. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.
+
 ## [1.2.0] – 2026-11-02
 
 ### Upgrading
