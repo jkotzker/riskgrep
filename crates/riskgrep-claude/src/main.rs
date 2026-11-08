@@ -299,12 +299,14 @@ fn mcp_job(hook: &HookInput, cfg: &Config, cwd: &Path) -> Result<Option<Job>, De
         )
     };
     let table = mcp::table(cfg);
-    let Some((server, tool)) = mcp::split(name) else {
-        return Err(unresolved(table.on_unresolved.unwrap_or(Action::Allow)));
-    };
     let home = std::env::var("HOME").ok();
     Ok(Some(
-        match table.plan(server, tool, &hook.tool_input, cwd, home.as_deref()) {
+        match table.plan_entry(
+            mcp::entry(cfg, &table, name),
+            &hook.tool_input,
+            cwd,
+            home.as_deref(),
+        ) {
             McpPlan::Nothing => return Ok(None),
             McpPlan::Read(files) => Job::Files(files),
             McpPlan::Walk(roots) => Job::Walk(roots),
