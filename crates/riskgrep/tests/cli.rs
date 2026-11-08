@@ -1254,3 +1254,82 @@ fn show_says_when_the_lines_are_past_the_end() {
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("has 8 lines"));
 }
+
+/// File names with control characters are written escaped in text output,
+/// for a finding and for an unscanned file; ordinary non-ASCII names are
+/// written as they are.
+#[test]
+fn text_output_escapes_control_characters_in_file_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 11);
+    let body = format!("let id = \"{key}\";\n");
+    let names = [
+        ("nl\nforged.env", "nl\\nforged.env"),
+        ("esc\u{1b}[2Jx.env", "esc\\u{1b}[2Jx.env"),
+        ("tab\tx.env", "tab\\tx.env"),
+        ("caf\u{e9}.env", "caf\u{e9}.env"),
+        ("\u{6a21}\u{578b}.env", "\u{6a21}\u{578b}.env"),
+    ];
+    for (name, shown) in names {
+        fs::write(dir.path().join(name), &body).unwrap();
+        let out = riskgrep(dir.path())
+            .args(["scan", name])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.starts_with(&format!("{shown}  ")),
+            "{name:?}: {text:?}"
+        );
+        assert!(!text.contains('\u{1b}') && !text.contains('\t'), "{text:?}");
+        // One target line and the summary line: a name cannot add a line.
+        assert_eq!(text.lines().count(), 2, "{text:?}");
+        fs::remove_file(dir.path().join(name)).unwrap();
+    }
+}
+
+#[test]
+fn text_output_escapes_control_characters_in_unscanned_names() {
+    if running_as_root() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let name = "locked\nforged line\u{1b}[31m.txt";
+    let file = dir.path().join(name);
+    fs::write(&file, "hello\n").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    let out = riskgrep(dir.path())
+        .args(["scan", name, "--on-error", "block"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.starts_with("locked\\nforged line\\u{1b}[31m.txt  unscanned: "),
+        "{text:?}"
+    );
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert_eq!(text.lines().count(), 2, "{text:?}");
+}
+
+/// JSON output carries the name as data, JSON-escaped by the serializer.
+#[test]
+fn json_output_keeps_the_raw_file_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 11);
+    fs::write(dir.path().join("a\nb.env"), format!("x = \"{key}\"\n")).unwrap();
+    let out = riskgrep(dir.path())
+        .args(["scan", "a\nb.env", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["targets"][0]["target"], "a\nb.env");
+}

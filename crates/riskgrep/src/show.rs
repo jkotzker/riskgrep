@@ -5,7 +5,6 @@ use crate::{stdout_result, CliError};
 use riskgrep_core::config;
 use riskgrep_core::show::{show_file, Marker, ShowOptions, Shown};
 use std::io::Write;
-use std::os::unix::ffi::OsStrExt;
 
 /// Exit status when the view is refused.
 pub const EXIT_REFUSED: i32 = 2;
@@ -24,14 +23,16 @@ pub fn show(a: ShowArgs) -> Result<i32, CliError> {
     let bytes = match show_file(&cfg, &a.file, &opts, riskgrep_core::paths::cache_dir()) {
         Ok(Shown::Masked { text, lines, .. }) => {
             if let Some((first, _)) = a.lines.filter(|&(f, _)| f > lines) {
-                let name = crate::git::display(a.file.as_os_str().as_bytes());
+                let name =
+                    riskgrep_core::model::escape_controls(&a.file.to_string_lossy()).into_owned();
                 eprintln!("riskgrep show: {name} has {lines} lines; none from line {first}");
             }
             text
         }
         Ok(Shown::Summary(s)) => s.into_bytes(),
         Err(r) => {
-            let name = crate::git::display(a.file.as_os_str().as_bytes());
+            let name =
+                riskgrep_core::model::escape_controls(&a.file.to_string_lossy()).into_owned();
             eprintln!("riskgrep show: {name}: not shown: {r}");
             return Ok(EXIT_REFUSED);
         }

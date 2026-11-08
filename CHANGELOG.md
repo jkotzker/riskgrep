@@ -10,10 +10,13 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 - The Claude Code hook offers `riskgrep show` in the reason for a flagged text file, naming by absolute path the regular `riskgrep` file in the hook's own directory (never a link), and gives no decision to exactly that command shape in a `Bash` call (see `docs/claude-code.md`, "Masked view").
 - `riskgrep-core`: the `show` module (`show_file`, `mask`, `Span`, `Marker`, `ShowOptions`, `Shown`, `Refusal`, `select_lines`, `parse_lines`) and `config::ShowConfig` with `config::load_show`. `riskgrep-claude`: the `show` module and `decide::decide_offering`.
 
+### Fixed
+
+- File names with control characters (a newline, tab, or escape sequence) are written escaped (`\n`, `\t`, `\u{1b}`) in `riskgrep scan` text output and in the Claude Code hook's decision messages, as archive member names already were, so a name cannot forge a line of output or move a terminal's cursor. Other characters, including non-ASCII ones, are written as they are. JSON output and the git hook's message are unchanged. The escaping is `riskgrep_core::model::escape_controls`.
+
 ### Changed
 
 - `riskgrep-claude print-config` adds `"onFailure": "block"` to the hook entry (Claude Code 2.1.295 or later), so a hook that fails to start, crashes, or times out blocks the call; `--no-block-on-failure` leaves it out.
-
 - Upgraded the YARA-X engine from 1.22.0 to 1.23.0. Detection results and scores are unchanged on the evaluation corpus. YARA-X 1.23.0 pins its own `yara-x-macros` and `yara-x-parser` crates to the same version, so `riskgrep-core` no longer pins them. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.
 
 ## [1.2.0] – 2026-11-02
