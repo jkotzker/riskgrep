@@ -1141,9 +1141,9 @@ fn text_output_escapes_control_characters_in_unscanned_names() {
     fs::write(&file, "hello\n").unwrap();
     fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
     let out = riskgrep(dir.path())
-        .args(["scan", name])
+        .args(["scan", name, "--on-error", "block"])
         .assert()
-        .code(predicate::in_iter([0, 2]))
+        .code(2)
         .get_output()
         .stdout
         .clone();
