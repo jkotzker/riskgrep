@@ -13,6 +13,9 @@ use std::time::{Duration, SystemTime};
 
 const YARA_X_VERSION: &str = "1.23.0";
 
+/// The boolean rule global that says whether path allowlists apply.
+pub const PATH_ALLOWLIST_GLOBAL: &str = "path_allowlist_enabled";
+
 pub struct Bundle {
     pub rules: yara_x::Rules,
     /// Keyed by `namespace:identifier`; the namespace is the ruleset id.
@@ -83,6 +86,10 @@ fn merge_stopwords(rulesets: &[&Ruleset]) -> Result<BTreeMap<String, Vec<String>
 fn compile(rulesets: &[&Ruleset]) -> Result<yara_x::Rules> {
     let mut c = yara_x::Compiler::new();
     c.define_global("path", "")
+        .map_err(|e| err(format!("define_global: {e}")))?;
+    // Whether path allowlists apply (`Config::path_allowlist_applies`); set
+    // per scanner.
+    c.define_global(PATH_ALLOWLIST_GLOBAL, true)
         .map_err(|e| err(format!("define_global: {e}")))?;
     for rs in rulesets {
         c.new_namespace(&rs.id);

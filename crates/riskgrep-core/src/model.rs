@@ -139,6 +139,13 @@ pub struct TargetReport {
     /// applies to both (see [`TargetReport::unseen_part`]).
     #[serde(skip)]
     pub read_failed: bool,
+    /// A path allowlist applied (gitleaks' global path allowlist): the rules
+    /// that exclude its paths, every converted gitleaks rule among them, did
+    /// not run on this file, so a score of 0 does not say they found nothing.
+    /// For a container, set when it applied to at least one member (see
+    /// [`ContainerReport::path_allowlisted`]). Serialized only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub path_allowlisted: bool,
 }
 
 impl TargetReport {
@@ -176,6 +183,10 @@ pub struct ContainerReport {
     pub not_read: u64,
     /// Nested containers opened; what they hold is counted as members.
     pub opened: u64,
+    /// Members scanned (whole or in part) to which a path allowlist applied;
+    /// counted, not named. Serialized only when not 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub path_allowlisted: u64,
     /// Members with evidence, then members not read whole, at most
     /// [`crate::container::LISTED_MAX`].
     pub listed: Vec<MemberReport>,
@@ -191,6 +202,14 @@ pub struct MemberReport {
     /// all of its members together.
     #[serde(serialize_with = "ser_scores")]
     pub scores: BTreeMap<Category, f64>,
+    /// A path allowlist applied to this member, as
+    /// [`TargetReport::path_allowlisted`]. Serialized only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub path_allowlisted: bool,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

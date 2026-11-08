@@ -67,32 +67,56 @@ pub fn find_repo_root(cwd: &Path, search: &Search<'_>) -> Option<PathBuf> {
     None
 }
 
+/// The environment's inputs to [`find_repo_root`], read once: the ceilings
+/// from `GIT_CEILING_DIRECTORIES`, the stop from `$HOME`,
+/// `GIT_DISCOVERY_ACROSS_FILESYSTEM`, and the effective user id of this
+/// process.
+#[derive(Debug, Clone)]
+pub struct SearchEnv {
+    ceilings: Vec<PathBuf>,
+    home_parent: Option<PathBuf>,
+    uid: u32,
+    across_filesystems: bool,
+}
+
+impl SearchEnv {
+    pub fn from_env() -> SearchEnv {
+        let canon = |p: PathBuf| fs::canonicalize(&p).unwrap_or(p);
+        SearchEnv {
+            ceilings: std::env::var_os("GIT_CEILING_DIRECTORIES")
+                .map(|v| std::env::split_paths(&v).map(canon).collect())
+                .unwrap_or_default(),
+            home_parent: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(canon)
+                .and_then(|h| h.parent().map(Path::to_path_buf)),
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            uid: unsafe { libc::geteuid() },
+            across_filesystems: std::env::var("GIT_DISCOVERY_ACROSS_FILESYSTEM")
+                .is_ok_and(|v| is_true(&v)),
+        }
+    }
+
+    /// [`find_repo_root`] from `dir` under this environment.
+    pub fn repo_root(&self, dir: &Path) -> Option<PathBuf> {
+        find_repo_root(
+            dir,
+            &Search {
+                ceilings: &self.ceilings,
+                home_parent: self.home_parent.as_deref(),
+                uid: self.uid,
+                across_filesystems: self.across_filesystems,
+                dev_of: &|p| fs::metadata(p).ok().map(|m| m.dev()),
+            },
+        )
+    }
+}
+
 /// [`find_repo_root`] with the ceilings from `GIT_CEILING_DIRECTORIES`, the
 /// stop from `$HOME`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`, and the effective
 /// user id of this process.
 pub fn repo_root_from_env(cwd: &Path) -> Option<PathBuf> {
-    let canon = |p: PathBuf| fs::canonicalize(&p).unwrap_or(p);
-    let ceilings: Vec<PathBuf> = std::env::var_os("GIT_CEILING_DIRECTORIES")
-        .map(|v| std::env::split_paths(&v).map(canon).collect())
-        .unwrap_or_default();
-    let home_parent = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(canon)
-        .and_then(|h| h.parent().map(Path::to_path_buf));
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::geteuid() };
-    let across_filesystems =
-        std::env::var("GIT_DISCOVERY_ACROSS_FILESYSTEM").is_ok_and(|v| is_true(&v));
-    find_repo_root(
-        cwd,
-        &Search {
-            ceilings: &ceilings,
-            home_parent: home_parent.as_deref(),
-            uid,
-            across_filesystems,
-            dev_of: &|p| fs::metadata(p).ok().map(|m| m.dev()),
-        },
-    )
+    SearchEnv::from_env().repo_root(cwd)
 }
 
 /// Git's `git_env_bool`: `true`, `yes`, `on` (any case), or any non-zero

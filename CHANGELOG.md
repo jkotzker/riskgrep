@@ -4,17 +4,25 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Upgrading
+
+- The path rules see (the `path` rule global) is the file's path from the root of the git repository holding it, or its absolute path for a file outside any repository; it was relative to the working directory when the file was under it. A file now gets the same result from any working directory, so results move for scans run from a subdirectory of a repository (a file in `node_modules/` scanned from inside `node_modules/` was read by the converted gitleaks rules and is now skipped by gitleaks' global path allowlist, as from the root), for files outside a repository scanned from one of their parent directories (the names of every parent directory now count, for the allowlist and for `path_biometric_name`), and for user rulesets whose `path` conditions assume the earlier form, such as a `^` anchor. A container member is still matched as the container's path, `!/`, and its own. The evaluation's metrics are unchanged (`cargo xtask eval`). See `crates/riskgrep-core/rulesets/README.md`, "Externals".
+- The evidence cache's schema is version 5, so the first scan after upgrading reads every file again, and a 1.2.0 and a 1.3.0 binary sharing one cache reset it whenever they alternate.
+
+### Added
+
+- A target to which gitleaks' global path allowlist applied says so: `path_allowlisted: true` in JSON (absent otherwise) and `(path allowlist applied)` in text output, whose summary line counts such targets. The converted rules, `credential_key_hex_value`, and the credential file-name rules skip those paths, so for such a target a `secret` score of 0 does not mean they found nothing. A container sets it when the allowlist applied to a member; `container.path_allowlisted` counts those members, and a listed member it applied to carries `path_allowlisted: true`, while members without evidence stay unnamed (`cargo test -p riskgrep-core --test path_allowlist`).
+- `path_allowlist`, a top-level setting (default `true`) that turns gitleaks' global path allowlist off when `false`, overridden by `path_allowlist` under `[claude_code]` or `[git]` and by `riskgrep scan --path-allowlist on|off`. With it off, the evaluation flags one more synthetic file (a token in `node_modules/dep/index.js`), 2.8 false positives per 1,000 against the release bar of 1, and no more open-source files; recall is unchanged (`cargo xtask eval --path-allowlist off`, a new option that never writes the baseline).
+- Rulesets can mark a path allowlist rule with the meta key `path_allowlist = true`, which reports its result instead of evidence, and condition it on the boolean global `path_allowlist_enabled`, which the setting controls; `gitleaks_global_path_allowlist` is regenerated that way.
+
 ### Fixed
 
 - File names with control characters (a newline, tab, or escape sequence) are written escaped (`\n`, `\t`, `\u{1b}`) in `riskgrep scan` text output and in the Claude Code hook's decision messages, as archive member names already were, so a name cannot forge a line of output or move a terminal's cursor. Other characters, including non-ASCII ones, are written as they are. JSON output and the git hook's message are unchanged. The escaping is `riskgrep_core::model::escape_controls`.
+- Known limitations said a SQLite database with a write-ahead log beside it is `partial`, as the 1.2.0 entry below does. That holds once the database's own pages hold a table; a new database in WAL mode before its first checkpoint holds only an empty first page, so nothing in it is read, and it is `unscanned`, which follows `on_error` rather than `on_partial` (`cargo test -p riskgrep-core --test container_sqlite a_wal_database_before`). The behaviour is unchanged; the documentation now states it.
 
 ### Changed
 
 - Upgraded the YARA-X engine from 1.22.0 to 1.23.0. Detection results and scores are unchanged on the evaluation corpus. YARA-X 1.23.0 pins its own `yara-x-macros` and `yara-x-parser` crates to the same version, so `riskgrep-core` no longer pins them. The compiled rules bundle is keyed by the engine version, so each machine compiles it once on first use after the upgrade.
-
-### Fixed
-
-- Known limitations said a SQLite database with a write-ahead log beside it is `partial`, as the 1.2.0 entry below does. That holds once the database's own pages hold a table; a new database in WAL mode before its first checkpoint holds only an empty first page, so nothing in it is read, and it is `unscanned`, which follows `on_error` rather than `on_partial` (`cargo test -p riskgrep-core --test container_sqlite a_wal_database_before`). The behaviour is unchanged; the documentation now states it.
 
 ## [1.2.0] – 2026-11-02
 

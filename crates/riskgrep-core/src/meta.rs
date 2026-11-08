@@ -86,6 +86,12 @@ pub struct RuleMeta {
     /// show a match. Used by the Claude Code hook's partial reads.
     #[serde(default)]
     pub line_complete: bool,
+    /// Meta `path_allowlist = true`: the rule is a path allowlist that other
+    /// rules exclude (`not <rule>`). It yields no evidence; when it matches,
+    /// the scan reports that the allowlist applied
+    /// ([`crate::engine::Scan::path_allowlisted`]).
+    #[serde(default)]
+    pub path_allowlist: bool,
 }
 
 struct Raw<'a> {
@@ -235,6 +241,7 @@ impl RuleMeta {
             family_cap,
             post,
             line_complete: raw.boolean("line_complete")?.unwrap_or(false),
+            path_allowlist: raw.boolean("path_allowlist")?.unwrap_or(false),
         })
     }
 

@@ -15,9 +15,11 @@ use crate::meta::RuleMeta;
 use crate::model::{
     Category, ContainerReport, Evidence, MemberReport, Report, TargetReport, TargetStatus,
 };
+use crate::repo::SearchEnv;
 use crate::ruleset::{builtin_rulesets, Ruleset};
 use crate::score::{score_container, score_target};
 use crate::suppress::{self, Baseline};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -83,8 +85,16 @@ pub struct RiskGrep {
     baseline: Option<Baseline>,
     /// Suppression paths are relative to this (repository root, else cwd).
     rel_base: Option<PathBuf>,
-    /// Canonical working directory; the `path` rule external is relative to it.
+    /// Canonical working directory, against which `scan_names` resolves a
+    /// relative name.
     cwd: Option<PathBuf>,
+    /// Finds the repository holding a file: the `path` rule global is
+    /// relative to its root, else absolute (see [`RiskGrep::rules_path`]).
+    search: SearchEnv,
+    /// Repository root by canonical directory, as found by `search`.
+    roots: RefCell<HashMap<PathBuf, Option<PathBuf>>>,
+    /// [`Config::path_allowlist_applies`].
+    allowlist: bool,
 }
 
 /// A target before suppression and scoring.
@@ -100,14 +110,18 @@ struct Raw {
     /// The content was scanned as text (see [`TargetReport::text`]).
     text: bool,
     /// Set for a container whose members were read.
-    container: Option<ContainerInfo>,
+    container: Option<Box<ContainerInfo>>,
     /// See [`TargetReport::read_failed`].
     read_failed: bool,
+    /// See [`TargetReport::path_allowlisted`].
+    path_allowlisted: bool,
 }
 
 /// What a container's walk and scan found besides evidence.
 struct ContainerInfo {
-    /// `scanned` counts members read whole and scanned.
+    /// `scanned` counts members read whole and scanned; `path_allowlisted`
+    /// counts members a path allowlist applied to, and
+    /// `allowlisted_listed` names those with evidence.
     counts: ContainerRow,
     read_in_part: u64,
     not_read: u64,
@@ -133,6 +147,7 @@ impl ContainerInfo {
             skipped: self.counts.skipped,
             not_read: self.not_read,
             opened: self.opened,
+            path_allowlisted: self.counts.path_allowlisted,
             listed,
         }
     }
@@ -149,6 +164,7 @@ impl Raw {
             text: false,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         }
     }
 
@@ -161,7 +177,7 @@ impl Raw {
                 reason: container::ALL_SKIPPED.to_string(),
             },
         );
-        raw.container = Some(info);
+        raw.container = Some(Box::new(info));
         raw
     }
 
@@ -180,7 +196,7 @@ impl Raw {
         });
         let container = match container {
             Some(info) if info.all_skipped() => return Raw::all_skipped(target, info),
-            other => other,
+            other => other.map(Box::new),
         };
         Raw {
             target,
@@ -191,6 +207,7 @@ impl Raw {
             text: text && container.is_none(),
             container,
             read_failed: false,
+            path_allowlisted: entry.path_allowlisted,
         }
     }
 
@@ -210,6 +227,7 @@ impl Raw {
             text,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         }
     }
 }
@@ -292,11 +310,19 @@ fn container_of(class: &FileClass) -> Option<&'static dyn Extractor> {
 }
 
 /// The evidence-cache key of a target: the bundle key, the extractor and
-/// its version for a container, and the path the rules see.
-fn evidence_key(bundle: &str, ext: Option<&dyn Extractor>, path_ext: &str) -> String {
+/// its version for a container, whether path allowlists apply (marked only
+/// when they do not, so the default keeps its keys), and the path the rules
+/// see.
+fn evidence_key(
+    bundle: &str,
+    ext: Option<&dyn Extractor>,
+    allowlist: bool,
+    path_ext: &str,
+) -> String {
+    let off = if allowlist { "" } else { "no-path-allowlist:" };
     match ext {
-        Some(x) => format!("{bundle}:{}@{}:{path_ext}", x.id(), x.version()),
-        None => format!("{bundle}:{path_ext}"),
+        Some(x) => format!("{bundle}:{}@{}:{off}{path_ext}", x.id(), x.version()),
+        None => format!("{bundle}:{off}{path_ext}"),
     }
 }
 
@@ -385,6 +411,9 @@ fn place_tail(evidence: &mut [Evidence], tail: Tail) {
 fn new_scanner<'r>(engine: &'r Engine, cfg: &Config) -> yara_x::Scanner<'r> {
     let mut s = yara_x::Scanner::new(engine.rules());
     s.set_timeout(cfg.limits.time_budget);
+    // Defined by every bundle (`bundle::compile`), so this cannot fail.
+    let set = s.set_global(bundle::PATH_ALLOWLIST_GLOBAL, cfg.path_allowlist_applies());
+    debug_assert!(set.is_ok());
     s
 }
 
@@ -476,6 +505,7 @@ impl RiskGrep {
             Some(d) if !cfg.no_cache => Cache::open(d),
             _ => None,
         };
+        let allowlist = cfg.path_allowlist_applies();
         Ok(RiskGrep {
             cfg,
             rulesets,
@@ -489,7 +519,47 @@ impl RiskGrep {
             baseline,
             rel_base: base,
             cwd,
+            search: SearchEnv::from_env(),
+            roots: RefCell::new(HashMap::new()),
+            allowlist,
         })
+    }
+
+    /// The path the rules see (the `path` global) for the canonical path
+    /// `real`: relative to the root of the repository holding it, else
+    /// absolute, so it does not depend on the working directory. The
+    /// repository is the nearest ancestor of the file's directory with a
+    /// `.git` entry, found with the checks of the configuration's repository
+    /// search ([`crate::repo::find_repo_root`]: ownership, ceilings, the
+    /// parent of `$HOME`, filesystem boundaries).
+    fn rules_path(&self, real: &Path) -> String {
+        let root = real.parent().and_then(|dir| {
+            self.roots
+                .borrow_mut()
+                .entry(dir.to_path_buf())
+                .or_insert_with(|| self.search.repo_root(dir))
+                .clone()
+        });
+        relative_to(root.as_deref(), real)
+    }
+
+    /// [`RiskGrep::rules_path`] for a name that may not exist: relative to
+    /// the working directory when relative, with the existing part
+    /// canonicalized.
+    fn rules_path_of_name(&self, name: &str) -> String {
+        let p = Path::new(name);
+        let abs = match &self.cwd {
+            Some(cwd) if p.is_relative() => cwd.join(p),
+            _ => p.to_path_buf(),
+        };
+        let real = fs::canonicalize(&abs).ok().or_else(|| {
+            let parent = fs::canonicalize(abs.parent()?).ok()?;
+            Some(parent.join(abs.file_name()?))
+        });
+        match real {
+            Some(r) => self.rules_path(&r),
+            None => name.to_string(),
+        }
     }
 
     /// Close the evidence cache now: its SQLite connection closes, which
@@ -591,7 +661,7 @@ impl RiskGrep {
                     Pending {
                         target: name.clone(),
                         rel: name.clone(),
-                        path_ext: name.clone(),
+                        path_ext: self.rules_path_of_name(name),
                         ekey: String::new(),
                         content,
                         text: true,
@@ -641,7 +711,7 @@ impl RiskGrep {
         // lines a diff's line ranges can be matched against.
         let blob_text = class == FileClass::Text;
         let ext = container_of(&class);
-        let ekey = evidence_key(&self.key, ext, name);
+        let ekey = evidence_key(&self.key, ext, self.allowlist, name);
         let mut h = blake3::Hasher::new();
         h.update(b"riskgrep-git-blob\0");
         h.update(blob_id);
@@ -811,9 +881,9 @@ impl RiskGrep {
             return done(s);
         }
 
-        let path_ext = relative_to(self.cwd.as_deref(), &real);
+        let path_ext = self.rules_path(&real);
         let ext = container_of(&class);
-        let ekey = evidence_key(&self.key, ext, &path_ext);
+        let ekey = evidence_key(&self.key, ext, self.allowlist, &path_ext);
         let rel = relative_to(self.rel_base.as_deref(), &real);
         let beside = ext.map_or_else(Vec::new, |x| x.beside(&real));
         let cache = self.cache.as_ref().filter(|_| beside.is_empty());
@@ -961,6 +1031,7 @@ impl RiskGrep {
             Err(ScanError::Yara(_)) => return Raw::status(p.target, unscanned("scan error")),
         };
         let (mut ev, engine_not_read) = (scan.evidence, scan.not_read);
+        let allowlisted = scan.path_allowlisted && self.allowlist;
         if let Some(d) = &p.content.decoded {
             d.place(&mut ev);
         } else if let Some(tail) = p.content.tail {
@@ -969,7 +1040,7 @@ impl RiskGrep {
         // Evidence from content a processor could not fully inspect is not
         // cached: a hit means a full scan, as with partial reads.
         if let (Some(c), Some(h), None) = (self.cache.as_ref(), p.hash, &engine_not_read) {
-            c.put_evidence(h, &p.ekey, &ev);
+            c.put_entry(h, &p.ekey, &ev, None, allowlisted);
             if let Some((k, examined)) = &p.stat {
                 c.put_stat(k, h, *examined);
             }
@@ -981,6 +1052,7 @@ impl RiskGrep {
         };
         let mut raw = Raw::scanned(p.target, p.rel, status, ev, p.text);
         raw.read_failed = read_failed;
+        raw.path_allowlisted = allowlisted;
         raw
     }
 
@@ -1001,6 +1073,8 @@ impl RiskGrep {
         let mut unread = x.unread;
         let mut ev_all: Vec<Evidence> = Vec::new();
         let mut scanned: Vec<u64> = Vec::new();
+        // Paths of the members a path allowlist applied to.
+        let mut allowlisted: BTreeSet<String> = BTreeSet::new();
         for m in x.members {
             let left = deadline.saturating_duration_since(Instant::now());
             let cause = if left.is_zero() {
@@ -1010,6 +1084,9 @@ impl RiskGrep {
                 let path = format!("{}!/{}", p.path_ext, m.path);
                 match engine.scan_content_checked(scanner, &path, &m.content.bytes) {
                     Ok(scan) => {
+                        if scan.path_allowlisted && self.allowlist {
+                            allowlisted.insert(m.path.clone());
+                        }
                         let mut ev = scan.evidence;
                         if let Some(note) = scan.not_read {
                             unread.push(Unread {
@@ -1064,10 +1141,23 @@ impl RiskGrep {
             members: x.total,
             scanned: scanned.iter().filter(|s| !in_part.contains(s)).count() as u64,
             skipped: x.skipped,
+            path_allowlisted: allowlisted.len() as u64,
+            // Only members a report lists: with evidence, or not read whole.
+            allowlisted_listed: allowlisted
+                .iter()
+                .filter(|m| {
+                    ev_all
+                        .iter()
+                        .any(|e| e.member.as_deref() == Some(m.as_str()))
+                        || unread.iter().any(|u| u.path.as_deref() == Some(m.as_str()))
+                })
+                .cloned()
+                .collect(),
         };
+        let any_allowlisted = !allowlisted.is_empty();
         if status == TargetStatus::Scanned {
             if let (Some(c), Some(h)) = (self.cache.as_ref(), p.hash) {
-                c.put_entry(h, &p.ekey, &ev_all, Some(&counts));
+                c.put_entry(h, &p.ekey, &ev_all, Some(&counts), any_allowlisted);
                 if let Some((k, examined)) = &p.stat {
                     c.put_stat(k, h, *examined);
                 }
@@ -1084,7 +1174,8 @@ impl RiskGrep {
             return Raw::all_skipped(p.target, info);
         }
         let mut raw = Raw::scanned(p.target, p.rel, status, ev_all, false);
-        raw.container = Some(info);
+        raw.container = Some(Box::new(info));
+        raw.path_allowlisted = any_allowlisted;
         raw
     }
 
@@ -1188,6 +1279,7 @@ impl RiskGrep {
             text: raw.text,
             container: None,
             read_failed: raw.read_failed,
+            path_allowlisted: raw.path_allowlisted,
         };
         let info = raw.container;
         if !raw.content {
@@ -1228,7 +1320,7 @@ impl RiskGrep {
         match info {
             Some(info) => {
                 t.scores = zero(score_container(&t.evidence, &sm.meta));
-                t.container = Some(self.container_report(&t.evidence, info, &sm.meta, zero));
+                t.container = Some(self.container_report(&t.evidence, *info, &sm.meta, zero));
             }
             None => t.scores = zero(score_target(&t.evidence, &sm.meta)),
         }
@@ -1272,6 +1364,7 @@ impl RiskGrep {
                 path: path.to_string(),
                 status,
                 scores: zero(score_target(ev, meta)),
+                path_allowlisted: info.counts.allowlisted_listed.iter().any(|m| m == path),
             });
         }
         for u in &info.unread {
@@ -1283,6 +1376,7 @@ impl RiskGrep {
                 path: path.clone(),
                 status: unread_status(u),
                 scores: zero(BTreeMap::new()),
+                path_allowlisted: info.counts.allowlisted_listed.iter().any(|m| m == path),
             });
         }
         listed.truncate(container::LISTED_MAX);
@@ -1364,8 +1458,12 @@ mod tests {
     /// Evidence cached from an older extractor's output must not be used.
     #[test]
     fn evidence_key_changes_with_the_extractor_version() {
-        let key = |v| evidence_key("bundle", Some(&Versioned(v)), "a.zip");
+        let key = |v| evidence_key("bundle", Some(&Versioned(v)), true, "a.zip");
         assert_ne!(key(1), key(2));
-        assert_ne!(key(1), evidence_key("bundle", None, "a.zip"));
+        assert_ne!(key(1), evidence_key("bundle", None, true, "a.zip"));
+        assert_ne!(
+            evidence_key("bundle", None, true, "a.txt"),
+            evidence_key("bundle", None, false, "a.txt")
+        );
     }
 }

@@ -11,12 +11,20 @@ const MAX_LINES: usize = 5;
 pub fn render(report: &Report) -> String {
     let mut out = String::new();
     for t in &report.targets {
-        if let Some(line) = target_line(t) {
+        if let Some(mut line) = target_line(t) {
+            if t.path_allowlisted {
+                line.push_str("  (path allowlist applied)");
+            }
             out.push_str(&line);
             out.push('\n');
         }
     }
-    out.push_str(&summary_line(report));
+    let mut summary = summary_line(report);
+    let allowlisted = report.targets.iter().filter(|t| t.path_allowlisted).count();
+    if allowlisted > 0 {
+        let _ = write!(summary, "; {allowlisted} under a path allowlist");
+    }
+    out.push_str(&summary);
     out.push('\n');
     out
 }
@@ -149,6 +157,7 @@ mod tests {
             text: true,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         }
     }
 
