@@ -475,7 +475,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "instruction counts failed against {shown}:\n  {}\nIf the increase is deliberate, rewrite the baseline with `cargo xtask instructions --counter {} --write-baseline` on {os} {arch}, or copy the `baseline` object of the CI job's `instruction-counts` artifact into it, and state the reason in the pull request.",
+            "instruction counts failed against {shown}:\n  {}\nIf the change is deliberate, rewrite the baseline with `cargo xtask instructions --counter {} --write-baseline` on {os} {arch}, or copy the `baseline` object of the CI job's `instruction-counts` artifact into it, and state the reason in the pull request.",
             failures.join("\n  "),
             counter.name()
         ))
