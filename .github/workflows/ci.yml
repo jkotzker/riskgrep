@@ -87,9 +87,11 @@ jobs:
     # callgrind, against bench/instructions-linux-x86_64-callgrind.json. Hosted
     # runners expose no hardware counter, and callgrind counts the same on
     # their different CPU models. The wall-clock targets ("is it fast
-    # enough?") stay with `cargo xtask bench` on fixed hardware.
+    # enough?") stay with `cargo xtask bench` on fixed hardware. The image is
+    # pinned because the baseline was measured on it: a new `ubuntu-latest`
+    # could move the counts with no code change.
     name: instruction counts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
