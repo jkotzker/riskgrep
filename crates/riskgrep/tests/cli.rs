@@ -1132,6 +1132,210 @@ fn a_sampled_file_and_the_same_file_in_an_archive_follow_on_partial() {
     ));
 }
 
+// ---- show ----
+
+fn has(hay: &[u8], needle: &str) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
+#[test]
+fn show_prints_the_file_masked() {
+    let (dir, _, key) = key_dir();
+    let out = riskgrep(dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, &key), "the key is in the output");
+    assert!(
+        out == b"one\ntwo\nthree\nfour\nfive\nsix\nlet id = \"<redacted>\";\neight\n",
+        "masked output differs"
+    );
+}
+
+#[test]
+fn show_lines_and_rule_ids() {
+    let (dir, _, key) = key_dir();
+    let out = riskgrep(dir.path())
+        .args(["show", "key.txt", "--lines", "7:7", "--rule-ids"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, &key));
+    assert!(out == b"let id = \"<redacted: secrets_core:aws_access_token>\";\n");
+    // Every element of the shape the Claude Code hook exempts and offers.
+    let out = riskgrep(dir.path())
+        .args(["show", "--rule-ids", "--lines", "7:7", "--", "key.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(out == b"let id = \"<redacted: secrets_core:aws_access_token>\";\n");
+    riskgrep(dir.path())
+        .args(["show", "key.txt", "--lines", "3:1"])
+        .assert()
+        .code(3);
+}
+
+#[test]
+fn show_refuses_a_file_over_its_cap_and_prints_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[show]\nmax_bytes = 16\n").unwrap();
+    let (dir, _, _) = key_dir();
+    riskgrep_in(home.path(), dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("max_bytes"));
+}
+
+#[test]
+fn show_summarises_binary_formats() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("emb.safetensors"),
+        synth::safetensors(&[("speaker_alice", "F32", &[64, 256])]),
+    )
+    .unwrap();
+    riskgrep(dir.path())
+        .args(["show", "emb.safetensors"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("F32 [64, 256]"))
+        .stdout(predicate::str::contains("speaker_alice").not());
+}
+
+#[test]
+fn show_masks_what_configuration_tries_to_unmask() {
+    // Every way configuration narrows a scan (categories, rulesets, weight
+    // overrides, ignore entries in both files, and a baseline) leaves the
+    // masked view unchanged.
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(
+        cfg.join("config.toml"),
+        "categories = [\"biometric\"]\nrulesets = [\"biometric_embeddings\"]\n\
+         [weight_overrides]\n\"secrets_core:aws_access_token\" = 0\n\
+         [ignore]\npaths = [\"key.txt\"]\n",
+    )
+    .unwrap();
+    let (dir, _, key) = key_dir();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .env("GIT_CEILING_DIRECTORIES", dir.path().parent().unwrap())
+        .status()
+        .unwrap();
+    riskgrep(dir.path())
+        .args(["baseline", "key.txt"])
+        .assert()
+        .code(0);
+    fs::write(
+        dir.path().join(".riskgrep.toml"),
+        "[ignore]\npaths = [\"*.txt\"]\n[[ignore.rules]]\npath = \"**\"\nrules = [\"aws_access_token\"]\n",
+    )
+    .unwrap();
+    // The scan sees nothing under this configuration ...
+    let json = riskgrep_in(home.path(), dir.path())
+        .args(["scan", "key.txt", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !has(&json, "aws_access_token"),
+        "the scan still finds the key"
+    );
+    // ... and the masked view still masks the key.
+    let out = riskgrep_in(home.path(), dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, &key), "configuration unmasked the key");
+    assert!(has(&out, "<redacted>"));
+}
+
+#[test]
+fn show_masks_paths_the_allowlist_covers() {
+    // With gitleaks' global path allowlist on (as by default, and here set
+    // explicitly), a scan skips `node_modules/`; the masked view does not.
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(
+        cfg.join("config.toml"),
+        "path_allowlist = true\n[claude_code]\npath_allowlist = true\n",
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+    let line = synth::fake_secret("generic_api_key_assignment", 13);
+    let value = line.split('"').nth(1).unwrap().to_string();
+    fs::write(
+        dir.path().join("node_modules/pkg/settings.ini"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+    let json = riskgrep_in(home.path(), dir.path())
+        .args(["scan", "node_modules/pkg/settings.ini", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(v["targets"][0]["path_allowlisted"], true, "precondition");
+    assert_eq!(v["targets"][0]["scores"]["secret"], 0.0, "precondition");
+    let out = riskgrep_in(home.path(), dir.path())
+        .args(["show", "node_modules/pkg/settings.ini"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, &value), "the allowlist unmasked the value");
+    assert!(has(&out, "<redacted>"));
+}
+
+#[test]
+fn show_rejects_a_zero_limit() {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[show]\nmax_bytes = 0\n").unwrap();
+    let (dir, _, _) = key_dir();
+    riskgrep_in(home.path(), dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn show_says_when_the_lines_are_past_the_end() {
+    let (dir, _, _) = key_dir();
+    riskgrep(dir.path())
+        .args(["show", "key.txt", "--lines", "20:30"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("has 8 lines"));
+}
+
 /// File names with control characters are written escaped in text output,
 /// for a finding and for an unscanned file; ordinary non-ASCII names are
 /// written as they are.

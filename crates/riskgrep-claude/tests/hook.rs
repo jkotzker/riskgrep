@@ -38,6 +38,21 @@ struct Env {
     work: tempfile::TempDir,
 }
 
+/// A copy of the hook in a directory of its own, with no `riskgrep` beside
+/// it, so its reasons offer no masked view whatever else the build put
+/// next to the original.
+fn lone_hook() -> &'static Path {
+    static HOOK: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
+    &HOOK
+        .get_or_init(|| {
+            let d = tempfile::tempdir().unwrap();
+            let p = d.path().join("riskgrep-claude");
+            fs::copy(env!("CARGO_BIN_EXE_riskgrep-claude"), &p).unwrap();
+            (d, p)
+        })
+        .1
+}
+
 const CACHE_SUBDIRS: [&str; 2] = ["Library/Caches/riskgrep", ".cache/riskgrep"];
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -115,7 +130,11 @@ impl Env {
     }
 
     fn run_raw(&self, stdin: &[u8]) -> Out {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_riskgrep-claude"))
+        self.run_bin(lone_hook(), stdin)
+    }
+
+    fn run_bin(&self, bin: &Path, stdin: &[u8]) -> Out {
+        let mut child = Command::new(bin)
             .current_dir(self.dir())
             .env("HOME", self.home.path())
             .env("XDG_CACHE_HOME", self.home.path().join(".cache"))
@@ -137,13 +156,17 @@ impl Env {
     }
 
     fn run(&self, tool: &str, tool_input: Value) -> Out {
+        self.run_with(lone_hook(), tool, tool_input)
+    }
+
+    fn run_with(&self, bin: &Path, tool: &str, tool_input: Value) -> Out {
         let input = json!({
             "hook_event_name": "PreToolUse",
             "tool_name": tool,
             "tool_input": tool_input,
             "cwd": self.dir(),
         });
-        self.run_raw(input.to_string().as_bytes())
+        self.run_bin(bin, input.to_string().as_bytes())
     }
 }
 
@@ -962,6 +985,7 @@ fn print_config_outputs_settings_block() {
     assert_eq!(h["matcher"], "^(Read|NotebookRead|Grep|Glob|Bash|mcp__.*)$");
     assert_eq!(h["hooks"][0]["command"], "riskgrep-claude");
     assert_eq!(h["hooks"][0]["timeout"], 5);
+    assert_eq!(h["hooks"][0]["onFailure"], "block");
     assert_eq!(
         v["permissions"]["deny"],
         json!([
@@ -972,6 +996,112 @@ fn print_config_outputs_settings_block() {
     assert!(String::from_utf8(o.stderr)
         .unwrap()
         .contains("settings.json"));
+}
+
+#[test]
+fn print_config_can_leave_out_on_failure() {
+    let o = Command::new(env!("CARGO_BIN_EXE_riskgrep-claude"))
+        .args(["print-config", "--no-block-on-failure"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let h = &v["hooks"]["PreToolUse"][0]["hooks"][0];
+    assert_eq!(h["command"], "riskgrep-claude");
+    assert!(h.get("onFailure").is_none(), "{h}");
+    let o = Command::new(env!("CARGO_BIN_EXE_riskgrep-claude"))
+        .args(["print-config", "--bogus"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(3));
+    assert!(o.stdout.is_empty());
+}
+
+// ---- the masked view ----
+
+/// A copy of the hook in its own directory, beside a file named `riskgrep`
+/// (the binary it trusts). Returns the hook and the canonical path of the
+/// trusted file.
+fn hook_beside_riskgrep(dir: &Path) -> (PathBuf, String) {
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let hook = bin.join("riskgrep-claude");
+    fs::copy(env!("CARGO_BIN_EXE_riskgrep-claude"), &hook).unwrap();
+    fs::write(bin.join("riskgrep"), b"#!/bin/sh\n").unwrap();
+    let trusted = fs::canonicalize(bin.join("riskgrep")).unwrap();
+    (hook, trusted.to_str().unwrap().to_string())
+}
+
+#[test]
+fn the_offered_masked_view_is_let_through_and_nothing_else() {
+    let e = Env::new();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_riskgrep(tools.path());
+    let f = e.write("config.env", aws_file().as_bytes());
+    let (d, reason) = e
+        .run_with(&hook, "Read", json!({ "file_path": f }))
+        .decision();
+    assert_eq!(d, "deny");
+    let cmd = format!("{trusted} show {}", f.display());
+    assert!(
+        reason.contains(&format!("For a view with every match masked, run `{cmd}`.")),
+        "{reason}"
+    );
+    e.run_with(&hook, "Bash", json!({ "command": cmd }))
+        .silent();
+    e.run_with(
+        &hook,
+        "Bash",
+        json!({ "command": format!("{trusted} show --rule-ids --lines 2:3 config.env") }),
+    )
+    .silent();
+    // Other binaries named riskgrep, wrappers, and anything attached are
+    // analysed as usual, and the file they name is flagged.
+    let other = tempfile::tempdir().unwrap();
+    let decoy = other.path().join("riskgrep");
+    fs::write(&decoy, b"#!/bin/sh\n").unwrap();
+    for c in [
+        format!("{cmd} | cat"),
+        format!("{cmd}; cat config.env"),
+        format!("{cmd} > out.txt"),
+        format!("{trusted} show $(echo config.env)"),
+        format!("{trusted} scan config.env"),
+        format!("{trusted} show config.env config.env"),
+        format!("HOME=/tmp {cmd}"),
+        format!("command {cmd}"),
+        format!("{} show config.env", decoy.display()),
+        "riskgrep show config.env".to_string(),
+        "cat config.env".to_string(),
+    ] {
+        let o = e.run_with(&hook, "Bash", json!({ "command": c }));
+        assert!(!o.stdout.is_empty(), "let through: {c}");
+        let (d, _) = o.decision();
+        assert_eq!(d, "deny", "{c}");
+    }
+}
+
+#[test]
+fn without_a_trusted_binary_nothing_is_offered_or_exempt() {
+    let e = Env::new();
+    let tools = tempfile::tempdir().unwrap();
+    let bin = tools.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let hook = bin.join("riskgrep-claude");
+    fs::copy(env!("CARGO_BIN_EXE_riskgrep-claude"), &hook).unwrap();
+    let f = e.write("config.env", aws_file().as_bytes());
+    let (_, reason) = e
+        .run_with(&hook, "Read", json!({ "file_path": f }))
+        .decision();
+    assert!(!reason.contains("masked"), "{reason}");
+    let fake = bin.join("riskgrep");
+    let (d, _) = e
+        .run_with(
+            &hook,
+            "Bash",
+            json!({ "command": format!("{} show config.env", fake.display()) }),
+        )
+        .decision();
+    assert_eq!(d, "deny");
 }
 
 // ---- MCP tools and Glob ----

@@ -9,10 +9,11 @@
 //! here must ask, which only a JSON decision does reliably.
 
 use riskgrep_claude::bash::bash_targets_within;
-use riskgrep_claude::decide::{decide, decide_names, error_decision, Decision};
+use riskgrep_claude::decide::{decide, decide_names, decide_offering, error_decision, Decision};
 use riskgrep_claude::input::{self, HookInput};
 use riskgrep_claude::mcp;
 use riskgrep_claude::resolve;
+use riskgrep_claude::show::{masked_view_binary, trusted_riskgrep};
 use riskgrep_core::config::{self, Action, Config, Mode, Overrides};
 use riskgrep_core::mcp::McpPlan;
 use riskgrep_core::{Report, RiskGrep};
@@ -40,11 +41,17 @@ const MATCHER: &str = "^(Read|NotebookRead|Grep|Glob|Bash|mcp__.*)$";
 
 fn main() {
     let start = Instant::now();
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|a| a == "print-config")
-    {
-        print_config();
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "print-config") {
+        let block = match &args[1..] {
+            [] => true,
+            [a] if a == "--no-block-on-failure" => false,
+            _ => {
+                eprintln!("usage: riskgrep-claude print-config [--no-block-on-failure]");
+                std::process::exit(3);
+            }
+        };
+        print_config(block);
         return;
     }
     // A panic must not print the default message or end in a non-zero exit,
@@ -75,15 +82,23 @@ fn emit(d: &Decision) {
     let _ = so.flush();
 }
 
-fn print_config() {
+/// The settings block. With `block`, the hook entry sets
+/// `"onFailure": "block"` (Claude Code 2.1.295 or later), so a hook that
+/// cannot start, crashes, or times out blocks the call instead of letting
+/// it through.
+fn print_config(block: bool) {
     eprintln!(
         "# Merge this into ~/.claude/settings.json by hand: add the hook entry to \
          hooks.PreToolUse and the deny rules to permissions.deny."
     );
+    let mut hook = json!({"type": "command", "command": "riskgrep-claude", "timeout": 5});
+    if block {
+        hook["onFailure"] = json!("block");
+    }
     let cfg = json!({
         "hooks": {"PreToolUse": [{
             "matcher": MATCHER,
-            "hooks": [{"type": "command", "command": "riskgrep-claude", "timeout": 5}],
+            "hooks": [hook],
         }]},
         "permissions": {"deny": [
             "Edit(~/.config/riskgrep/**)",
@@ -194,6 +209,13 @@ fn work(
             let Some(cmd) = hook.str_field("command") else {
                 return Decision::NoOpinion;
             };
+            // `riskgrep show` prints only a masked view: the one shape of it
+            // that surely runs the trusted binary is let through unanalysed.
+            if let Some(bin) = masked_view_binary(cmd) {
+                if trusted_riskgrep().is_some_and(|t| t == bin) {
+                    return Decision::NoOpinion;
+                }
+            }
             let budget = (total / BASH_SHARE).max(MIN_BASH_BUDGET);
             let t = bash_targets_within(cmd, cwd, budget);
             unresolved = t.unresolved;
@@ -249,7 +271,13 @@ fn work(
     }
     match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(Ok(report)) if names => decide_names(&report, &cc),
-        Ok(Ok(report)) => decide(&report, unresolved, &cc, input::requested_lines(hook)),
+        Ok(Ok(report)) => decide_offering(
+            &report,
+            unresolved,
+            &cc,
+            input::requested_lines(hook),
+            &trusted_riskgrep,
+        ),
         Ok(Err(reason)) => error_decision(cc.on_error, &format!("RiskGrep: {reason}")),
         Err(RecvTimeoutError::Timeout) => {
             error_decision(cc.on_error, "RiskGrep: scan exceeded time budget")

@@ -15,7 +15,7 @@ pub const EXIT_USAGE: i32 = 3;
     long_about = "Score files 0-100 per sensitive-data category (secrets, biometric embeddings).\n\n\
 Exit codes: 0 no --fail-at threshold met; 1 a threshold was met; \
 2 a target could not be scanned and --on-error is block (or part of a target's content was \
-not read and --on-partial blocks); 3 usage or configuration error. \
+not read and --on-partial blocks), or `show` refused; 3 usage or configuration error. \
 A closed standard output ends the output quietly and keeps the exit code the scan computed."
 )]
 pub struct Cli {
@@ -29,6 +29,23 @@ pub enum Command {
     Scan(ScanArgs),
     /// Record the current findings so later scans treat them as known
     Baseline(BaselineArgs),
+    /// Print a file with every match of every rule masked, or a structural
+    /// summary of a file that is not text
+    #[command(
+        long_about = "Print a file with every match of every rule replaced by a marker \
+(`<redacted>`), or, for a file that is not text (tensor files, key stores, archives), a \
+structural summary: format, tensor data types and shapes, member counts, and scores, never \
+names or values.\n\n\
+The file is read once and scanned whole by every built-in rule and any rules \
+`extra_ruleset_dirs` adds; categories, rulesets, weight overrides, ignore entries, \
+baselines, and path allowlists (`path_allowlist`) never narrow the mask. The masked text is scanned again before it is printed. \
+Values the rules do not detect are printed.\n\n\
+Exit codes: 0 printed; 2 refused, with the reason on standard error and nothing on \
+standard output (the file is larger than `[show] max_bytes`, 64 MiB by default, a scan \
+failed, timed out, or read only part of it, or a rule matched without a location); \
+3 usage or configuration error."
+    )]
+    Show(ShowArgs),
     /// Git integration: pre-commit check and hook installation
     Git {
         #[command(subcommand)]
@@ -117,6 +134,21 @@ pub struct ScanArgs {
     /// Do not read or write the evidence cache
     #[arg(long)]
     pub no_cache: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ShowArgs {
+    /// The file to show
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
+    /// Print only lines FIRST to LAST (from 1) of the masked text; masking
+    /// keeps the file's line numbers
+    #[arg(long, value_name = "FIRST:LAST", value_parser = riskgrep_core::show::parse_lines)]
+    pub lines: Option<(u64, u64)>,
+    /// Name the ruleset and rule ids that matched in each marker
+    /// (`<redacted: ruleset:rule>`) instead of `<redacted>`
+    #[arg(long)]
+    pub rule_ids: bool,
 }
 
 #[derive(Args, Debug)]

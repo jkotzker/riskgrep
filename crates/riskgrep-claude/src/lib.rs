@@ -5,3 +5,4 @@ pub mod decide;
 pub mod input;
 pub mod mcp;
 pub mod resolve;
+pub mod show;
