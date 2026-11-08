@@ -96,7 +96,9 @@ pub struct McpServer {
 #[serde(deny_unknown_fields)]
 pub struct McpTable {
     /// The action for a call whose files cannot be determined
-    /// ([`McpPlan::Unresolved`]); `allow` when unset.
+    /// ([`McpPlan::Unresolved`]). [`McpTable::plan`] uses `allow` when it is
+    /// unset; an adapter may fill it first from its own settings (the
+    /// Claude Code adapter falls back to `claude_code.on_unresolved`).
     pub on_unresolved: Option<Action>,
     #[serde(default)]
     pub servers: BTreeMap<String, McpServer>,
@@ -284,10 +286,12 @@ impl McpTable {
                 }
             }
             McpKind::Walk => McpPlan::Walk(paths),
-            McpKind::Names | McpKind::None => McpPlan::Names {
+            McpKind::Names => McpPlan::Names {
                 roots: paths,
                 max_depth: entry.max_depth,
             },
+            // Returned above, before the input is read.
+            McpKind::None => McpPlan::Nothing,
         }
     }
 }
