@@ -1033,7 +1033,37 @@ fn hook_beside_riskgrep(dir: &Path) -> (PathBuf, String) {
 }
 
 #[test]
-fn the_offered_masked_view_is_let_through_and_nothing_else() {
+fn a_file_flagged_only_by_its_name_is_not_offered_the_masked_view() {
+    let e = Env::new();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, _) = hook_beside_riskgrep(tools.path());
+    let f = e.write(".netrc", b"plain body text\n");
+    let (d, reason) = e
+        .run_with(&hook, "Read", json!({ "file_path": f }))
+        .decision();
+    assert_eq!(d, "ask");
+    assert!(!reason.contains("masked"), "{reason}");
+}
+
+#[test]
+fn a_masked_view_that_would_refuse_is_not_offered() {
+    // Flagged in its content, but over the limit of `riskgrep show`.
+    let e = Env::new();
+    let cfg = e.home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[show]\nmax_bytes = 8\n").unwrap();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, _) = hook_beside_riskgrep(tools.path());
+    let f = e.write("config.env", aws_file().as_bytes());
+    let (d, reason) = e
+        .run_with(&hook, "Read", json!({ "file_path": f }))
+        .decision();
+    assert_eq!(d, "deny");
+    assert!(!reason.contains("masked"), "{reason}");
+}
+
+#[test]
+fn the_offered_masked_view_asks_and_nothing_else_is_exempt() {
     let e = Env::new();
     let tools = tempfile::tempdir().unwrap();
     let (hook, trusted) = hook_beside_riskgrep(tools.path());
@@ -1047,14 +1077,19 @@ fn the_offered_masked_view_is_let_through_and_nothing_else() {
         reason.contains(&format!("For a view with every match masked, run `{cmd}`.")),
         "{reason}"
     );
-    e.run_with(&hook, "Bash", json!({ "command": cmd }))
-        .silent();
-    e.run_with(
-        &hook,
-        "Bash",
-        json!({ "command": format!("{trusted} show --rule-ids --lines 2:3 config.env") }),
-    )
-    .silent();
+    // The exact shape needs the user's approval, flagged file or not.
+    let clean = e.write("notes.txt", b"hello\n");
+    for c in [
+        cmd.clone(),
+        format!("{trusted} show --rule-ids --lines 2:3 config.env"),
+        format!("{trusted} show {}", clean.display()),
+    ] {
+        let (d, reason) = e
+            .run_with(&hook, "Bash", json!({ "command": c }))
+            .decision();
+        assert_eq!(d, "ask", "{c}");
+        assert!(reason.contains("do not detect"), "{reason}");
+    }
     // Other binaries named riskgrep, wrappers, and anything attached are
     // analysed as usual, and the file they name is flagged.
     let other = tempfile::tempdir().unwrap();

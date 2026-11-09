@@ -255,11 +255,88 @@ fn a_text_file_over_the_hook_limit_is_scanned_whole() {
 }
 
 #[test]
-fn a_path_rule_does_not_refuse_the_view() {
+fn a_file_matched_only_by_its_name_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let p = write(&dir, "speaker_embedding.txt", b"notes only\n");
+    let r = show(&p, &ShowOptions::default()).unwrap_err();
+    assert!(r.contains("nothing to mask"), "{r}");
+}
+
+#[test]
+fn a_name_match_beside_a_content_match_is_masked() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("github_pat", 11);
+    let p = write(
+        &dir,
+        "speaker_embedding.txt",
+        format!("notes\n{key}\n").as_bytes(),
+    );
     let (out, masks) = masked(&p);
-    assert_eq!((out.as_slice(), masks), (b"notes only\n".as_slice(), 0));
+    assert_eq!(masks, 1);
+    assert!(
+        !contains(&out, key.as_bytes()),
+        "the secret is in the output"
+    );
+    assert!(out.starts_with(b"notes\n"));
+}
+
+#[test]
+fn a_text_file_no_rule_matches_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, body) in [
+        ("clean.txt", b"hello\nworld\n".as_slice()),
+        ("empty.txt", b"".as_slice()),
+    ] {
+        let p = write(&dir, name, body);
+        let r = show(&p, &ShowOptions::default()).unwrap_err();
+        assert!(r.contains("nothing to mask"), "{name}: {r}");
+    }
+}
+
+#[test]
+fn a_file_that_is_not_text_is_summarised_with_no_match() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        &dir,
+        "small.safetensors",
+        &synth::safetensors(&[("x", "F32", &[2, 2])]),
+    );
+    assert!(matches!(
+        show(&p, &ShowOptions::default()),
+        Ok(Shown::Summary(_))
+    ));
+}
+
+#[test]
+fn an_archive_read_only_in_part_is_refused() {
+    // One member past the default limit of 1000 members.
+    let dir = tempfile::tempdir().unwrap();
+    let names: Vec<String> = (0..1001).map(|i| format!("{i}.txt")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|n| (n.as_str(), b"plain\n".to_vec()))
+        .collect();
+    let p = write(&dir, "many.zip", &synth::npz(&members));
+    let r = show(&p, &ShowOptions::default()).unwrap_err();
+    assert!(r.contains("part of the content was not scanned"), "{r}");
+}
+
+#[test]
+fn a_file_that_is_not_text_and_could_not_be_scanned_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut unknown = vec![0u8, 1, 2, 3];
+    unknown.extend_from_slice(&[0xffu8; 4096]);
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    pdf.extend_from_slice(&[0u8; 64]);
+    for (name, bytes) in [
+        ("blob.bin", unknown),
+        ("doc.pdf", pdf),
+        ("broken.zip", b"PK\x03\x04truncated".to_vec()),
+    ] {
+        let p = write(&dir, name, &bytes);
+        let r = show(&p, &ShowOptions::default()).unwrap_err();
+        assert!(r.contains("could not scan"), "{name}: {r}");
+    }
 }
 
 #[test]
@@ -278,10 +355,8 @@ fn binary_formats_get_a_summary_without_names() {
     assert!(!s.contains("person_name_vector"));
 
     let p = write(&dir, "blob.bin", &[0u8, 1, 2, 3, 0, 0, 7, 9]);
-    let Ok(Shown::Summary(s)) = show(&p, &ShowOptions::default()) else {
-        panic!("expected a summary");
-    };
-    assert!(s.contains("binary file of unknown format"), "{s}");
+    let r = show(&p, &ShowOptions::default()).unwrap_err();
+    assert!(r.contains("binary file of unknown format"), "{r}");
 }
 
 #[test]
@@ -486,12 +561,18 @@ fn an_npz_read_as_a_zip_is_summarised_as_a_zip() {
 #[test]
 fn the_masked_view_counts_its_lines() {
     let dir = tempfile::tempdir().unwrap();
-    for (body, n) in [("a\nb\n", 2u64), ("a\nb", 2), ("", 0), ("\n", 1)] {
+    let key = synth::fake_secret("github_pat", 12);
+    for (body, n) in [
+        (format!("{key}\nb\n"), 2u64),
+        (format!("{key}\nb"), 2),
+        (key.clone(), 1),
+        (format!("{key}\n"), 1),
+    ] {
         let p = write(&dir, "n.txt", body.as_bytes());
         let Ok(Shown::Masked { lines, .. }) = show(&p, &ShowOptions::default()) else {
             panic!("not masked");
         };
-        assert_eq!(lines, n, "{body:?}");
+        assert_eq!(lines, n, "expected {n} lines");
     }
 }
 

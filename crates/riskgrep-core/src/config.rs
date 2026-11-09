@@ -687,7 +687,7 @@ pub const SHOW_TIME_BUDGET_MS: u64 = 60_000;
 /// What `riskgrep show` takes from configuration. It is deliberately
 /// narrow: the masked view masks every match of every built-in rule, so
 /// configuration may only add rules (`extra_ruleset_dirs`) and set the
-/// command's own limits, which can only make it refuse. `categories`,
+/// command's own limits, which decide only when it refuses. `categories`,
 /// `rulesets`, `weight_overrides`, `[ignore]`, baselines, `path_allowlist`,
 /// and `[limits]` never apply to it: path allowlists are always off.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -715,10 +715,11 @@ impl Default for ShowConfig {
 }
 
 /// The `riskgrep show` configuration: defaults, then the user file, then
-/// the repository file. The repository file's `[show]` limits always apply
-/// (they can only change when the command refuses); its
-/// `extra_ruleset_dirs` apply only when the repository is in the user
-/// file's `trusted_repos`, since rules decide what the command masks and
+/// the repository file. A repository file's `[show]` limits can only lower
+/// the values so far unless the repository is in the user file's
+/// `trusted_repos`, since a higher limit lets an untrusted repository make
+/// the command read more for longer; its `extra_ruleset_dirs` apply only
+/// when it is trusted, since rules decide what the command masks and
 /// refuses. `trusted_repos` in a repository file is ignored. A file that
 /// does not parse is an error, as for every other command; for an untrusted
 /// repository's file, the error does not quote the text.
@@ -763,10 +764,11 @@ pub fn load_show(repo_root: Option<&Path>) -> Result<ShowConfig, ConfigError> {
                 }
             }
             if let Some(v) = s.max_bytes {
-                out.max_bytes = v;
+                out.max_bytes = if untrusted { v.min(out.max_bytes) } else { v };
             }
             if let Some(v) = s.time_budget_ms {
-                out.time_budget = Duration::from_millis(v);
+                let v = Duration::from_millis(v);
+                out.time_budget = if untrusted { v.min(out.time_budget) } else { v };
             }
         }
     }

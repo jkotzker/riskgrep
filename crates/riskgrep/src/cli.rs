@@ -30,11 +30,11 @@ pub enum Command {
     /// Record the current findings so later scans treat them as known
     Baseline(BaselineArgs),
     /// Print a file with every match of every rule masked, or a structural
-    /// summary of a file that is not text
+    /// summary of a file that is not text and was scanned whole
     #[command(
         long_about = "Print a file with every match of every rule replaced by a marker \
-(`<redacted>`), or, for a file that is not text (tensor files, key stores, archives), a \
-structural summary: format, tensor data types and shapes, member counts, and scores, never \
+(`<redacted>`), or, for a file that is not text (tensor files, key stores, archives) and was scanned \
+whole, a structural summary: format, tensor data types and shapes, member counts, and scores, never \
 names or values.\n\n\
 The file is read once and scanned whole by every built-in rule and any rules \
 `extra_ruleset_dirs` adds (a repository's only when it is in `trusted_repos`); categories, rulesets, weight overrides, ignore entries, \
@@ -42,8 +42,9 @@ baselines, and path allowlists (`path_allowlist`) never narrow the mask. The mas
 Values the rules do not detect are printed.\n\n\
 Exit codes: 0 printed; 2 refused, with the reason on standard error and nothing on \
 standard output (the file is larger than `[show] max_bytes`, 64 MiB by default, a scan \
-failed, timed out, or read only part of it, or a rule matched without a location); \
-3 usage or configuration error."
+failed, timed out, or read only part of it, including a format it cannot read, a rule \
+matched without a location, or no rule matched a text file's content, so there is \
+nothing to mask); 3 usage or configuration error."
     )]
     Show(ShowArgs),
     /// Git integration: pre-commit check and hook installation

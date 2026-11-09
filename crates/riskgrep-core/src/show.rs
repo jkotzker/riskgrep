@@ -14,11 +14,15 @@
 //! Everything that prevents that guarantee is a [`Refusal`]: the file is
 //! larger than `[show] max_bytes`, a scan errors, times out, or reads only
 //! part of the content, or a rule matched the content without a location
-//! (path rules, which describe the file's name, are not content). A refusal
+//! (path rules, which describe the file's name, are not content). A text
+//! file no rule matched in its content is refused too: there is nothing to
+//! mask, and the command is not a way to read ordinary files. A refusal
 //! carries a reason and never file content. Formats read by structure
-//! (tensor files, key stores, archives, images, other binary files) get a
-//! [`Shown::Summary`] instead: the format, tensor data types and shapes,
-//! member counts, and scores, never names or values.
+//! (tensor files, key stores, archives) get a [`Shown::Summary`] instead:
+//! the format, tensor data types and shapes, member counts, and scores,
+//! never names or values. A file of such a format that the scan could not
+//! read whole (an unsupported format, a damaged archive, one past the
+//! container limits) is refused, since its scores would say nothing.
 
 use crate::classify::{FileClass, Known, Limits};
 use crate::config::{Config, ShowConfig};
@@ -495,6 +499,11 @@ fn masked(
     }
     let path_rules = path_rules(rg, real)?;
     let spans = spans_of(rg, &t.evidence, &path_rules, bytes.len())?;
+    if spans.is_empty() {
+        return refuse(
+            "no rule matched the content, so there is nothing to mask; read the file directly",
+        );
+    }
     let mut pieces = match class {
         FileClass::EncodedText(e) => {
             let bom = usize::from(e.bom).min(bytes.len());
@@ -575,6 +584,9 @@ fn format_name(class: &FileClass) -> String {
 fn summary(rg: &mut RiskGrep, path: &Path, class: &FileClass) -> Result<Shown, Refusal> {
     let report = rg.scan_paths(&[path.to_path_buf()]);
     let t = only(&report.targets)?;
+    if t.status != TargetStatus::Scanned {
+        return refuse(format!("{}: {}", format_name(class), status_reason(t)));
+    }
     let mut s = String::new();
     let _ = writeln!(s, "format: {}", format_name(class));
     let _ = writeln!(s, "content: not shown (not text)");

@@ -16,6 +16,7 @@ use riskgrep_claude::resolve;
 use riskgrep_claude::show::{masked_view_binary, trusted_riskgrep};
 use riskgrep_core::config::{self, Action, Config, Mode, Overrides};
 use riskgrep_core::mcp::McpPlan;
+use riskgrep_core::show::{show_file, ShowOptions};
 use riskgrep_core::{Report, RiskGrep};
 use serde_json::json;
 use std::io::{Read, Write};
@@ -177,6 +178,41 @@ fn config_error_summary(msg: &str) -> String {
     }
 }
 
+/// The reason given when an agent asks to run the masked view.
+const MASKED_VIEW_ASK: &str = "RiskGrep: this prints the file with every detected match masked; \
+                               values the rules do not detect are printed.";
+
+/// The trusted `riskgrep` binary, when `riskgrep show` on `target` gives a
+/// view instead of refusing. The view is made here and dropped, so a reason
+/// never offers a command that would refuse. It takes what is left of the
+/// hook's budget; a view that does not finish in it is not offered.
+fn masked_view_for(target: &str, root: Option<&Path>, deadline: Instant) -> Option<String> {
+    let bin = trusted_riskgrep()?;
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return None;
+    }
+    let mut cfg = config::load_show(root).ok()?;
+    cfg.time_budget = cfg.time_budget.min(left);
+    let path = PathBuf::from(target);
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("riskgrep-show".into())
+        .stack_size(WORKER_STACK)
+        .spawn(move || {
+            let shown = show_file(
+                &cfg,
+                &path,
+                &ShowOptions::default(),
+                riskgrep_core::paths::cache_dir(),
+            )
+            .is_ok();
+            let _ = tx.send(shown);
+        })
+        .ok()?;
+    rx.recv_timeout(left).ok()?.then_some(bin)
+}
+
 /// What the worker thread scans.
 enum Job {
     Files(Vec<PathBuf>),
@@ -209,11 +245,13 @@ fn work(
             let Some(cmd) = hook.str_field("command") else {
                 return Decision::NoOpinion;
             };
-            // `riskgrep show` prints only a masked view: the one shape of it
-            // that surely runs the trusted binary is let through unanalysed.
+            // `riskgrep show` prints only a masked view, but values the
+            // rules miss are printed with it, so the user decides. The one
+            // shape of it that surely runs the trusted binary is not
+            // analysed, which would deny the flagged file it names.
             if let Some(bin) = masked_view_binary(cmd) {
                 if trusted_riskgrep().is_some_and(|t| t == bin) {
-                    return Decision::NoOpinion;
+                    return Decision::Ask(MASKED_VIEW_ASK.to_string());
                 }
             }
             let budget = (total / BASH_SHARE).max(MIN_BASH_BUDGET);
@@ -255,6 +293,7 @@ fn work(
         },
     };
     let names = matches!(job, Job::Names { .. });
+    let show_root = root.clone();
     let (tx, rx) = mpsc::channel();
     let spawned = {
         let hook = hook.clone();
@@ -276,7 +315,7 @@ fn work(
             unresolved,
             &cc,
             input::requested_lines(hook),
-            &trusted_riskgrep,
+            &|target| masked_view_for(target, show_root.as_deref(), deadline),
         ),
         Ok(Err(reason)) => error_decision(cc.on_error, &format!("RiskGrep: {reason}")),
         Err(RecvTimeoutError::Timeout) => {

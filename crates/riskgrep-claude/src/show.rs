@@ -1,12 +1,12 @@
 //! The masked view as an agent route: the one `Bash` command shape the
-//! hook lets through without analysing it, and the command its reasons
+//! hook answers `ask` for without analysing it, and the command its reasons
 //! suggest.
 //!
 //! `riskgrep show` prints only masked text or a structural summary, so
-//! running it on a flagged file is safe, but only if the command really runs
-//! the trusted `riskgrep` binary with nothing else attached. The exemption
-//! is therefore a whitelist of one shape, and anything else is analysed as
-//! any other command:
+//! the user can approve it on a flagged file, but only if the command really
+//! runs the trusted `riskgrep` binary with nothing else attached. The
+//! exemption from analysis is therefore a whitelist of one shape, and
+//! anything else is analysed as any other command:
 //!
 //! ```text
 //! TRUSTED show [--rule-ids] [--lines FIRST:LAST] [--] FILE
