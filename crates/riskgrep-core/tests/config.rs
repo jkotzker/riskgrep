@@ -714,6 +714,38 @@ fn show_config_adds_rule_dirs_from_every_file_and_reads_its_limits() {
 }
 
 #[test]
+fn an_untrusted_repository_can_only_lower_the_show_limits() {
+    use riskgrep_core::config::{load_show, SHOW_MAX_BYTES, SHOW_TIME_BUDGET_MS};
+    let raise = "[show]\nmax_bytes = 999999999\ntime_budget_ms = 999999\n";
+
+    let e = env(None, Some(raise));
+    let c = load_show(Some(e.root())).unwrap();
+    assert_eq!(c.max_bytes, SHOW_MAX_BYTES);
+    assert_eq!(c.time_budget, Duration::from_millis(SHOW_TIME_BUDGET_MS));
+    drop(e);
+
+    let user = "[show]\nmax_bytes = 4096\ntime_budget_ms = 2000\n";
+    let e = env(Some(user), Some(raise));
+    let c = load_show(Some(e.root())).unwrap();
+    assert_eq!(c.max_bytes, 4096);
+    assert_eq!(c.time_budget, Duration::from_millis(2000));
+    drop(e);
+
+    let lower = "[show]\nmax_bytes = 1024\ntime_budget_ms = 500\n";
+    let e = env(Some(user), Some(lower));
+    let c = load_show(Some(e.root())).unwrap();
+    assert_eq!(c.max_bytes, 1024);
+    assert_eq!(c.time_budget, Duration::from_millis(500));
+    drop(e);
+
+    // A repository the user trusts sets them as the user file does.
+    let e = env(Some("trusted_repos = [\"{repo}\"]\n"), Some(raise));
+    let c = load_show(Some(e.root())).unwrap();
+    assert_eq!(c.max_bytes, 999_999_999);
+    assert_eq!(c.time_budget, Duration::from_millis(999_999));
+}
+
+#[test]
 fn show_takes_a_repositorys_rules_only_when_it_is_trusted() {
     use riskgrep_core::config::load_show;
     let repo = "extra_ruleset_dirs = [\"r\"]\n[show]\nmax_bytes = 2048\n";

@@ -1214,6 +1214,26 @@ fn show_summarises_binary_formats() {
 }
 
 #[test]
+fn show_refuses_what_it_cannot_scan_or_has_nothing_to_mask_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut unknown = vec![0u8, 1, 2, 3];
+    unknown.extend_from_slice(&[0xffu8; 4096]);
+    fs::write(dir.path().join("blob.bin"), unknown).unwrap();
+    fs::write(dir.path().join("clean.txt"), b"hello\n").unwrap();
+    for (name, why) in [
+        ("blob.bin", "could not scan"),
+        ("clean.txt", "nothing to mask"),
+    ] {
+        riskgrep(dir.path())
+            .args(["show", name])
+            .assert()
+            .code(2)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(why));
+    }
+}
+
+#[test]
 fn show_masks_what_configuration_tries_to_unmask() {
     // Every way configuration narrows a scan (categories, rulesets, weight
     // overrides, ignore entries in both files, and a baseline) leaves the
@@ -1550,14 +1570,13 @@ fn show_uses_a_repositorys_rules_only_when_it_is_trusted() {
     fs::write(dir.path().join("note.txt"), "name = pelican-marmot\n").unwrap();
 
     let untrusted = tempfile::tempdir().unwrap();
-    let out = riskgrep_in(untrusted.path(), dir.path())
+    // Without the repository's rules nothing matches the file.
+    riskgrep_in(untrusted.path(), dir.path())
         .args(["show", "--rule-ids", "note.txt"])
         .assert()
-        .code(0)
-        .get_output()
-        .stdout
-        .clone();
-    assert!(!has(&out, "probe:word"), "untrusted rules must not apply");
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("nothing to mask"));
 
     let trusted = tempfile::tempdir().unwrap();
     write_user_config(
