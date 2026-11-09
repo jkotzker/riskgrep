@@ -134,13 +134,21 @@ impl Env {
     }
 
     fn run_bin(&self, bin: &Path, stdin: &[u8]) -> Out {
-        let mut child = Command::new(bin)
-            .current_dir(self.dir())
+        self.run_bin_env(bin, stdin, &[])
+    }
+
+    fn run_bin_env(&self, bin: &Path, stdin: &[u8], env: &[(&str, &Path)]) -> Out {
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(self.dir())
             .env("HOME", self.home.path())
             .env("XDG_CACHE_HOME", self.home.path().join(".cache"))
             .env("GIT_CEILING_DIRECTORIES", self.dir().parent().unwrap())
             .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_WORK_TREE");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -157,6 +165,18 @@ impl Env {
 
     fn run(&self, tool: &str, tool_input: Value) -> Out {
         self.run_with(lone_hook(), tool, tool_input)
+    }
+
+    /// A hook time budget that a loaded machine will not use up, for tests
+    /// that need a view to finish.
+    fn long_budget(&self) {
+        let cfg = self.home.path().join(".config/riskgrep");
+        fs::create_dir_all(&cfg).unwrap();
+        fs::write(
+            cfg.join("config.toml"),
+            "[claude_code]\ntime_budget_ms = 60000\n",
+        )
+        .unwrap();
     }
 
     fn run_with(&self, bin: &Path, tool: &str, tool_input: Value) -> Out {
@@ -1019,16 +1039,24 @@ fn print_config_can_leave_out_on_failure() {
 
 // ---- the masked view ----
 
-/// A copy of the hook in its own directory, beside a file named `riskgrep`
-/// (the binary it trusts). Returns the hook and the canonical path of the
-/// trusted file.
+/// A copy of the hook in its own directory, beside an executable named
+/// `riskgrep` (the binary it trusts) that reports this build's version.
+/// Returns the hook and the canonical path of the trusted file.
 fn hook_beside_riskgrep(dir: &Path) -> (PathBuf, String) {
+    hook_beside_version(dir, env!("CARGO_PKG_VERSION"))
+}
+
+/// [`hook_beside_riskgrep`], with a `riskgrep` that reports `version`.
+fn hook_beside_version(dir: &Path, version: &str) -> (PathBuf, String) {
+    use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let hook = bin.join("riskgrep-claude");
     fs::copy(env!("CARGO_BIN_EXE_riskgrep-claude"), &hook).unwrap();
-    fs::write(bin.join("riskgrep"), b"#!/bin/sh\n").unwrap();
-    let trusted = fs::canonicalize(bin.join("riskgrep")).unwrap();
+    let riskgrep = bin.join("riskgrep");
+    fs::write(&riskgrep, format!("#!/bin/sh\necho riskgrep {version}\n")).unwrap();
+    fs::set_permissions(&riskgrep, fs::Permissions::from_mode(0o755)).unwrap();
+    let trusted = fs::canonicalize(riskgrep).unwrap();
     (hook, trusted.to_str().unwrap().to_string())
 }
 
@@ -1065,6 +1093,7 @@ fn a_masked_view_that_would_refuse_is_not_offered() {
 #[test]
 fn the_offered_masked_view_asks_and_nothing_else_is_exempt() {
     let e = Env::new();
+    e.long_budget();
     let tools = tempfile::tempdir().unwrap();
     let (hook, trusted) = hook_beside_riskgrep(tools.path());
     let f = e.write("config.env", aws_file().as_bytes());
@@ -1077,12 +1106,10 @@ fn the_offered_masked_view_asks_and_nothing_else_is_exempt() {
         reason.contains(&format!("For a view with every match masked, run `{cmd}`.")),
         "{reason}"
     );
-    // The exact shape needs the user's approval, flagged file or not.
-    let clean = e.write("notes.txt", b"hello\n");
+    // The exact shape needs the user's approval when it would print a view.
     for c in [
         cmd.clone(),
         format!("{trusted} show --rule-ids --lines 2:3 config.env"),
-        format!("{trusted} show {}", clean.display()),
     ] {
         let (d, reason) = e
             .run_with(&hook, "Bash", json!({ "command": c }))
@@ -1112,6 +1139,110 @@ fn the_offered_masked_view_asks_and_nothing_else_is_exempt() {
         assert!(!o.stdout.is_empty(), "let through: {c}");
         let (d, _) = o.decision();
         assert_eq!(d, "deny", "{c}");
+    }
+}
+
+#[test]
+fn a_masked_view_that_would_refuse_is_not_prompted_for() {
+    let e = Env::new();
+    e.long_budget();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_riskgrep(tools.path());
+    let clean = e.write("notes.txt", b"hello\n");
+    let named = e.write(".netrc", b"plain body text\n");
+    let dir = e.dir().join("a-directory");
+    fs::create_dir(&dir).unwrap();
+    for c in [
+        format!("{trusted} show {}", clean.display()),
+        format!("{trusted} show notes.txt"),
+        format!("{trusted} show --rule-ids --lines 1:1 notes.txt"),
+        format!("{trusted} show {}", named.display()),
+        format!("{trusted} show {}", dir.display()),
+        format!("{trusted} show no-such-file.txt"),
+    ] {
+        let o = e.run_with(&hook, "Bash", json!({ "command": c }));
+        assert!(o.stdout.is_empty(), "prompted for: {c}: {}", o.stdout);
+    }
+}
+
+#[test]
+fn a_view_refused_only_for_lack_of_time_still_asks() {
+    // With no time to scan, a refusal says nothing about the real command.
+    let e = Env::new();
+    let cfg = e.home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[show]\ntime_budget_ms = 1\n").unwrap();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_riskgrep(tools.path());
+    e.write("notes.txt", b"hello\n");
+    let (d, reason) = e
+        .run_with(
+            &hook,
+            "Bash",
+            json!({ "command": format!("{trusted} show notes.txt") }),
+        )
+        .decision();
+    assert_eq!(d, "ask");
+    assert!(reason.contains("do not detect"), "{reason}");
+}
+
+#[test]
+fn with_git_dir_set_nothing_is_offered_and_the_view_always_asks() {
+    // `riskgrep` then asks git for the repository whose configuration it
+    // reads, so the hook cannot say what it will do.
+    let e = Env::new();
+    e.long_budget();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_riskgrep(tools.path());
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.write("notes.txt", b"hello\n");
+    let other = tempfile::tempdir().unwrap();
+    for var in ["GIT_DIR", "GIT_WORK_TREE"] {
+        let env = [(var, other.path())];
+        let run = |tool: &str, input: Value| {
+            let input = json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool,
+                "tool_input": input,
+                "cwd": e.dir(),
+            });
+            e.run_bin_env(&hook, input.to_string().as_bytes(), &env)
+        };
+        let (d, reason) = run("Read", json!({ "file_path": f })).decision();
+        assert_eq!(d, "deny", "{var}");
+        assert!(!reason.contains("masked"), "{var}: {reason}");
+        let (d, _) = run(
+            "Bash",
+            json!({ "command": format!("{trusted} show notes.txt") }),
+        )
+        .decision();
+        assert_eq!(d, "ask", "{var}");
+    }
+}
+
+#[test]
+fn a_riskgrep_of_another_version_is_not_offered_and_always_asks() {
+    let e = Env::new();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_version(tools.path(), "0.0.1");
+    let f = e.write("config.env", aws_file().as_bytes());
+    let (d, reason) = e
+        .run_with(&hook, "Read", json!({ "file_path": f }))
+        .decision();
+    assert_eq!(d, "deny");
+    assert!(!reason.contains("masked"), "{reason}");
+    // The hook cannot say what another version would do, so the user decides
+    // even where this version would refuse.
+    e.write("notes.txt", b"hello\n");
+    for c in [
+        format!("{trusted} show config.env"),
+        format!("{trusted} show notes.txt"),
+    ] {
+        let (d, reason) = e
+            .run_with(&hook, "Bash", json!({ "command": c }))
+            .decision();
+        assert_eq!(d, "ask", "{c}");
+        assert!(reason.contains("do not detect"), "{reason}");
     }
 }
 

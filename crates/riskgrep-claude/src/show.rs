@@ -1,5 +1,5 @@
 //! The masked view as an agent route: the one `Bash` command shape the
-//! hook answers `ask` for without analysing it, and the command its reasons
+//! hook decides on without analysing it, and the command its reasons
 //! suggest.
 //!
 //! `riskgrep show` prints only masked text or a structural summary, so
@@ -31,7 +31,16 @@
 //!   once, in any order, then an optional `--`, then exactly one file that
 //!   does not start with `-` (unless after `--`).
 
+use std::io::{self, Read};
 use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+/// Longest `--version` output read.
+const VERSION_MAX: u64 = 64;
+/// How often a running `--version` is checked.
+const VERSION_POLL: Duration = Duration::from_millis(1);
 
 /// Characters a plain word may hold.
 fn plain_char(b: u8) -> bool {
@@ -80,10 +89,21 @@ fn lines_value(s: &str) -> bool {
     riskgrep_core::show::parse_lines(s).is_ok()
 }
 
-/// The binary a command of the exempt shape runs (its first word,
-/// unquoted), or `None` when `command` does not have that shape. The caller
-/// must still compare the binary with [`trusted_riskgrep`].
-pub fn masked_view_binary(command: &str) -> Option<String> {
+/// A command of the exempt shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaskedView {
+    /// The binary it runs (its first word, unquoted). The caller must still
+    /// compare it with [`trusted_riskgrep`].
+    pub binary: String,
+    /// The file it names, unquoted.
+    pub file: String,
+    /// Whether it asks for markers naming the rules.
+    pub rule_ids: bool,
+}
+
+/// `command` as a masked view, or `None` when it does not have the exempt
+/// shape.
+pub fn masked_view(command: &str) -> Option<MaskedView> {
     let w = words(command)?;
     let (bin, rest) = w.split_first()?;
     let (sub, mut rest) = rest.split_first()?;
@@ -113,14 +133,18 @@ pub fn masked_view_binary(command: &str) -> Option<String> {
         }
     }
     match rest {
-        [file] if !file.is_empty() => Some(bin.clone()),
+        [file] if !file.is_empty() => Some(MaskedView {
+            binary: bin.clone(),
+            file: file.clone(),
+            rule_ids,
+        }),
         _ => None,
     }
 }
 
 /// Whether `command` is exactly a masked view by the binary at `trusted`.
 pub fn is_masked_view(command: &str, trusted: &str) -> bool {
-    masked_view_binary(command).is_some_and(|b| b == trusted)
+    masked_view(command).is_some_and(|v| v.binary == trusted)
 }
 
 /// `s` as one shell word the exemption accepts: plain when it can be,
@@ -160,6 +184,73 @@ pub fn masked_view_command(trusted: &str, file: &str) -> Option<String> {
 pub fn trusted_riskgrep() -> Option<String> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     trusted_beside(&exe)
+}
+
+/// Whether the program at `bin` answers `--version` with `riskgrep VERSION`
+/// and a line feed (or nothing after it) within `budget`. A program that
+/// cannot start, fails, says anything else, or runs out of time (it is then
+/// killed) does not. The two binaries are installed separately, and the
+/// hook can say what `show` will do only for its own version.
+pub fn reports_version(bin: &str, version: &str, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    let Some(mut child) = spawn_version(bin, deadline) else {
+        return false;
+    };
+    // Read on a thread, within the deadline: a process the program leaves
+    // behind can hold the pipe open after the program exits.
+    let stdout = child.stdout.take();
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::Builder::new()
+        .name("riskgrep-version".into())
+        .spawn(move || {
+            let mut out = Vec::new();
+            let read = stdout.is_some_and(|o| o.take(VERSION_MAX).read_to_end(&mut out).is_ok());
+            let _ = tx.send(read.then_some(out));
+        });
+    let stop = |mut child: Child| {
+        let _ = child.kill();
+        let _ = child.wait();
+        false
+    };
+    if reader.is_err() {
+        return stop(child);
+    }
+    let succeeded = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(VERSION_POLL),
+            _ => return stop(child),
+        }
+    };
+    let left = deadline.saturating_duration_since(Instant::now());
+    let Ok(Some(out)) = rx.recv_timeout(left.max(VERSION_POLL)) else {
+        return false;
+    };
+    let want = format!("riskgrep {version}");
+    succeeded && out.strip_suffix(b"\n").unwrap_or(&out) == want.as_bytes()
+}
+
+/// `bin --version`, started before `deadline`. An executable written a
+/// moment ago can be busy while a process another thread started still
+/// holds its write descriptor (Linux `ETXTBSY`), so that error is retried.
+fn spawn_version(bin: &str, deadline: Instant) -> Option<Child> {
+    loop {
+        match Command::new(bin)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => return Some(child),
+            Err(e)
+                if e.kind() == io::ErrorKind::ExecutableFileBusy && Instant::now() < deadline =>
+            {
+                std::thread::sleep(VERSION_POLL);
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 /// [`trusted_riskgrep`] for the executable at `exe`.
@@ -249,6 +340,63 @@ mod tests {
         ] {
             assert!(!is_masked_view(c, T), "{c:?}");
         }
+    }
+
+    #[test]
+    fn a_masked_view_names_its_file_and_marker() {
+        let v = masked_view("/opt/rg/bin/riskgrep show --lines 1:2 'a b.env'").unwrap();
+        assert_eq!(v.binary, T);
+        assert_eq!(v.file, "a b.env");
+        assert!(!v.rule_ids);
+        let v = masked_view("/opt/rg/bin/riskgrep show --rule-ids -- -odd.env").unwrap();
+        assert_eq!(v.file, "-odd.env");
+        assert!(v.rule_ids);
+    }
+
+    fn script(dir: &Path, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("riskgrep");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn only_the_exact_version_answer_matches() {
+        let ample = Duration::from_secs(30);
+        let d = tempfile::tempdir().unwrap();
+        let bin = script(d.path(), "echo riskgrep 1.2.3");
+        assert!(reports_version(&bin, "1.2.3", ample));
+        assert!(!reports_version(&bin, "1.2", ample));
+        assert!(!reports_version(&bin, "1.2.4", ample));
+        let bare = script(d.path(), "printf 'riskgrep 1.2.3'");
+        assert!(reports_version(&bare, "1.2.3", ample));
+        for body in [
+            "echo riskgrep 1.2.3 extra",
+            "echo 'riskgrep 1.2.3 '",
+            "printf 'riskgrep 1.2.3\\n\\n'",
+            "echo other 1.2.3",
+            "echo riskgrep 1.2.3; exit 1",
+            "exit 0",
+        ] {
+            let bin = script(d.path(), body);
+            assert!(!reports_version(&bin, "1.2.3", ample), "{body}");
+        }
+        assert!(!reports_version("/no/such/riskgrep", "1.2.3", ample));
+    }
+
+    #[test]
+    fn a_version_check_that_runs_out_of_time_does_not_match() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = script(d.path(), "exec sleep 30");
+        let start = Instant::now();
+        assert!(!reports_version(&bin, "1.2.3", Duration::from_millis(50)));
+        assert!(start.elapsed() < Duration::from_secs(20));
+        // It exits at once, but what it left behind keeps the pipe open.
+        let bin = script(d.path(), "sleep 30 &\necho riskgrep 1.2.3");
+        let start = Instant::now();
+        assert!(!reports_version(&bin, "1.2.3", Duration::from_millis(500)));
+        assert!(start.elapsed() < Duration::from_secs(20));
     }
 
     #[test]
