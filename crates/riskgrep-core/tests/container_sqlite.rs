@@ -896,16 +896,31 @@ fn past_the_time_budget_it_is_never_clean() {
 #[test]
 fn whole_databases_are_cached_and_partial_ones_are_not() {
     let d = tempfile::tempdir().unwrap();
+    // A cache of its own: every file in it is read below, and other tests
+    // create and remove files in the shared one. The compiled rules are
+    // copied from the shared cache, so they are not compiled again.
+    let cache = tempfile::tempdir().unwrap();
+    let bundles = cache.path().join("bundles");
+    fs::create_dir(&bundles).unwrap();
+    for e in fs::read_dir(shared_cache().join("bundles")).unwrap() {
+        let e = e.unwrap();
+        if e.file_type().unwrap().is_file() {
+            fs::copy(e.path(), bundles.join(e.file_name())).unwrap();
+        }
+    }
+    let open = |cfg: Config| {
+        RiskGrep::with_cache_dir(cfg, None, Some(cache.path().to_path_buf())).unwrap()
+    };
     let key = aws(17);
     let p = db(
         d.path(),
         "app.db",
         &format!("CREATE TABLE t(v TEXT); INSERT INTO t VALUES ('{key}');"),
     );
-    let mut g = scanner();
+    let mut g = open(Config::default());
     let first = scan(&mut g, &p);
     let again = {
-        let mut g2 = scanner();
+        let mut g2 = open(Config::default());
         let r = scan(&mut g2, &p);
         assert!(!g2.bundle_loaded(), "answered from the cache");
         r
@@ -920,7 +935,7 @@ fn whole_databases_are_cached_and_partial_ones_are_not() {
 
     // No matched bytes reach the cache.
     g.close_cache();
-    for e in fs::read_dir(shared_cache()).unwrap() {
+    for e in fs::read_dir(cache.path()).unwrap() {
         let e = e.unwrap();
         if e.file_type().unwrap().is_file() {
             let bytes = fs::read(e.path()).unwrap();
@@ -935,9 +950,9 @@ fn whole_databases_are_cached_and_partial_ones_are_not() {
     );
     let mut cfg = Config::default();
     cfg.limits.container_bytes = 4;
-    let r = scan(&mut scanner_with(cfg.clone()), &p);
+    let r = scan(&mut open(cfg.clone()), &p);
     assert!(!matches!(only(&r).status, TargetStatus::Scanned));
-    let mut g2 = scanner_with(cfg);
+    let mut g2 = open(cfg);
     scan(&mut g2, &p);
     assert!(g2.bundle_loaded(), "a partial database is scanned again");
 }

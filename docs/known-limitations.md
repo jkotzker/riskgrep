@@ -177,7 +177,7 @@ Setting `on_unresolved = "ask"` or `"deny"` under `[claude_code]` prompts or blo
 
 - **Not covered:** a file whose content changes after the hook scans it and before the tool reads it, including a file the same command writes before reading it.
 - **Why:** the hook runs before the tool call and cannot lock the file.
-- **How it shows up:** the earlier content is the one that was scored. For a `Read` with `offset` and `limit`, lines inserted or removed in between can also move a flagged line into the requested range after the hook allowed it.
+- **How it shows up:** the earlier content is the one that was scored. For a `Read` with `offset` and `limit`, lines inserted or removed in between can also move a flagged line into the requested range after the hook allowed it. A `riskgrep show` that the hook found would refuse gets no prompt, so a file that gains a match in between is shown masked without one.
 
 ### Grep handling mirrors Claude Code 2.1.301
 
