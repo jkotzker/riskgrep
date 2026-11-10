@@ -81,16 +81,57 @@ pub enum Shown {
 
 /// Why nothing is shown. Holds no file content.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Refusal(pub String);
+pub struct Refusal {
+    pub reason: String,
+    pub kind: RefusalKind,
+}
+
+/// What decided a [`Refusal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RefusalKind {
+    /// The file and the rules alone: the file is missing, not a regular
+    /// file, unreadable for lack of permission, over `[show] max_bytes`, or
+    /// has nothing to mask, or a rule's result cannot be masked. The same
+    /// file is refused again under the same configuration.
+    File,
+    /// Something that can lie outside the file: the scanner could not
+    /// start, a read failed for another reason, a scan did not read the
+    /// content whole, or the time budget ran out.
+    Other,
+}
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.reason)
     }
 }
 
+/// A refusal of kind [`RefusalKind::File`].
 fn refuse<T>(why: impl Into<String>) -> Result<T, Refusal> {
-    Err(Refusal(why.into()))
+    Err(Refusal {
+        reason: why.into(),
+        kind: RefusalKind::File,
+    })
+}
+
+/// A refusal of kind [`RefusalKind::Other`].
+fn refuse_other<T>(why: impl Into<String>) -> Result<T, Refusal> {
+    Err(Refusal {
+        reason: why.into(),
+        kind: RefusalKind::Other,
+    })
+}
+
+/// `what (kind)` for an I/O error: about the file when the file is
+/// missing, of another type, or not permitted, and otherwise not.
+fn refuse_io<T>(what: &str, e: std::io::Error) -> Result<T, Refusal> {
+    use std::io::ErrorKind as K;
+    let why = format!("{what} ({:?})", e.kind());
+    match e.kind() {
+        K::NotFound | K::PermissionDenied | K::NotADirectory | K::IsADirectory => refuse(why),
+        _ => refuse_other(why),
+    }
 }
 
 /// A span to mask: byte offsets, and the rules that matched in it.
@@ -333,27 +374,21 @@ pub fn show_file(
     // The file is read through its canonical path, the one the rules see
     // as the path from its repository's root (`RiskGrep::rules_path`), so
     // the path they see is the file that was read.
-    let real =
-        fs::canonicalize(path).or_else(|e| refuse(format!("cannot open ({:?})", e.kind())))?;
+    let real = fs::canonicalize(path).or_else(|e| refuse_io("cannot open", e))?;
     // Checked before opening too: opening a FIFO would wait for a writer.
     match fs::metadata(&real) {
         Ok(m) if m.is_file() => {}
         Ok(_) => return refuse("not a regular file"),
-        Err(e) => return refuse(format!("cannot open ({:?})", e.kind())),
+        Err(e) => return refuse_io("cannot open", e),
     }
-    let mut file =
-        File::open(&real).or_else(|e| refuse(format!("cannot open ({:?})", e.kind())))?;
-    let md = file
-        .metadata()
-        .or_else(|e| refuse(format!("cannot read ({:?})", e.kind())))?;
+    let mut file = File::open(&real).or_else(|e| refuse_io("cannot open", e))?;
+    let md = file.metadata().or_else(|e| refuse_io("cannot read", e))?;
     if !md.is_file() {
         return refuse("not a regular file");
     }
-    let too_large = || {
-        Refusal(format!(
-            "larger than {} bytes ([show] max_bytes)",
-            cfg.max_bytes
-        ))
+    let too_large = || Refusal {
+        reason: format!("larger than {} bytes ([show] max_bytes)", cfg.max_bytes),
+        kind: RefusalKind::File,
     };
     if md.len() > cfg.max_bytes {
         return Err(too_large());
@@ -362,7 +397,7 @@ pub fn show_file(
     (&mut file)
         .take(cfg.max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)
-        .or_else(|e| refuse(format!("cannot read ({:?})", e.kind())))?;
+        .or_else(|e| refuse_io("cannot read", e))?;
     if bytes.len() as u64 > cfg.max_bytes {
         return Err(too_large());
     }
@@ -383,7 +418,7 @@ pub fn show_file(
     // limit, should the file grow before that read.
     let text_max = if text { u64::MAX } else { cfg.max_bytes };
     let mut rg = RiskGrep::with_cache_dir(scan_config(cfg, text_max), None, cache_dir)
-        .or_else(|e| refuse(format!("could not start the scanner ({})", e.0)))?;
+        .or_else(|e| refuse_other(format!("could not start the scanner ({})", e.0)))?;
     let target = path.display().to_string();
     if text {
         masked(
@@ -415,7 +450,7 @@ fn path_rules(rg: &mut RiskGrep, real: &Path) -> Result<HashSet<String>, Refusal
     let r = rg.scan_names(&[real.to_string_lossy().into_owned()]);
     let t = only(&r.targets)?;
     if t.status != TargetStatus::Scanned {
-        return refuse(status_reason(t));
+        return refuse_other(status_reason(t));
     }
     Ok(t.evidence
         .iter()
@@ -427,7 +462,7 @@ fn path_rules(rg: &mut RiskGrep, real: &Path) -> Result<HashSet<String>, Refusal
 fn only(ts: &[TargetReport]) -> Result<&TargetReport, Refusal> {
     match ts {
         [t] => Ok(t),
-        _ => refuse("the scan returned an unexpected report"),
+        _ => refuse_other("the scan returned an unexpected report"),
     }
 }
 
@@ -495,7 +530,7 @@ fn masked(
     let report = rg.scan_text_file(target, real, bytes, false);
     let t = only(&report.targets)?;
     if t.status != TargetStatus::Scanned {
-        return refuse(status_reason(t));
+        return refuse_other(status_reason(t));
     }
     let path_rules = path_rules(rg, real)?;
     let spans = spans_of(rg, &t.evidence, &path_rules, bytes.len())?;
@@ -522,7 +557,7 @@ fn masked(
     };
     for _ in 0..ROUNDS {
         if Instant::now() >= deadline {
-            return refuse(
+            return refuse_other(
                 "the masked text could not be checked: the time budget ran out \
                  ([show] time_budget_ms)",
             );
@@ -531,7 +566,7 @@ fn masked(
         let check = rg.scan_text_file(target, real, &text, true);
         let c = only(&check.targets)?;
         if c.status != TargetStatus::Scanned {
-            return refuse(format!(
+            return refuse_other(format!(
                 "the masked text could not be checked: {}",
                 status_reason(c)
             ));
@@ -585,7 +620,7 @@ fn summary(rg: &mut RiskGrep, path: &Path, class: &FileClass) -> Result<Shown, R
     let report = rg.scan_paths(&[path.to_path_buf()]);
     let t = only(&report.targets)?;
     if t.status != TargetStatus::Scanned {
-        return refuse(format!("{}: {}", format_name(class), status_reason(t)));
+        return refuse_other(format!("{}: {}", format_name(class), status_reason(t)));
     }
     let mut s = String::new();
     let _ = writeln!(s, "format: {}", format_name(class));

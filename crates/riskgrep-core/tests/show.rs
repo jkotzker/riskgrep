@@ -4,7 +4,8 @@
 
 use riskgrep_core::config::{Config, ShowConfig};
 use riskgrep_core::show::{
-    mask, parse_lines, select_lines, show_file, Marker, ShowOptions, Shown, Span, FIXED_MARKER,
+    mask, parse_lines, select_lines, show_file, Marker, RefusalKind, ShowOptions, Shown, Span,
+    FIXED_MARKER,
 };
 use riskgrep_core::synth::{self, FloatStyle};
 use riskgrep_core::{RiskGrep, TargetStatus};
@@ -21,7 +22,7 @@ fn cache() -> PathBuf {
 }
 
 fn show(path: &Path, opts: &ShowOptions) -> Result<Shown, String> {
-    show_file(&ShowConfig::default(), path, opts, Some(cache())).map_err(|r| r.0)
+    show_file(&ShowConfig::default(), path, opts, Some(cache())).map_err(|r| r.reason)
 }
 
 fn masked(path: &Path) -> (Vec<u8>, usize) {
@@ -232,7 +233,8 @@ fn a_file_over_the_cap_is_refused() {
         ..ShowConfig::default()
     };
     let r = show_file(&cfg, &p, &ShowOptions::default(), Some(cache())).unwrap_err();
-    assert!(r.0.contains("max_bytes"), "{}", r.0);
+    assert!(r.reason.contains("max_bytes"), "{}", r.reason);
+    assert_eq!(r.kind, RefusalKind::File);
 }
 
 #[test]
@@ -469,7 +471,78 @@ fn show_with(rules: &Path, path: &Path) -> Result<Shown, String> {
         extra_ruleset_dirs: vec![rules.to_path_buf()],
         ..ShowConfig::default()
     };
-    show_file(&cfg, path, &ShowOptions::default(), Some(cache())).map_err(|r| r.0)
+    show_file(&cfg, path, &ShowOptions::default(), Some(cache())).map_err(|r| r.reason)
+}
+
+fn kind(cfg: &ShowConfig, path: &Path) -> RefusalKind {
+    match show_file(cfg, path, &ShowOptions::default(), Some(cache())) {
+        Ok(_) => panic!("{} was shown", path.display()),
+        Err(r) => r.kind,
+    }
+}
+
+#[test]
+fn refusals_say_whether_only_the_file_and_rules_decide_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = ShowConfig::default();
+    let fifo = dir.path().join("pipe");
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    let big = write(&dir, "big.txt", &vec![b'a'; 2048]);
+    let small_cap = ShowConfig {
+        max_bytes: 1024,
+        ..ShowConfig::default()
+    };
+    assert_eq!(kind(&small_cap, &big), RefusalKind::File, "over the cap");
+    for (what, p) in [
+        ("missing", dir.path().join("nope")),
+        ("directory", dir.path().to_path_buf()),
+        ("fifo", fifo.clone()),
+        ("no match", write(&dir, "clean.txt", b"hello\n")),
+        (
+            "name only",
+            write(&dir, "speaker_embedding.txt", b"notes\n"),
+        ),
+    ] {
+        assert_eq!(kind(&plain, &p), RefusalKind::File, "{what}");
+    }
+    let rules = extra_rules();
+    let with_rules = ShowConfig {
+        extra_ruleset_dirs: vec![rules.path().to_path_buf()],
+        ..ShowConfig::default()
+    };
+    let key = synth::fake_secret("github_pat", 23);
+    let creep = write(&dir, "creep.txt", format!("abcdefgh{key}\n").as_bytes());
+    assert_eq!(kind(&with_rules, &creep), RefusalKind::File, "rounds");
+    let flag = write(&dir, "flag.txt", b"Q starts this file\n");
+    assert_eq!(kind(&with_rules, &flag), RefusalKind::File, "no location");
+
+    // A scan that did not read the content whole, or a scanner that could
+    // not start, may have a cause outside the file.
+    let names: Vec<String> = (0..1001).map(|i| format!("{i}.txt")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|n| (n.as_str(), b"plain\n".to_vec()))
+        .collect();
+    let many = write(&dir, "many.zip", &synth::npz(&members));
+    assert_eq!(kind(&plain, &many), RefusalKind::Other, "read in part");
+    let broken = tempfile::tempdir().unwrap();
+    fs::write(
+        broken.path().join("ruleset.toml"),
+        "id = \"show_broken\"\nversion = \"0.1.0\"\nlicence = \"MIT\"\n\
+         description = \"broken rules\"\ncategories = [\"secret\"]\n",
+    )
+    .unwrap();
+    fs::write(broken.path().join("rules.yar"), "rule broken { condition: ").unwrap();
+    let broken_cfg = ShowConfig {
+        extra_ruleset_dirs: vec![broken.path().to_path_buf()],
+        ..ShowConfig::default()
+    };
+    let other = write(&dir, "other.txt", b"hello again\n");
+    assert_eq!(kind(&broken_cfg, &other), RefusalKind::Other, "no scanner");
 }
 
 #[test]
@@ -517,7 +590,7 @@ fn markers_longer_than_their_matches_do_not_refuse_a_file_at_the_cap() {
         marker: Marker::RuleIds,
         lines: None,
     };
-    let shown = show_file(&cfg, &p, &opts, Some(cache())).map_err(|r| r.0);
+    let shown = show_file(&cfg, &p, &opts, Some(cache())).map_err(|r| r.reason);
     let Ok(Shown::Masked {
         text: out, masks, ..
     }) = shown

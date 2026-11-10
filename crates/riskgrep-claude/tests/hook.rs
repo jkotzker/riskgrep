@@ -1166,6 +1166,31 @@ fn a_masked_view_that_would_refuse_is_not_prompted_for() {
 }
 
 #[test]
+fn a_view_refused_for_a_reason_outside_the_file_still_asks() {
+    // An archive read only in part: the scan's limits, not only the file,
+    // decide that refusal, so the user decides.
+    let e = Env::new();
+    e.long_budget();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_riskgrep(tools.path());
+    let names: Vec<String> = (0..1001).map(|i| format!("{i}.txt")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|n| (n.as_str(), b"plain\n".to_vec()))
+        .collect();
+    e.write("many.zip", &synth::npz(&members));
+    let (d, reason) = e
+        .run_with(
+            &hook,
+            "Bash",
+            json!({ "command": format!("{trusted} show many.zip") }),
+        )
+        .decision();
+    assert_eq!(d, "ask");
+    assert!(reason.contains("do not detect"), "{reason}");
+}
+
+#[test]
 fn a_view_refused_only_for_lack_of_time_still_asks() {
     // With no time to scan, a refusal says nothing about the real command.
     let e = Env::new();
