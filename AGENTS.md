@@ -71,7 +71,7 @@ Anything private to a contributor or machine (plans, notes, scratch output, loca
 
 - Open a pull request to `main`; nothing is pushed to `main` directly.
 - Pull requests are merged with merge commits only (no squash or rebase merges).
-- CI must pass: `test (macos-latest)`, `test (ubuntu-latest)`, and `riskgrep scan`.
+- CI must pass: `test (macos-latest)`, `test (ubuntu-latest)`, `riskgrep scan`, and `instruction counts`.
 - Commit subjects are under 72 characters and describe the change technically.
 
 ## Releases
