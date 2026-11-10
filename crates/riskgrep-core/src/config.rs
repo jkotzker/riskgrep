@@ -4,6 +4,8 @@
 //! repositories the user config lists in `trusted_repos`.
 
 use crate::classify::Limits;
+use crate::mcp::McpTable;
+pub use crate::mcp::{McpKind, McpTool};
 use crate::meta::RuleMeta;
 use crate::model::Category;
 use crate::suppress::{IgnoreRules, IgnoreSpec, RuleIgnore};
@@ -84,11 +86,22 @@ pub struct ClaudeCodeConfig {
     pub on_skipped: Action,
     /// A target with content that was not read (see [`OnPartial`]).
     pub on_partial: OnPartial,
+    /// Shell commands whose files cannot be determined; MCP tools too
+    /// while neither `mcp.on_unresolved` nor `claude_code.mcp.on_unresolved`
+    /// is set.
     pub on_unresolved: Action,
+    /// Overrides [`Config::path_allowlist`] for the Claude Code hook.
+    pub path_allowlist: Option<bool>,
     pub time_budget_ms: u64,
-    /// MCP tools whose input names files, keyed by tool name (see
-    /// [`McpTool`]).
+    /// `[claude_code.mcp_tools."mcp__<server>__<tool>"]` entries: MCP
+    /// entries keyed by Claude Code tool name, the form 1.2.0 shipped. The
+    /// Claude Code adapter matches each key against the whole tool name and
+    /// consults them beside [`Config::mcp`]. Empty by default; the built-in
+    /// entries are in [`McpTable::builtin`].
     pub mcp_tools: BTreeMap<String, McpTool>,
+    /// `[claude_code.mcp]`: MCP settings for Claude Code only, laid over
+    /// [`Config::mcp`] by the Claude Code adapter (same shape as `[mcp]`).
+    pub mcp: McpTable,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +111,8 @@ pub struct GitConfig {
     pub on_skipped: Action,
     /// A target with content that was not read (see [`OnPartial`]).
     pub on_partial: OnPartial,
+    /// Overrides [`Config::path_allowlist`] for the git hook.
+    pub path_allowlist: Option<bool>,
     pub full_files: bool,
 }
 
@@ -126,9 +141,22 @@ pub struct Config {
     pub categories: Option<Vec<Category>>,
     pub rulesets: Vec<String>,
     pub extra_ruleset_dirs: Vec<PathBuf>,
+    /// The entries of `extra_ruleset_dirs` that only a repository outside
+    /// `trusted_repos` names (set by [`load`]): an error about their files
+    /// names the file and does not quote it.
+    pub untrusted_ruleset_dirs: Vec<PathBuf>,
     pub weight_overrides: BTreeMap<String, f64>,
     pub limits: Limits,
     pub ignore: IgnoreRules,
+    /// MCP entries keyed by server and tool name (`[mcp]`), shared by every
+    /// agent integration: the built-in entries, then each file's.
+    pub mcp: McpTable,
+    /// Whether rulesets' path allowlists apply (gitleaks' global path
+    /// allowlist, which the converted secret rules and the rules written to
+    /// match them skip): the `path_allowlist_enabled` rule global. On by
+    /// default; `[claude_code]` and `[git]` may override it, and
+    /// [`Config::path_allowlist_applies`] gives the value for [`Config::mode`].
+    pub path_allowlist: bool,
     pub claude_code: ClaudeCodeConfig,
     pub git: GitConfig,
     pub trusted_repos: Vec<PathBuf>,
@@ -148,6 +176,8 @@ pub struct Overrides {
     pub categories: Option<Vec<Category>>,
     pub rulesets: Option<Vec<String>>,
     pub no_cache: bool,
+    /// `riskgrep scan --path-allowlist`: replaces [`Config::path_allowlist`].
+    pub path_allowlist: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,9 +198,12 @@ impl Default for Config {
             categories: None,
             rulesets: Vec::new(),
             extra_ruleset_dirs: Vec::new(),
+            untrusted_ruleset_dirs: Vec::new(),
             weight_overrides: BTreeMap::new(),
             limits: Limits::default(),
             ignore: IgnoreRules::default(),
+            mcp: McpTable::builtin(),
+            path_allowlist: true,
             claude_code: ClaudeCodeConfig {
                 thresholds: BTreeMap::from([
                     (
@@ -192,14 +225,17 @@ impl Default for Config {
                 on_skipped: Action::Allow,
                 on_partial: OnPartial::Error,
                 on_unresolved: Action::Allow,
+                path_allowlist: None,
                 time_budget_ms: 2000,
-                mcp_tools: default_mcp_tools(),
+                mcp_tools: BTreeMap::new(),
+                mcp: McpTable::default(),
             },
             git: GitConfig {
                 block_at: BTreeMap::from([(cat("secret"), 80.0), (cat("biometric"), 75.0)]),
                 on_error: Action::Block,
                 on_skipped: Action::Allow,
                 on_partial: OnPartial::Error,
+                path_allowlist: None,
                 full_files: false,
             },
             trusted_repos: Vec::new(),
@@ -238,8 +274,10 @@ struct ClaudeLayer {
     on_skipped: Option<Action>,
     on_partial: Option<OnPartial>,
     on_unresolved: Option<Action>,
+    path_allowlist: Option<bool>,
     time_budget_ms: Option<u64>,
     mcp_tools: Option<BTreeMap<String, McpTool>>,
+    mcp: Option<McpTable>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -249,6 +287,7 @@ struct GitLayer {
     on_error: Option<Action>,
     on_skipped: Option<Action>,
     on_partial: Option<OnPartial>,
+    path_allowlist: Option<bool>,
     full_files: Option<bool>,
 }
 
@@ -257,6 +296,13 @@ struct GitLayer {
 struct CacheLayer {
     max_age_days: Option<u64>,
     max_size_mb: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShowLayer {
+    max_bytes: Option<u64>,
+    time_budget_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -274,11 +320,14 @@ struct Layer {
     extra_ruleset_dirs: Option<Vec<PathBuf>>,
     weight_overrides: Option<BTreeMap<String, f64>>,
     trusted_repos: Option<Vec<PathBuf>>,
+    path_allowlist: Option<bool>,
     limits: Option<LimitsLayer>,
     ignore: Option<IgnoreLayer>,
+    mcp: Option<McpTable>,
     claude_code: Option<ClaudeLayer>,
     git: Option<GitLayer>,
     cache: Option<CacheLayer>,
+    show: Option<ShowLayer>,
 }
 
 fn read_layer(path: &Path) -> Result<Option<Layer>, ConfigError> {
@@ -295,6 +344,22 @@ fn read_layer(path: &Path) -> Result<Option<Layer>, ConfigError> {
     let invalid = |e: String| ConfigError(format!("invalid config {}: {e}", path.display()));
     let layer: Layer = toml::from_str(&text).map_err(|e| invalid(e.to_string()))?;
     Ok(Some(layer))
+}
+
+/// [`read_layer`] for a repository's file. When `quote` is false, because
+/// the repository is not trusted, the error names the file and leaves out
+/// what the parser would quote from it.
+fn read_repo_layer(path: &Path, quote: bool) -> Result<Option<Layer>, ConfigError> {
+    read_layer(path).map_err(|e| {
+        if quote {
+            e
+        } else {
+            ConfigError(format!(
+                "invalid config {}: could not be read as configuration",
+                path.display()
+            ))
+        }
+    })
 }
 
 impl Layer {
@@ -338,6 +403,9 @@ impl Config {
                 self.trusted_repos = v;
             }
         }
+        if let Some(v) = l.path_allowlist {
+            self.path_allowlist = v;
+        }
         if let Some(x) = l.limits {
             if let Some(v) = x.text_max {
                 self.limits.text_max = v;
@@ -378,6 +446,9 @@ impl Config {
                 spec.rules = v;
             }
         }
+        if let Some(v) = l.mcp {
+            self.mcp.merge(v);
+        }
         if let Some(x) = l.claude_code {
             if let Some(map) = x.thresholds {
                 for (k, t) in map {
@@ -402,11 +473,17 @@ impl Config {
             if let Some(v) = x.on_unresolved {
                 self.claude_code.on_unresolved = v;
             }
+            if let Some(v) = x.path_allowlist {
+                self.claude_code.path_allowlist = Some(v);
+            }
             if let Some(v) = x.time_budget_ms {
                 self.claude_code.time_budget_ms = v;
             }
             if let Some(v) = x.mcp_tools {
                 merge_map(&mut self.claude_code.mcp_tools, v);
+            }
+            if let Some(v) = x.mcp {
+                self.claude_code.mcp.merge(v);
             }
         }
         if let Some(x) = l.cache.filter(|_| trust) {
@@ -430,10 +507,25 @@ impl Config {
             if let Some(v) = x.on_partial {
                 self.git.on_partial = v;
             }
+            if let Some(v) = x.path_allowlist {
+                self.git.path_allowlist = Some(v);
+            }
             if let Some(v) = x.full_files {
                 self.git.full_files = v;
             }
         }
+    }
+
+    /// Whether path allowlists apply for this configuration's integration:
+    /// `[claude_code]` or `[git]` `path_allowlist` when set, else the
+    /// top-level `path_allowlist`.
+    pub fn path_allowlist_applies(&self) -> bool {
+        let integration = match self.mode {
+            Mode::ClaudeCode => self.claude_code.path_allowlist,
+            Mode::Git => self.git.path_allowlist,
+            Mode::Cli => None,
+        };
+        integration.unwrap_or(self.path_allowlist)
     }
 
     /// Set `weight` on each bundle rule named in `weight_overrides`
@@ -501,7 +593,8 @@ fn is_trusted(repo_root: &Path, trusted: &[PathBuf]) -> bool {
 /// Defaults, then the user file, then the repository file, then `cli`.
 /// `Mode::ClaudeCode` reads the repository file only when `repo_root` is in
 /// the user file's `trusted_repos`; `trusted_repos` in a repository file is
-/// ignored in every mode. Relative paths in a file (`extra_ruleset_dirs`,
+/// ignored in every mode. In the other modes an error about the file of a
+/// repository not in that list does not quote it. Relative paths in a file (`extra_ruleset_dirs`,
 /// `trusted_repos`) resolve against that file's directory: the user file's
 /// own directory, or the repository root for the repository file.
 pub fn load(
@@ -537,16 +630,28 @@ pub fn load(
         }
     }
     if let Some(root) = repo_root {
-        let allowed = mode != Mode::ClaudeCode || is_trusted(root, &cfg.trusted_repos);
-        if allowed {
-            if let Some(mut layer) = read_layer(&root.join(REPO_CONFIG))? {
+        let trusted = is_trusted(root, &cfg.trusted_repos);
+        if mode != Mode::ClaudeCode || trusted {
+            if let Some(mut layer) = read_repo_layer(&root.join(REPO_CONFIG), trusted)? {
                 layer.resolve_paths(root);
+                if !trusted {
+                    cfg.untrusted_ruleset_dirs = layer
+                        .extra_ruleset_dirs
+                        .iter()
+                        .flatten()
+                        .filter(|d| {
+                            let dir = canonical(d);
+                            !cfg.extra_ruleset_dirs.iter().any(|u| canonical(u) == dir)
+                        })
+                        .cloned()
+                        .collect();
+                }
                 cfg.merge(layer, false, &mut spec);
             }
         }
     }
     cfg.ignore = IgnoreRules::new(spec).map_err(|e| ConfigError(e.0))?;
-    validate_mcp_tools(&cfg.claude_code.mcp_tools)?;
+    validate_mcp(&cfg)?;
     if let Some(c) = cli_overrides.categories {
         cfg.categories = Some(c);
     }
@@ -555,6 +660,9 @@ pub fn load(
     }
     if cli_overrides.no_cache {
         cfg.no_cache = true;
+    }
+    if let Some(v) = cli_overrides.path_allowlist {
+        cfg.path_allowlist = v;
     }
     Ok(cfg)
 }
@@ -569,171 +677,122 @@ pub fn baseline_path(mode: Mode, repo_root: Option<&Path>, cfg: &Config) -> Opti
     Some(root.join(BASELINE_FILE))
 }
 
-// ---- Claude Code: MCP tools that read files ----
+// ---- `riskgrep show` ----
 
-/// What an MCP tool does with the paths its input names.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[non_exhaustive]
-pub enum McpKind {
-    /// Reads each named file; a directory or missing path reads nothing.
-    #[default]
-    Read,
-    /// Reads every file under each named directory (a content search).
-    Walk,
-    /// Reveals the names of each named path and, for a directory, of the
-    /// entries under it; judged by the path rules alone, as `Glob` is.
-    Names,
-    /// Reads no file; never gets a decision.
-    None,
+/// Largest file `riskgrep show` reads, by default (64 MiB).
+pub const SHOW_MAX_BYTES: u64 = 64 << 20;
+/// Time `riskgrep show` gives each scan, by default.
+pub const SHOW_TIME_BUDGET_MS: u64 = 60_000;
+
+/// What `riskgrep show` takes from configuration. It is deliberately
+/// narrow: the masked view masks every match of every built-in rule, so
+/// configuration may only add rules (`extra_ruleset_dirs`) and set the
+/// command's own limits, which decide only when it refuses. `categories`,
+/// `rulesets`, `weight_overrides`, `[ignore]`, baselines, `path_allowlist`,
+/// and `[limits]` never apply to it: path allowlists are always off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowConfig {
+    /// `[show] max_bytes`: files larger than this are refused.
+    pub max_bytes: u64,
+    /// `[show] time_budget_ms`: the time limit of each scan, and of the
+    /// command: no rescan starts once it is spent. Running out refuses.
+    pub time_budget: Duration,
+    /// Every `extra_ruleset_dirs` entry of the user file and, when the
+    /// repository is in the user file's `trusted_repos`, of the repository
+    /// file, in that order, without duplicates: a later file adds to an
+    /// earlier one's list instead of replacing it.
+    pub extra_ruleset_dirs: Vec<PathBuf>,
 }
 
-/// A `[claude_code.mcp_tools."<tool name>"]` entry: the `tool_input`
-/// fields that hold a path or a list of paths, and what the tool does
-/// with them.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct McpTool {
-    #[serde(default)]
-    pub paths: Vec<String>,
-    #[serde(default)]
-    pub kind: McpKind,
-    /// For `names`: how deep under a directory names are revealed (1: its
-    /// entries only). Unbounded when absent.
-    pub max_depth: Option<usize>,
-}
-
-impl ClaudeCodeConfig {
-    /// The entry for MCP tool `name`: an exact key, else the first key
-    /// (in key order) with `*` wildcards that matches it.
-    pub fn mcp_tool(&self, name: &str) -> Option<&McpTool> {
-        if !name.starts_with("mcp__") {
-            return None;
-        }
-        self.mcp_tools.get(name).or_else(|| {
-            self.mcp_tools
-                .iter()
-                .find(|(k, _)| k.contains('*') && wildcard(k, name))
-                .map(|(_, v)| v)
-        })
-    }
-}
-
-/// Whether `name` matches `pat`, where `*` stands for any run of
-/// characters and every other character for itself.
-fn wildcard(pat: &str, name: &str) -> bool {
-    let mut parts = pat.split('*');
-    let first = parts.next().unwrap_or_default();
-    let Some(mut rest) = name.strip_prefix(first) else {
-        return false;
-    };
-    let parts: Vec<&str> = parts.collect();
-    let Some((last, middle)) = parts.split_last() else {
-        return rest.is_empty();
-    };
-    for p in middle {
-        match rest.find(p) {
-            Some(i) => rest = &rest[i + p.len()..],
-            None => return false,
+impl Default for ShowConfig {
+    fn default() -> Self {
+        ShowConfig {
+            max_bytes: SHOW_MAX_BYTES,
+            time_budget: Duration::from_millis(SHOW_TIME_BUDGET_MS),
+            extra_ruleset_dirs: Vec::new(),
         }
     }
-    rest.len() >= last.len() && rest.ends_with(last)
 }
 
-fn validate_mcp_tools(tools: &BTreeMap<String, McpTool>) -> Result<(), ConfigError> {
-    for (name, t) in tools {
+/// The `riskgrep show` configuration: defaults, then the user file, then
+/// the repository file. A repository file's `[show]` limits can only lower
+/// the values so far unless the repository is in the user file's
+/// `trusted_repos`, since a higher limit lets an untrusted repository make
+/// the command read more for longer; its `extra_ruleset_dirs` apply only
+/// when it is trusted, since rules decide what the command masks and
+/// refuses. `trusted_repos` in a repository file is ignored. A file that
+/// does not parse is an error, as for every other command; for an untrusted
+/// repository's file, the error does not quote the text.
+pub fn load_show(repo_root: Option<&Path>) -> Result<ShowConfig, ConfigError> {
+    let mut out = ShowConfig::default();
+    let mut paths: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
+    if let Some(p) = user_config_path() {
+        if let Some(dir) = p.parent() {
+            paths.push((p.clone(), dir.to_path_buf(), false));
+        }
+    }
+    if let Some(root) = repo_root {
+        paths.push((root.join(REPO_CONFIG), root.to_path_buf(), true));
+    }
+    let mut trusted = Vec::new();
+    for (path, base, from_repo) in paths {
+        let untrusted = from_repo && !repo_root.is_some_and(|r| is_trusted(r, &trusted));
+        let Some(mut layer) = read_repo_layer(&path, !untrusted)? else {
+            continue;
+        };
+        layer.resolve_paths(&base);
+        if !from_repo {
+            trusted = layer.trusted_repos.take().unwrap_or_default();
+        }
+        if !untrusted {
+            for d in layer.extra_ruleset_dirs.unwrap_or_default() {
+                if !out.extra_ruleset_dirs.contains(&d) {
+                    out.extra_ruleset_dirs.push(d);
+                }
+            }
+        }
+        if let Some(s) = layer.show {
+            for (name, v) in [
+                ("max_bytes", s.max_bytes),
+                ("time_budget_ms", s.time_budget_ms),
+            ] {
+                if v == Some(0) {
+                    return Err(ConfigError(format!(
+                        "invalid config {}: [show] {name} must be at least 1",
+                        path.display()
+                    )));
+                }
+            }
+            if let Some(v) = s.max_bytes {
+                out.max_bytes = if untrusted { v.min(out.max_bytes) } else { v };
+            }
+            if let Some(v) = s.time_budget_ms {
+                let v = Duration::from_millis(v);
+                out.time_budget = if untrusted { v.min(out.time_budget) } else { v };
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ---- MCP entries ----
+
+fn validate_mcp(cfg: &Config) -> Result<(), ConfigError> {
+    if let Some(p) = cfg.mcp.problems().into_iter().next() {
+        return Err(ConfigError(p));
+    }
+    if let Some(p) = cfg.claude_code.mcp.problems().into_iter().next() {
+        return Err(ConfigError(format!("claude_code.{p}")));
+    }
+    for (name, t) in &cfg.claude_code.mcp_tools {
         if !name.starts_with("mcp__") {
             return Err(ConfigError(format!(
                 "claude_code.mcp_tools: `{name}` is not an MCP tool name (mcp__<server>__<tool>)"
             )));
         }
-        if t.kind != McpKind::None && (t.paths.is_empty() || t.paths.iter().any(String::is_empty)) {
-            return Err(ConfigError(format!(
-                "claude_code.mcp_tools: `{name}` needs `paths`, the input fields that hold paths"
-            )));
+        if let Some(p) = t.problem() {
+            return Err(ConfigError(format!("claude_code.mcp_tools: `{name}` {p}")));
         }
     }
     Ok(())
-}
-
-/// Server names the built-in entries are registered under: the usual
-/// `mcpServers` keys, and Desktop Commander as the Claude Code plugin names
-/// it.
-const FILESYSTEM_SERVERS: [&str; 1] = ["filesystem"];
-const DESKTOP_COMMANDER_SERVERS: [&str; 2] = [
-    "desktop-commander",
-    "plugin_desktop-commander_desktop-commander",
-];
-
-/// Built-in entries. Field names are from each server's published input
-/// schemas:
-/// - the official filesystem server, `src/filesystem/server.ts` in
-///   github.com/modelcontextprotocol/servers at commit 6d536b2e (2026-10);
-/// - Desktop Commander, the input schemas its plugin server reported to
-///   Claude Code on 2026-10-25 (`read_file` and `get_file_info` take
-///   `path`, `read_multiple_files` takes `paths`, `start_search` and
-///   `list_directory` take `path`).
-fn default_mcp_tools() -> BTreeMap<String, McpTool> {
-    use McpKind::{Names, None as Reads, Read};
-    let t = |kind, field: &str, max_depth| McpTool {
-        paths: if field.is_empty() {
-            Vec::new()
-        } else {
-            vec![field.to_string()]
-        },
-        kind,
-        max_depth,
-    };
-    let filesystem = [
-        ("read_file", t(Read, "path", None)),
-        ("read_text_file", t(Read, "path", None)),
-        ("read_media_file", t(Read, "path", None)),
-        ("read_multiple_files", t(Read, "paths", None)),
-        ("list_directory", t(Names, "path", Some(1))),
-        ("list_directory_with_sizes", t(Names, "path", Some(1))),
-        ("directory_tree", t(Names, "path", None)),
-        ("search_files", t(Names, "path", None)),
-        ("get_file_info", t(Reads, "", None)),
-        ("list_allowed_directories", t(Reads, "", None)),
-        ("write_file", t(Reads, "", None)),
-        ("edit_file", t(Reads, "", None)),
-        ("create_directory", t(Reads, "", None)),
-        ("move_file", t(Reads, "", None)),
-    ];
-    let desktop_commander = [
-        ("read_file", t(Read, "path", None)),
-        ("read_multiple_files", t(Read, "paths", None)),
-        // A content search too is judged by the names it may reveal:
-        // scanning every file under its path does not fit the time budget.
-        ("start_search", t(Names, "path", None)),
-        ("list_directory", t(Names, "path", None)),
-        ("get_file_info", t(Reads, "", None)),
-    ];
-    let mut out = BTreeMap::new();
-    for (servers, tools) in [
-        (&FILESYSTEM_SERVERS[..], &filesystem[..]),
-        (&DESKTOP_COMMANDER_SERVERS[..], &desktop_commander[..]),
-    ] {
-        for server in servers {
-            for (tool, entry) in tools {
-                out.insert(format!("mcp__{server}__{tool}"), entry.clone());
-            }
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod mcp_tests {
-    use super::wildcard;
-
-    #[test]
-    fn wildcard_matches_whole_name() {
-        assert!(wildcard("mcp__*__read", "mcp__a__read"));
-        assert!(wildcard("mcp__*", "mcp__"));
-        assert!(wildcard("mcp__a*b*c", "mcp__abc"));
-        assert!(!wildcard("mcp__*__read", "mcp__a__read_more"));
-        assert!(!wildcard("mcp__a", "mcp__ab"));
-        assert!(!wildcard("mcp__*ab*ba", "mcp__aba"));
-    }
 }

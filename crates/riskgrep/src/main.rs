@@ -16,6 +16,7 @@ mod cli;
 mod git;
 mod rules;
 mod scan;
+mod show;
 mod spec;
 mod text;
 
@@ -90,6 +91,7 @@ fn run(args: cli::Cli) -> Result<i32, CliError> {
             Ok(code)
         }
         cli::Command::Baseline(a) => scan::baseline(a),
+        cli::Command::Show(a) => show::show(a),
         cli::Command::Git { command } => git::run(command),
         cli::Command::Rules { command } => rules::run(command),
         cli::Command::Cache { command } => cache::run(command),

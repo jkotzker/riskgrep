@@ -239,6 +239,44 @@ fn stdin_dash() {
 }
 
 #[test]
+fn an_archive_on_stdin_is_unscanned_and_follows_on_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 14);
+    let tar = synth::tar(&[("a.txt", format!("let id = \"{key}\";\n").into_bytes())]);
+    // The pipeline gate of the issue: `--fail-at` makes `on_error` block.
+    let out = riskgrep(dir.path())
+        .args(["scan", "-", "--format", "json", "--fail-at", "secret=99"])
+        .write_stdin(tar.clone())
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["targets"][0]["status"], "unscanned");
+    assert_eq!(
+        v["targets"][0]["reason"],
+        "tar not scanned on standard input"
+    );
+    assert_eq!(v["summary"]["unscanned"], 1);
+    assert!(!String::from_utf8_lossy(&out).contains(&key));
+    // Without a gate, `on_error` allows. Text output names the reason and
+    // still reports what the bytes held.
+    let out = riskgrep(dir.path())
+        .args(["scan", "-"])
+        .write_stdin(tar)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("tar not scanned on standard input"), "{text}");
+    assert!(text.contains("secret 95"), "{text}");
+    assert!(!text.contains(&key));
+}
+
+#[test]
 fn stdin_decodes_utf16_and_utf32_like_a_file() {
     let dir = tempfile::tempdir().unwrap();
     let key = synth::fake_secret("aws_access_key", 13);
@@ -1092,4 +1130,683 @@ fn a_sampled_file_and_the_same_file_in_an_archive_follow_on_partial() {
     run("big.zip").code(2).stdout(predicate::str::contains(
         "member 1 sampled (bytes 256..3840 not read)",
     ));
+}
+
+// ---- show ----
+
+fn has(hay: &[u8], needle: &str) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
+#[test]
+fn show_prints_the_file_masked() {
+    let (dir, _, key) = key_dir();
+    let out = riskgrep(dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, &key), "the key is in the output");
+    assert!(
+        out == b"one\ntwo\nthree\nfour\nfive\nsix\nlet id = \"<redacted>\";\neight\n",
+        "masked output differs"
+    );
+}
+
+#[test]
+fn show_lines_and_rule_ids() {
+    let (dir, _, key) = key_dir();
+    let out = riskgrep(dir.path())
+        .args(["show", "key.txt", "--lines", "7:7", "--rule-ids"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, &key));
+    assert!(out == b"let id = \"<redacted: secrets_core:aws_access_token>\";\n");
+    // Every element of the shape the Claude Code hook exempts and offers.
+    let out = riskgrep(dir.path())
+        .args(["show", "--rule-ids", "--lines", "7:7", "--", "key.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(out == b"let id = \"<redacted: secrets_core:aws_access_token>\";\n");
+    riskgrep(dir.path())
+        .args(["show", "key.txt", "--lines", "3:1"])
+        .assert()
+        .code(3);
+}
+
+#[test]
+fn show_refuses_a_file_over_its_cap_and_prints_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[show]\nmax_bytes = 16\n").unwrap();
+    let (dir, _, _) = key_dir();
+    riskgrep_in(home.path(), dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("max_bytes"));
+}
+
+#[test]
+fn show_summarises_binary_formats() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("emb.safetensors"),
+        synth::safetensors(&[("speaker_alice", "F32", &[64, 256])]),
+    )
+    .unwrap();
+    riskgrep(dir.path())
+        .args(["show", "emb.safetensors"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("F32 [64, 256]"))
+        .stdout(predicate::str::contains("speaker_alice").not());
+}
+
+#[test]
+fn show_refuses_what_it_cannot_scan_or_has_nothing_to_mask_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut unknown = vec![0u8, 1, 2, 3];
+    unknown.extend_from_slice(&[0xffu8; 4096]);
+    fs::write(dir.path().join("blob.bin"), unknown).unwrap();
+    fs::write(dir.path().join("clean.txt"), b"hello\n").unwrap();
+    for (name, why) in [
+        ("blob.bin", "could not scan"),
+        ("clean.txt", "nothing to mask"),
+    ] {
+        riskgrep(dir.path())
+            .args(["show", name])
+            .assert()
+            .code(2)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(why));
+    }
+}
+
+#[test]
+fn show_masks_what_configuration_tries_to_unmask() {
+    // Every way configuration narrows a scan (categories, rulesets, weight
+    // overrides, ignore entries in both files, and a baseline) leaves the
+    // masked view unchanged.
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(
+        cfg.join("config.toml"),
+        "categories = [\"biometric\"]\nrulesets = [\"biometric_embeddings\"]\n\
+         [weight_overrides]\n\"secrets_core:aws_access_token\" = 0\n\
+         [ignore]\npaths = [\"key.txt\"]\n",
+    )
+    .unwrap();
+    let (dir, _, key) = key_dir();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .env("GIT_CEILING_DIRECTORIES", dir.path().parent().unwrap())
+        .status()
+        .unwrap();
+    riskgrep(dir.path())
+        .args(["baseline", "key.txt"])
+        .assert()
+        .code(0);
+    fs::write(
+        dir.path().join(".riskgrep.toml"),
+        "[ignore]\npaths = [\"*.txt\"]\n[[ignore.rules]]\npath = \"**\"\nrules = [\"aws_access_token\"]\n",
+    )
+    .unwrap();
+    // The scan sees nothing under this configuration ...
+    let json = riskgrep_in(home.path(), dir.path())
+        .args(["scan", "key.txt", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !has(&json, "aws_access_token"),
+        "the scan still finds the key"
+    );
+    // ... and the masked view still masks the key.
+    let out = riskgrep_in(home.path(), dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, &key), "configuration unmasked the key");
+    assert!(has(&out, "<redacted>"));
+}
+
+#[test]
+fn show_masks_paths_the_allowlist_covers() {
+    // With gitleaks' global path allowlist on (as by default, and here set
+    // explicitly), a scan skips `node_modules/`; the masked view does not.
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(
+        cfg.join("config.toml"),
+        "path_allowlist = true\n[claude_code]\npath_allowlist = true\n",
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+    let line = synth::fake_secret("generic_api_key_assignment", 13);
+    let value = line.split('"').nth(1).unwrap().to_string();
+    fs::write(
+        dir.path().join("node_modules/pkg/settings.ini"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+    let json = riskgrep_in(home.path(), dir.path())
+        .args(["scan", "node_modules/pkg/settings.ini", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(v["targets"][0]["path_allowlisted"], true, "precondition");
+    assert_eq!(v["targets"][0]["scores"]["secret"], 0.0, "precondition");
+    let out = riskgrep_in(home.path(), dir.path())
+        .args(["show", "node_modules/pkg/settings.ini"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!has(&out, &value), "the allowlist unmasked the value");
+    assert!(has(&out, "<redacted>"));
+}
+
+/// One ruleset, `probe`, holding `source`, in `dir`.
+fn write_ruleset(dir: &Path, source: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join("ruleset.toml"),
+        "id = \"probe\"\nversion = \"1\"\nlicence = \"MIT\"\n\
+         description = \"test\"\ncategories = [\"secret\"]\n",
+    )
+    .unwrap();
+    fs::write(dir.join("rules.yar"), source).unwrap();
+}
+
+fn write_user_config(home: &Path, text: &str) {
+    let cfg = home.join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), text).unwrap();
+}
+
+#[test]
+fn a_ruleset_using_include_fails_to_compile() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let line = synth::fake_secret("generic_api_key_assignment", 13);
+    let value = line.split('"').nth(1).unwrap().to_string();
+    let included = work.path().join("data.txt");
+    fs::write(&included, format!("{line}\n")).unwrap();
+    let rules = work.path().join("rules");
+    write_ruleset(&rules, &format!("include \"{}\"\n", included.display()));
+    write_user_config(
+        home.path(),
+        &format!("extra_ruleset_dirs = [\"{}\"]\n", rules.display()),
+    );
+    let target = work.path().join("note.txt");
+    fs::write(&target, "nothing to see\n").unwrap();
+
+    let name = target.to_str().unwrap();
+    for args in [
+        vec!["scan", name, "--on-error", "block"],
+        vec!["show", name],
+    ] {
+        let out = riskgrep_in(home.path(), work.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{}: compile must fail", args[0]);
+        assert!(err.contains("include"), "{}: says why", args[0]);
+        assert!(!has(&out.stdout, &value), "{}: stdout", args[0]);
+        assert!(!has(&out.stderr, &value), "{}: stderr", args[0]);
+    }
+}
+
+#[test]
+fn show_reports_an_untrusted_repository_config_without_its_text() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let line = synth::fake_secret("generic_api_key_assignment", 13);
+    let value = line.split('"').nth(1).unwrap().to_string();
+    let data = other.path().join("data.txt");
+    fs::write(&data, format!("{}\n", line.replace('"', ""))).unwrap();
+    std::os::unix::fs::symlink(&data, dir.path().join(".riskgrep.toml")).unwrap();
+    fs::write(dir.path().join("note.txt"), "nothing\n").unwrap();
+    let out = riskgrep_in(home.path(), dir.path())
+        .args(["show", "note.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains(".riskgrep.toml"));
+    assert!(!has(&out.stdout, &value));
+    assert!(!has(&out.stderr, &value), "the error quoted the file");
+}
+
+/// A repository whose `.riskgrep.toml`, `rules/ruleset.toml`, or
+/// `rules/rules.yar` (`kind`) holds a line that does not parse, directly or
+/// through a link, and the generated text of that line.
+struct BadRepoFile {
+    dir: tempfile::TempDir,
+    _other: tempfile::TempDir,
+    marker: String,
+    name: &'static str,
+}
+
+const MANIFEST: &str = "id = \"probe\"\nversion = \"1\"\nlicence = \"MIT\"\n\
+                        description = \"test\"\ncategories = [\"secret\"]\n";
+
+fn bad_repo_file(name: &'static str, linked: bool) -> BadRepoFile {
+    let dir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    fs::write(dir.path().join("note.txt"), "nothing\n").unwrap();
+    let line = synth::fake_secret("generic_api_key_assignment", 13);
+    let marker = line.split('"').nth(1).unwrap().to_string();
+    let text = format!("{}\n", line.replace('"', ""));
+    let target = if name == ".riskgrep.toml" {
+        dir.path().join(name)
+    } else {
+        fs::write(
+            dir.path().join(".riskgrep.toml"),
+            "extra_ruleset_dirs = [\"rules\"]\n",
+        )
+        .unwrap();
+        fs::create_dir(dir.path().join("rules")).unwrap();
+        if name == "rules.yar" {
+            fs::write(dir.path().join("rules/ruleset.toml"), MANIFEST).unwrap();
+        }
+        dir.path().join("rules").join(name)
+    };
+    if linked {
+        let data = other.path().join("data.txt");
+        fs::write(&data, text).unwrap();
+        std::os::unix::fs::symlink(&data, target).unwrap();
+    } else {
+        fs::write(target, text).unwrap();
+    }
+    BadRepoFile {
+        dir,
+        _other: other,
+        marker,
+        name,
+    }
+}
+
+const BAD_FILES: [&str; 3] = [".riskgrep.toml", "ruleset.toml", "rules.yar"];
+
+#[test]
+fn errors_do_not_quote_files_an_untrusted_repository_supplies() {
+    for name in BAD_FILES {
+        for linked in [false, true] {
+            let r = bad_repo_file(name, linked);
+            let home = tempfile::tempdir().unwrap();
+            let out = riskgrep_in(home.path(), r.dir.path())
+                .args(["scan", "note.txt"])
+                .output()
+                .unwrap();
+            let what = format!("{name}, linked: {linked}");
+            assert!(!has(&out.stdout, &r.marker), "stdout quoted {what}");
+            assert!(!has(&out.stderr, &r.marker), "stderr quoted {what}");
+            assert!(has(&out.stderr, r.name), "the error names {what}");
+            let code = if name == "rules.yar" { 0 } else { 3 };
+            assert_eq!(out.status.code(), Some(code), "{what}");
+            if name == "rules.yar" {
+                assert!(has(&out.stdout, "rule load failure"), "{what}");
+                assert!(has(&out.stderr, "could not be compiled"), "{what}");
+            } else {
+                assert!(has(&out.stderr, "could not be read"), "{what}");
+            }
+        }
+    }
+}
+
+#[test]
+fn rules_compile_does_not_quote_an_untrusted_repositorys_files() {
+    let r = bad_repo_file("rules.yar", true);
+    let home = tempfile::tempdir().unwrap();
+    let out = riskgrep_in(home.path(), r.dir.path())
+        .args(["rules", "compile", "--repo"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!has(&out.stdout, &r.marker));
+    assert!(!has(&out.stderr, &r.marker));
+    assert!(has(&out.stderr, "could not be compiled"));
+}
+
+#[test]
+fn errors_keep_their_detail_for_a_trusted_repository() {
+    for name in BAD_FILES {
+        for linked in [false, true] {
+            let r = bad_repo_file(name, linked);
+            let home = tempfile::tempdir().unwrap();
+            write_user_config(
+                home.path(),
+                &format!("trusted_repos = [\"{}\"]\n", r.dir.path().display()),
+            );
+            let out = riskgrep_in(home.path(), r.dir.path())
+                .args(["scan", "note.txt"])
+                .output()
+                .unwrap();
+            let what = format!("{name}, linked: {linked}");
+            assert!(has(&out.stderr, &r.marker), "detail kept for {what}");
+            let code = if name == "rules.yar" { 0 } else { 3 };
+            assert_eq!(out.status.code(), Some(code), "{what}");
+        }
+    }
+}
+
+#[test]
+fn errors_keep_their_detail_for_the_users_own_rule_directories() {
+    // The repository, untrusted, adds nothing: the directory is the user's.
+    for name in ["ruleset.toml", "rules.yar"] {
+        let r = bad_repo_file(name, false);
+        fs::remove_file(r.dir.path().join(".riskgrep.toml")).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        write_user_config(
+            home.path(),
+            &format!(
+                "extra_ruleset_dirs = [\"{}\"]\n",
+                r.dir.path().join("rules").display()
+            ),
+        );
+        let out = riskgrep_in(home.path(), r.dir.path())
+            .args(["scan", "note.txt"])
+            .output()
+            .unwrap();
+        assert!(has(&out.stderr, &r.marker), "{name}");
+
+        // Also when an untrusted repository names the same directory.
+        fs::write(
+            r.dir.path().join(".riskgrep.toml"),
+            "extra_ruleset_dirs = [\"rules\"]\n",
+        )
+        .unwrap();
+        let out = riskgrep_in(home.path(), r.dir.path())
+            .args(["scan", "note.txt"])
+            .output()
+            .unwrap();
+        assert!(has(&out.stderr, &r.marker), "{name}, listed by both");
+    }
+}
+
+#[test]
+fn show_uses_a_repositorys_rules_only_when_it_is_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    write_ruleset(
+        &dir.path().join("rules"),
+        "rule word {\n  meta:\n    category = \"secret\"\n    weight = 10\n\
+         \x20 strings:\n    $re = /pelican-marmot/\n  condition:\n    $re\n}\n",
+    );
+    fs::write(
+        dir.path().join(".riskgrep.toml"),
+        "extra_ruleset_dirs = [\"rules\"]\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("note.txt"), "name = pelican-marmot\n").unwrap();
+
+    let untrusted = tempfile::tempdir().unwrap();
+    // Without the repository's rules nothing matches the file.
+    riskgrep_in(untrusted.path(), dir.path())
+        .args(["show", "--rule-ids", "note.txt"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("nothing to mask"));
+
+    let trusted = tempfile::tempdir().unwrap();
+    write_user_config(
+        trusted.path(),
+        &format!("trusted_repos = [\"{}\"]\n", dir.path().display()),
+    );
+    let out = riskgrep_in(trusted.path(), dir.path())
+        .args(["show", "--rule-ids", "note.txt"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    assert!(has(&out, "<redacted: probe:word>"), "trusted rules apply");
+    assert!(!has(&out, "pelican-marmot"));
+}
+
+#[test]
+fn show_rejects_a_zero_limit() {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[show]\nmax_bytes = 0\n").unwrap();
+    let (dir, _, _) = key_dir();
+    riskgrep_in(home.path(), dir.path())
+        .args(["show", "key.txt"])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn show_says_when_the_lines_are_past_the_end() {
+    let (dir, _, _) = key_dir();
+    riskgrep(dir.path())
+        .args(["show", "key.txt", "--lines", "20:30"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("has 8 lines"));
+}
+
+/// File names with control characters are written escaped in text output,
+/// for a finding and for an unscanned file; ordinary non-ASCII names are
+/// written as they are.
+#[test]
+fn text_output_escapes_control_characters_in_file_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 11);
+    let body = format!("let id = \"{key}\";\n");
+    let names = [
+        ("nl\nforged.env", "nl\\nforged.env"),
+        ("esc\u{1b}[2Jx.env", "esc\\u{1b}[2Jx.env"),
+        ("tab\tx.env", "tab\\tx.env"),
+        ("caf\u{e9}.env", "caf\u{e9}.env"),
+        ("\u{6a21}\u{578b}.env", "\u{6a21}\u{578b}.env"),
+        ("bidi\u{202e}gnp.env", "bidi\\u{202e}gnp.env"),
+        ("sep\u{2028}forged.env", "sep\\u{2028}forged.env"),
+        ("sep\u{2029}x.env", "sep\\u{2029}x.env"),
+        ("iso\u{2066}x\u{2069}.env", "iso\\u{2066}x\\u{2069}.env"),
+        ("mark\u{200f}\u{61c}.env", "mark\\u{200f}\\u{61c}.env"),
+        (
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd}.env",
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd}.env",
+        ),
+    ];
+    for (name, shown) in names {
+        fs::write(dir.path().join(name), &body).unwrap();
+        let out = riskgrep(dir.path())
+            .args(["scan", name])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.starts_with(&format!("{shown}  ")),
+            "{name:?}: {text:?}"
+        );
+        assert!(!text.contains('\u{1b}') && !text.contains('\t'), "{text:?}");
+        // One target line and the summary line: a name cannot add a line.
+        assert_eq!(text.lines().count(), 2, "{text:?}");
+        fs::remove_file(dir.path().join(name)).unwrap();
+    }
+}
+
+#[test]
+fn text_output_escapes_control_characters_in_unscanned_names() {
+    if running_as_root() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let name = "locked\nforged line\u{1b}[31m.txt";
+    let file = dir.path().join(name);
+    fs::write(&file, "hello\n").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    let out = riskgrep(dir.path())
+        .args(["scan", name, "--on-error", "block"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.starts_with("locked\\nforged line\\u{1b}[31m.txt  unscanned: "),
+        "{text:?}"
+    );
+    assert!(!text.contains('\u{1b}'), "{text:?}");
+    assert_eq!(text.lines().count(), 2, "{text:?}");
+}
+
+/// JSON output carries the name as data, JSON-escaped by the serializer.
+#[test]
+fn json_output_keeps_the_raw_file_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = synth::fake_secret("aws_access_key", 11);
+    fs::write(dir.path().join("a\nb.env"), format!("x = \"{key}\"\n")).unwrap();
+    let out = riskgrep(dir.path())
+        .args(["scan", "a\nb.env", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["targets"][0]["target"], "a\nb.env");
+}
+
+/// `riskgrep scan --format json` of `arg` from `cwd`, with the ceiling above
+/// `top` so the repository search can reach every root under it: the
+/// target's `secret` score and `path_allowlisted` field.
+fn secret_from(top: &Path, cwd: &Path, args: &[&str]) -> (f64, bool) {
+    let out = riskgrep(cwd)
+        .env("GIT_CEILING_DIRECTORIES", top.parent().unwrap())
+        .args(["scan", "--format", "json", "--no-cache"])
+        .args(args)
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let t = &v["targets"][0];
+    (
+        t["scores"]["secret"].as_f64().unwrap(),
+        t["path_allowlisted"].as_bool().unwrap_or(false),
+    )
+}
+
+#[test]
+fn the_working_directory_does_not_change_a_files_result() {
+    let top = tempfile::tempdir().unwrap();
+    let top = fs::canonicalize(top.path()).unwrap();
+    let line = format!("{}\n", synth::fake_secret("generic_api_key_assignment", 5));
+    // A repository whose vendored tree is allowlisted, and a tree outside
+    // any repository whose parents' names are.
+    let tree = top.join("tree");
+    fs::create_dir_all(tree.join(".git")).unwrap();
+    let vendored = tree.join("node_modules/pkg/settings.ini");
+    let app = tree.join("app/settings.ini");
+    let loose = top.join("srv/lib/python3.13/app/settings.ini");
+    for f in [&vendored, &app, &loose] {
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(f, &line).unwrap();
+    }
+    let cases: &[(&Path, &[&Path], (f64, bool))] = &[
+        (
+            &vendored,
+            &[
+                &tree,
+                &tree.join("node_modules"),
+                &tree.join("node_modules/pkg"),
+                &top,
+            ],
+            (0.0, true),
+        ),
+        (&app, &[&tree, &tree.join("app"), &top], (80.0, false)),
+        (
+            &loose,
+            &[
+                &top,
+                &top.join("srv/lib"),
+                &top.join("srv/lib/python3.13/app"),
+            ],
+            (0.0, true),
+        ),
+    ];
+    for (file, cwds, want) in cases {
+        for cwd in *cwds {
+            let rel = file.strip_prefix(cwd).unwrap_or(file);
+            for arg in [file.to_str().unwrap(), rel.to_str().unwrap()] {
+                assert_eq!(
+                    secret_from(&top, cwd, &[arg]),
+                    *want,
+                    "{} from {}",
+                    arg,
+                    cwd.display()
+                );
+            }
+        }
+    }
+    // With the allowlist off the converted rules read every one of them.
+    for file in [&vendored, &app, &loose] {
+        assert_eq!(
+            secret_from(
+                &top,
+                &top,
+                &["--path-allowlist", "off", file.to_str().unwrap()]
+            ),
+            (80.0, false)
+        );
+    }
+}
+
+#[test]
+fn text_output_says_when_the_path_allowlist_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    let key = synth::fake_secret("generic_api_key_assignment", 5);
+    let value = key.split('"').nth(1).unwrap().to_string();
+    // Found by a rule that ignores the allowlist, on an allowlisted path.
+    fs::write(
+        dir.path().join("config.svg"),
+        format!("<Config>\n  <ApiKey>{value}</ApiKey>\n</Config>\n"),
+    )
+    .unwrap();
+    fs::write(dir.path().join("yarn.lock"), format!("{key}\n")).unwrap();
+    riskgrep(dir.path())
+        .args(["scan", "--no-cache", "config.svg", "yarn.lock"])
+        .assert()
+        .stdout(predicate::str::contains("(path allowlist applied)"))
+        .stdout(predicate::str::contains("2 under a path allowlist"))
+        .stdout(predicate::str::contains(&value).not());
 }

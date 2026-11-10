@@ -39,6 +39,7 @@ fn target(path: &str, evidence: Vec<Evidence>) -> TargetReport {
         text: true,
         container: None,
         read_failed: false,
+        path_allowlisted: false,
     }
 }
 

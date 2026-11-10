@@ -11,7 +11,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-const YARA_X_VERSION: &str = "1.22.0";
+const YARA_X_VERSION: &str = "1.23.0";
+
+/// The boolean rule global that says whether path allowlists apply.
+pub const PATH_ALLOWLIST_GLOBAL: &str = "path_allowlist_enabled";
 
 pub struct Bundle {
     pub rules: yara_x::Rules,
@@ -82,13 +85,23 @@ fn merge_stopwords(rulesets: &[&Ruleset]) -> Result<BTreeMap<String, Vec<String>
 
 fn compile(rulesets: &[&Ruleset]) -> Result<yara_x::Rules> {
     let mut c = yara_x::Compiler::new();
+    // A ruleset is its own files: its sources cannot pull in any other.
+    c.enable_includes(false);
     c.define_global("path", "")
+        .map_err(|e| err(format!("define_global: {e}")))?;
+    // Whether path allowlists apply (`Config::path_allowlist_applies`); set
+    // per scanner.
+    c.define_global(PATH_ALLOWLIST_GLOBAL, true)
         .map_err(|e| err(format!("define_global: {e}")))?;
     for rs in rulesets {
         c.new_namespace(&rs.id);
         for (file, src) in &rs.sources {
-            c.add_source(src.as_ref())
-                .map_err(|e| err(format!("ruleset {} ({file}): {e}", rs.id)))?;
+            c.add_source(src.as_ref()).map_err(|e| {
+                err(match rs.untrusted_dir() {
+                    Some(d) => format!("ruleset {}: could not be compiled", d.join(file).display()),
+                    None => format!("ruleset {} ({file}): {e}", rs.id),
+                })
+            })?;
         }
     }
     Ok(c.build())
@@ -100,7 +113,7 @@ fn collect_meta(rules: &yara_x::Rules, rulesets: &[&Ruleset]) -> Result<HashMap<
         let ns = rule.namespace();
         let meta = RuleMeta::from_yara(&rule).map_err(|e| err(format!("ruleset {ns}: {e}")))?;
         for p in &meta.post {
-            if let PostSpec::Stopwords { list } = p {
+            if let PostSpec::Stopwords { list, .. } = p {
                 let found = rulesets
                     .iter()
                     .find(|r| r.id == ns)
@@ -488,4 +501,23 @@ pub fn prune_bundles(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::YARA_X_VERSION;
+
+    /// The cache key must change whenever the engine does, so the constant
+    /// has to track the exact `yara-x` pin in `Cargo.toml`.
+    #[test]
+    fn yara_x_version_matches_cargo_pin() {
+        let manifest =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
+        let line = manifest
+            .lines()
+            .find(|l| l.starts_with("yara-x = "))
+            .expect("yara-x dependency line");
+        let pin = format!("version = \"={YARA_X_VERSION}\"");
+        assert!(line.contains(&pin), "expected {pin} in `{line}`");
+    }
 }

@@ -2,7 +2,50 @@
 //! rule ids, counts, offsets, and structural facts only.
 
 use serde::{Deserialize, Serialize, Serializer};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
+/// Whether `escape_controls` writes `ch` escaped: a control character, or a
+/// format character that changes how text is ordered or broken into lines
+/// (the bidirectional marks, embeddings, overrides, and isolates, and the
+/// line and paragraph separators).
+pub fn needs_escape(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{61c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{2028}'
+                | '\u{2029}'
+        )
+}
+
+/// A file name or path as written in text output and decision messages:
+/// control characters (newline, tab, escape, and the C1 range), the
+/// bidirectional formatting characters (U+061C, U+200E, U+200F, U+202A to
+/// U+202E, U+2066 to U+2069), and the line and paragraph separators (U+2028,
+/// U+2029) become `\n`, `\t`, `\u{1b}`, `\u{202e}`, and so on, so a name
+/// cannot forge a line, reorder the text around it, or move a terminal's
+/// cursor. Other characters, including non-ASCII ones, are kept. Archive
+/// member names get the same escaping.
+pub fn escape_controls(name: &str) -> Cow<'_, str> {
+    if !name.chars().any(needs_escape) {
+        return Cow::Borrowed(name);
+    }
+    let mut s = String::with_capacity(name.len() + 8);
+    for ch in name.chars() {
+        if needs_escape(ch) {
+            let _ = write!(s, "{}", ch.escape_default());
+        } else {
+            s.push(ch);
+        }
+    }
+    Cow::Owned(s)
+}
 
 /// Round to one decimal, half away from zero.
 pub fn round1(x: f64) -> f64 {
@@ -117,6 +160,13 @@ pub struct TargetReport {
     /// applies to both (see [`TargetReport::unseen_part`]).
     #[serde(skip)]
     pub read_failed: bool,
+    /// A path allowlist applied (gitleaks' global path allowlist): the rules
+    /// that exclude its paths, every converted gitleaks rule among them, did
+    /// not run on this file, so a score of 0 does not say they found nothing.
+    /// For a container, set when it applied to at least one member (see
+    /// [`ContainerReport::path_allowlisted`]). Serialized only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub path_allowlisted: bool,
 }
 
 impl TargetReport {
@@ -150,10 +200,27 @@ pub struct ContainerReport {
     /// Members of formats that are not scanned (images, binary files of
     /// unknown format).
     pub skipped: u64,
+    /// `skipped` by kind: an image's format (`png`, `jpeg`), `unknown` for a
+    /// binary of no format the scanner recognises, or `link_or_device` for
+    /// an entry with nothing to read. Each member counts once, at any
+    /// nesting level, so the counts add up to `skipped`; no member is named.
+    /// Serialized only when not empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub skipped_kinds: BTreeMap<String, u64>,
     /// Members not read or not scanned at all.
     pub not_read: u64,
     /// Nested containers opened; what they hold is counted as members.
     pub opened: u64,
+    /// `opened` by the format that read each nested container (`zip`, `tar`,
+    /// `gzip`, `sqlite`), counted as `skipped_kinds` is. A tar inside a gzip
+    /// stream is read with the stream, as one container, so it is not
+    /// counted. Serialized only when not empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub opened_formats: BTreeMap<String, u64>,
+    /// Members scanned (whole or in part) to which a path allowlist applied;
+    /// counted, not named. Serialized only when not 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub path_allowlisted: u64,
     /// Members with evidence, then members not read whole, at most
     /// [`crate::container::LISTED_MAX`].
     pub listed: Vec<MemberReport>,
@@ -169,6 +236,14 @@ pub struct MemberReport {
     /// all of its members together.
     #[serde(serialize_with = "ser_scores")]
     pub scores: BTreeMap<Category, f64>,
+    /// A path allowlist applied to this member, as
+    /// [`TargetReport::path_allowlisted`]. Serialized only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub path_allowlisted: bool,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -241,5 +316,41 @@ mod threshold_tests {
         // Raw 79.94 shows as 79.9, so it does not.
         assert!(!meets_threshold(79.94, 80.0));
         assert!(meets_threshold(79.94, 79.9));
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::escape_controls;
+
+    #[test]
+    fn controls_are_escaped_and_other_text_is_not() {
+        assert_eq!(
+            escape_controls("a\nb\tc\u{1b}[2J\u{85}"),
+            "a\\nb\\tc\\u{1b}[2J\\u{85}"
+        );
+        assert_eq!(
+            escape_controls("caf\u{e9} \u{6a21}\u{578b} a!/b"),
+            "caf\u{e9} \u{6a21}\u{578b} a!/b"
+        );
+        // Bidirectional controls and line separators are escaped too.
+        for cp in [
+            0x61c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068,
+            0x2069, 0x2028, 0x2029,
+        ] {
+            let ch = char::from_u32(cp).unwrap();
+            assert_eq!(
+                escape_controls(&format!("a{ch}b")),
+                format!("a\\u{{{cp:x}}}b"),
+                "U+{cp:04X}"
+            );
+        }
+        // Neighbours of those ranges and right-to-left letters are kept.
+        assert_eq!(
+            escape_controls("\u{200d}\u{200b}\u{2027}\u{202f}\u{2065}\u{206a}\u{5e9}\u{5dc}\u{5d5}\u{5dd}\u{627}"),
+            "\u{200d}\u{200b}\u{2027}\u{202f}\u{2065}\u{206a}\u{5e9}\u{5dc}\u{5d5}\u{5dd}\u{627}"
+        );
+        // Escaping twice changes nothing more.
+        assert_eq!(escape_controls(&escape_controls("a\nb")), "a\\nb");
     }
 }

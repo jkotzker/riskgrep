@@ -2,8 +2,9 @@
 //! the lines a `Read` call asks for.
 
 use crate::input::Lines;
+use crate::show::{masked_view_command, shell_word};
 use riskgrep_core::config::{Action, ClaudeCodeConfig};
-use riskgrep_core::model::{meets_threshold, round1};
+use riskgrep_core::model::{escape_controls, meets_threshold, round1};
 use riskgrep_core::{Category, Report, TargetReport, TargetStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +132,7 @@ fn top_member(t: &TargetReport, cat: &Category) -> Option<String> {
         .iter()
         .copied()
         .max_by(|a, b| score(a).total_cmp(&score(b)).then(b.cmp(a)))?;
-    let mut s = format!(" in {}!/{top}", t.target);
+    let mut s = format!(" in {}!/{top}", escape_controls(&t.target));
     match members.len() - 1 {
         0 => {}
         1 => s.push_str(", and 1 more member"),
@@ -185,8 +186,60 @@ fn end_sentence(reason: &mut String) {
     }
 }
 
+/// Whether `riskgrep show` can be expected to mask `t`: text read as text
+/// (whole or in part; the command reads it whole), not a container, no
+/// evidence with structural facts, and at least one match located in the
+/// content (a file flagged by its name alone has nothing to mask). This
+/// only selects candidates: the caller's `show` confirms the view.
+fn maskable(t: &TargetReport) -> bool {
+    t.text
+        && t.container.is_none()
+        && matches!(
+            t.status,
+            TargetStatus::Scanned | TargetStatus::Partial { .. }
+        )
+        && t.evidence.iter().all(|e| e.shape.is_empty())
+        && t.evidence.iter().any(|e| !e.locations.is_empty())
+}
+
+/// The sentence offering the masked view of the files among `files` that
+/// `show` confirms can be shown. The generic form is used only when every
+/// listed file can be, so an offer never leads to a refusal. A reason lists
+/// at most `LISTED` files, which bounds the views tried.
+fn masked_view_offer(
+    files: &[(usize, bool)],
+    report: &Report,
+    show: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let listed: Vec<&TargetReport> = files
+        .iter()
+        .filter_map(|f| report.targets.get(f.0))
+        .collect();
+    let offers: Vec<(String, String)> = listed
+        .iter()
+        .filter(|t| maskable(t))
+        .filter_map(|t| {
+            let bin = show(&t.target)?;
+            let cmd = masked_view_command(&bin, &t.target)?;
+            Some((cmd, bin))
+        })
+        .collect();
+    if offers.len() > 1 && offers.len() == listed.len() {
+        let b = shell_word(&offers[0].1)?;
+        return Some(format!(
+            "For a view with every match masked, run `{b} show FILE` on a listed file."
+        ));
+    }
+    let (cmd, _) = offers.first()?;
+    Some(format!("For a view with every match masked, run `{cmd}`."))
+}
+
 /// What the agent may do instead, for the category findings listed.
-fn guidance(listed: &[&Item]) -> Option<String> {
+fn guidance(
+    listed: &[&Item],
+    report: &Report,
+    show: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
     let mut files: Vec<(usize, bool)> = listed.iter().filter_map(|i| i.finding).collect();
     files.sort_unstable();
     files.dedup();
@@ -201,7 +254,10 @@ fn guidance(listed: &[&Item]) -> Option<String> {
         (_, 0) => (OTHER_MEANS_MANY, NO_PARTIAL_MANY),
         _ => (OTHER_MEANS_MANY, MIXED),
     };
-    Some(format!("{other} {then}"))
+    match masked_view_offer(&files, report, show) {
+        Some(offer) => Some(format!("{other} {offer} {then}")),
+        None => Some(format!("{other} {then}")),
+    }
 }
 
 /// The decision for `report`. `lines` is what a `Read` call asks for
@@ -214,7 +270,22 @@ pub fn decide(
     cfg: &ClaudeCodeConfig,
     lines: Option<Lines>,
 ) -> Decision {
-    decide_targets(report, unresolved, cfg, lines, false)
+    decide_targets(report, unresolved, cfg, lines, false, &|_| None)
+}
+
+/// [`decide`], with the reason also offering `riskgrep show` for a flagged
+/// text file. `show` returns the trusted `riskgrep` binary
+/// ([`crate::show::trusted_riskgrep`]) when the command would show the file
+/// it is given rather than refuse; it is called only for files a reason
+/// would offer the command for.
+pub fn decide_offering(
+    report: &Report,
+    unresolved: bool,
+    cfg: &ClaudeCodeConfig,
+    lines: Option<Lines>,
+    show: &dyn Fn(&str) -> Option<String>,
+) -> Decision {
+    decide_targets(report, unresolved, cfg, lines, false, show)
 }
 
 /// The decision for a report of file names scanned without content
@@ -222,7 +293,7 @@ pub fn decide(
 /// scanned (the rules did not load) follows `on_error`, `on_skipped` does
 /// not apply, and the reason offers no reading guidance.
 pub fn decide_names(report: &Report, cfg: &ClaudeCodeConfig) -> Decision {
-    decide_targets(report, false, cfg, None, true)
+    decide_targets(report, false, cfg, None, true, &|_| None)
 }
 
 fn decide_targets(
@@ -231,6 +302,7 @@ fn decide_targets(
     cfg: &ClaudeCodeConfig,
     lines: Option<Lines>,
     names: bool,
+    show: &dyn Fn(&str) -> Option<String>,
 ) -> Decision {
     let mut items: Vec<Item> = Vec::new();
     for (ti, t) in report.targets.iter().enumerate() {
@@ -244,14 +316,17 @@ fn decide_targets(
             items.push(Item {
                 sev,
                 score: -1.0,
-                text: format!("RiskGrep: could not scan {} ({reason})", t.target),
+                text: format!(
+                    "RiskGrep: could not scan {} ({reason})",
+                    escape_controls(&t.target)
+                ),
                 finding: None,
             });
         }
         // Part of what the call would read was never scanned.
         if let Some(not_read) = t.unseen_part() {
             if let Some(sev) = severity(cfg.on_partial.action(cfg.on_error)) {
-                let target = &t.target;
+                let target = escape_controls(&t.target);
                 let what = match t
                     .container
                     .as_ref()
@@ -328,7 +403,7 @@ fn decide_targets(
                 score,
                 text: format!(
                     "RiskGrep: {what}{} scored {} {:.1} ({}){located}. Threshold: {level} at {}.",
-                    t.target,
+                    escape_controls(&t.target),
                     cat.0,
                     score,
                     named,
@@ -366,7 +441,7 @@ fn decide_targets(
         }
         reason.push_str(&format!(", and {more} more."));
     }
-    if let Some(g) = guidance(&chosen) {
+    if let Some(g) = guidance(&chosen, report, show) {
         end_sentence(&mut reason);
         reason.push_str(&g);
     }
@@ -403,6 +478,7 @@ mod tests {
             text: true,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         }
     }
 
@@ -449,6 +525,7 @@ mod tests {
             text: true,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         }
     }
 
@@ -864,12 +941,16 @@ mod tests {
             skipped: 0,
             not_read: 2,
             opened: 0,
+            path_allowlisted: 0,
+            skipped_kinds: BTreeMap::new(),
+            opened_formats: BTreeMap::new(),
             listed: members
                 .iter()
                 .map(|(m, score)| MemberReport {
                     path: m.to_string(),
                     status: TargetStatus::Scanned,
                     scores: BTreeMap::from([(Category("secret".into()), *score)]),
+                    path_allowlisted: false,
                 })
                 .collect(),
         });
@@ -1052,5 +1133,141 @@ mod tests {
             decide(&report(vec![sampled]), false, &allow, None),
             Decision::Deny(_)
         ));
+    }
+
+    fn reason(d: Decision) -> String {
+        match d {
+            Decision::Ask(r) | Decision::Deny(r) => r,
+            Decision::NoOpinion => panic!("no decision"),
+        }
+    }
+
+    const BIN: &str = "/opt/rg/bin/riskgrep";
+
+    /// [`target`], its evidence located in the content.
+    fn located(path: &str, cat: &str, score: f64) -> TargetReport {
+        let mut t = target(path, cat, score);
+        t.evidence[0].locations = ev("r1", cat, &[(1, 1)]).locations;
+        t
+    }
+
+    #[test]
+    fn a_flagged_text_file_is_offered_the_masked_view() {
+        let cfg = Config::default().claude_code;
+        let r = report(vec![located("/w/app.env", "secret", 95.0)]);
+        let got = reason(decide_offering(&r, false, &cfg, None, &|_| {
+            Some(BIN.into())
+        }));
+        assert!(
+            got.contains(
+                "(Bash, Grep, scripts). For a view with every match masked, run \
+                 `/opt/rg/bin/riskgrep show /w/app.env`. No partial read"
+            ),
+            "{got}"
+        );
+        // Without a trusted binary, or through `decide`, nothing is offered.
+        assert_eq!(
+            reason(decide_offering(&r, false, &cfg, None, &|_| None)),
+            reason(decide(&r, false, &cfg, None))
+        );
+        assert!(!reason(decide(&r, false, &cfg, None)).contains("masked"));
+        // A path that needs quoting is quoted; one that cannot be is not offered.
+        let r = report(vec![located("/w/my app.env", "secret", 95.0)]);
+        let got = reason(decide_offering(&r, false, &cfg, None, &|_| {
+            Some(BIN.into())
+        }));
+        assert!(got.contains("show '/w/my app.env'`"), "{got}");
+        let r = report(vec![located("/w/it's.env", "secret", 95.0)]);
+        let got = reason(decide_offering(&r, false, &cfg, None, &|_| {
+            Some(BIN.into())
+        }));
+        assert!(!got.contains("masked"), "{got}");
+    }
+
+    #[test]
+    fn files_that_cannot_be_masked_are_not_offered_it() {
+        let cfg = Config::default().claude_code;
+        let mut binary = located("/w/emb.npy", "biometric", 90.0);
+        binary.text = false;
+        let mut shaped = located("/w/t.txt", "biometric", 90.0);
+        shaped.evidence[0].shape = vec![riskgrep_core::model::ShapeFacts::Tensor {
+            dtype: "f4".into(),
+            shape: vec![2, 3],
+            name: None,
+        }];
+        // Flagged by its name alone: `riskgrep show` has nothing to mask.
+        let name_only = target("/w/.netrc", "secret", 80.0);
+        for t in [binary, shaped, name_only] {
+            let r = report(vec![t]);
+            let called = std::cell::Cell::new(false);
+            let got = reason(decide_offering(&r, false, &cfg, None, &|_| {
+                called.set(true);
+                Some(BIN.into())
+            }));
+            assert!(!got.contains("masked"), "{got}");
+            assert!(!called.get(), "the binary is looked up only to offer it");
+        }
+        // Several maskable files get the generic form.
+        let r = report(vec![
+            located("/w/a.env", "secret", 95.0),
+            located("/w/b.env", "secret", 95.0),
+        ]);
+        let got = reason(decide_offering(&r, false, &cfg, None, &|_| {
+            Some(BIN.into())
+        }));
+        assert!(
+            got.contains("run `/opt/rg/bin/riskgrep show FILE` on a listed file."),
+            "{got}"
+        );
+    }
+
+    #[test]
+    fn only_files_the_command_would_show_are_offered() {
+        let cfg = Config::default().claude_code;
+        let r = report(vec![
+            located("/w/a.env", "secret", 95.0),
+            located("/w/b.env", "secret", 95.0),
+        ]);
+        // One of two would refuse: that one is not covered by the offer.
+        let got = reason(decide_offering(&r, false, &cfg, None, &|t: &str| {
+            (t == "/w/b.env").then(|| BIN.to_string())
+        }));
+        assert!(
+            got.contains("`/opt/rg/bin/riskgrep show /w/b.env`"),
+            "{got}"
+        );
+        assert!(!got.contains("show FILE"), "{got}");
+        // A path that cannot be written as a word is not covered either.
+        let q = report(vec![
+            located("/w/a.env", "secret", 95.0),
+            located("/w/it's.env", "secret", 95.0),
+        ]);
+        let got = reason(decide_offering(&q, false, &cfg, None, &|_| {
+            Some(BIN.into())
+        }));
+        assert!(
+            got.contains("`/opt/rg/bin/riskgrep show /w/a.env`"),
+            "{got}"
+        );
+        assert!(!got.contains("show FILE"), "{got}");
+        // Every one would refuse: nothing is offered.
+        let got = reason(decide_offering(&r, false, &cfg, None, &|_| None));
+        assert!(!got.contains("masked"), "{got}");
+    }
+
+    #[test]
+    fn the_number_of_views_tried_for_an_offer_is_bounded() {
+        let cfg = Config::default().claude_code;
+        let targets: Vec<TargetReport> = (0..40)
+            .map(|i| located(&format!("/w/{i}.env"), "secret", 95.0))
+            .collect();
+        let r = report(targets);
+        let tried = std::cell::Cell::new(0u32);
+        let got = reason(decide_offering(&r, false, &cfg, None, &|_| {
+            tried.set(tried.get() + 1);
+            Some(BIN.into())
+        }));
+        assert_eq!(tried.get() as usize, LISTED);
+        assert!(got.contains("show FILE"), "{got}");
     }
 }

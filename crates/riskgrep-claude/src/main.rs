@@ -9,12 +9,17 @@
 //! here must ask, which only a JSON decision does reliably.
 
 use riskgrep_claude::bash::bash_targets_within;
-use riskgrep_claude::decide::{decide, decide_names, error_decision, Decision};
+use riskgrep_claude::decide::{decide, decide_names, decide_offering, error_decision, Decision};
 use riskgrep_claude::input::{self, HookInput};
+use riskgrep_claude::mcp;
 use riskgrep_claude::resolve;
-use riskgrep_core::config::{self, Action, Config, McpKind, Mode, Overrides};
+use riskgrep_claude::show::{masked_view, reports_version, trusted_riskgrep, MaskedView};
+use riskgrep_core::config::{self, Action, Config, Mode, Overrides};
+use riskgrep_core::mcp::McpPlan;
+use riskgrep_core::show::{show_file, RefusalKind, ShowOptions};
 use riskgrep_core::{Report, RiskGrep};
 use serde_json::json;
+use std::cell::OnceCell;
 use std::io::{Read, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -38,11 +43,17 @@ const MATCHER: &str = "^(Read|NotebookRead|Grep|Glob|Bash|mcp__.*)$";
 
 fn main() {
     let start = Instant::now();
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|a| a == "print-config")
-    {
-        print_config();
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "print-config") {
+        let block = match &args[1..] {
+            [] => true,
+            [a] if a == "--no-block-on-failure" => false,
+            _ => {
+                eprintln!("usage: riskgrep-claude print-config [--no-block-on-failure]");
+                std::process::exit(3);
+            }
+        };
+        print_config(block);
         return;
     }
     // A panic must not print the default message or end in a non-zero exit,
@@ -73,15 +84,23 @@ fn emit(d: &Decision) {
     let _ = so.flush();
 }
 
-fn print_config() {
+/// The settings block. With `block`, the hook entry sets
+/// `"onFailure": "block"` (Claude Code 2.1.295 or later), so a hook that
+/// cannot start, crashes, or times out blocks the call instead of letting
+/// it through.
+fn print_config(block: bool) {
     eprintln!(
         "# Merge this into ~/.claude/settings.json by hand: add the hook entry to \
          hooks.PreToolUse and the deny rules to permissions.deny."
     );
+    let mut hook = json!({"type": "command", "command": "riskgrep-claude", "timeout": 5});
+    if block {
+        hook["onFailure"] = json!("block");
+    }
     let cfg = json!({
         "hooks": {"PreToolUse": [{
             "matcher": MATCHER,
-            "hooks": [{"type": "command", "command": "riskgrep-claude", "timeout": 5}],
+            "hooks": [hook],
         }]},
         "permissions": {"deny": [
             "Edit(~/.config/riskgrep/**)",
@@ -111,7 +130,7 @@ fn run(start: Instant) -> Decision {
     let gated = matches!(
         hook.tool_name.as_str(),
         "Read" | "NotebookRead" | "Grep" | "Glob" | "Bash"
-    ) || hook.tool_name.starts_with("mcp__");
+    ) || hook.tool_name.starts_with(mcp::PREFIX);
     if !gated || hook.event.as_deref().is_some_and(|e| e != "PreToolUse") {
         return Decision::NoOpinion;
     }
@@ -160,6 +179,98 @@ fn config_error_summary(msg: &str) -> String {
     }
 }
 
+/// The reason given when an agent asks to run the masked view.
+const MASKED_VIEW_ASK: &str = "RiskGrep: this prints the file with every detected match masked; \
+                               values the rules do not detect are printed.";
+
+/// What `riskgrep show` would do with a file.
+#[derive(PartialEq, Eq)]
+enum Preview {
+    Shows,
+    Refuses,
+    /// Not known: the view could not be made, or ran out of time.
+    Unknown,
+}
+
+/// What `riskgrep show` on `target` would do, found by making the view here
+/// and dropping it, in what is left of the hook's budget. A refusal counts
+/// only when the file and the rules decided it ([`RefusalKind::File`]),
+/// since anything else may go the other way when the command runs, and
+/// only when it came before this check's budget ran out: the command has
+/// its own, longer budget.
+fn preview(target: &str, opts: ShowOptions, root: Option<&Path>, deadline: Instant) -> Preview {
+    // With either set, `riskgrep` asks git for the repository whose
+    // configuration it reads, which the hook does not.
+    if std::env::var_os("GIT_DIR").is_some() || std::env::var_os("GIT_WORK_TREE").is_some() {
+        return Preview::Unknown;
+    }
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Preview::Unknown;
+    }
+    let Ok(mut cfg) = config::load_show(root) else {
+        return Preview::Unknown;
+    };
+    cfg.time_budget = cfg.time_budget.min(left);
+    let budget = cfg.time_budget;
+    let path = PathBuf::from(target);
+    let started = Instant::now();
+    let (tx, rx) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("riskgrep-show".into())
+        .stack_size(WORKER_STACK)
+        .spawn(move || {
+            let shown = show_file(&cfg, &path, &opts, riskgrep_core::paths::cache_dir())
+                .map(|_| ())
+                .map_err(|r| r.kind);
+            let _ = tx.send(shown);
+        });
+    if spawned.is_err() {
+        return Preview::Unknown;
+    }
+    match rx.recv_timeout(left) {
+        Ok(Ok(())) => Preview::Shows,
+        Ok(Err(RefusalKind::File)) if started.elapsed() < budget => Preview::Refuses,
+        _ => Preview::Unknown,
+    }
+}
+
+/// Whether the binary at `bin` is this build's version, checked in what is
+/// left of the hook's budget.
+fn same_version(bin: &str, deadline: Instant) -> bool {
+    let left = deadline.saturating_duration_since(Instant::now());
+    reports_version(bin, env!("CARGO_PKG_VERSION"), left)
+}
+
+/// The trusted `riskgrep` binary, when `riskgrep show` on `target` gives a
+/// view instead of refusing, so a reason never offers a command that would
+/// refuse. `bin` holds the binary once its version has been checked, which
+/// is done once per decision.
+fn masked_view_for(
+    target: &str,
+    root: Option<&Path>,
+    deadline: Instant,
+    bin: &OnceCell<Option<String>>,
+) -> Option<String> {
+    let bin = bin
+        .get_or_init(|| trusted_riskgrep().filter(|b| same_version(b, deadline)))
+        .clone()?;
+    (preview(target, ShowOptions::default(), root, deadline) == Preview::Shows).then_some(bin)
+}
+
+/// The decision for a masked view by the trusted binary: no decision when
+/// it would refuse, since it then prints only the refusal, and otherwise
+/// the user's. A `riskgrep` of another version may not do what this build
+/// expects, so it always asks.
+fn masked_view_decision(view: &MaskedView, root: Option<&Path>, deadline: Instant) -> Decision {
+    if same_version(&view.binary, deadline)
+        && preview(&view.file, view.options(), root, deadline) == Preview::Refuses
+    {
+        return Decision::NoOpinion;
+    }
+    Decision::Ask(MASKED_VIEW_ASK.to_string())
+}
+
 /// What the worker thread scans.
 enum Job {
     Files(Vec<PathBuf>),
@@ -192,6 +303,15 @@ fn work(
             let Some(cmd) = hook.str_field("command") else {
                 return Decision::NoOpinion;
             };
+            // `riskgrep show` prints only a masked view, but values the
+            // rules miss are printed with it, so the user decides. The one
+            // shape of it that surely runs the trusted binary is not
+            // analysed, which would deny the flagged file it names.
+            if let Some(view) = masked_view(cmd) {
+                if trusted_riskgrep().is_some_and(|t| t == view.binary) {
+                    return masked_view_decision(&view, root.as_deref(), deadline);
+                }
+            }
             let budget = (total / BASH_SHARE).max(MIN_BASH_BUDGET);
             let t = bash_targets_within(cmd, cwd, budget);
             unresolved = t.unresolved;
@@ -220,15 +340,10 @@ fn work(
                 max_depth: None,
             }
         }
-        name if name.starts_with("mcp__") => match mcp_job(hook, &cc, cwd) {
+        name if name.starts_with(mcp::PREFIX) => match mcp_job(hook, &cfg, cwd) {
             Ok(Some(job)) => job,
             Ok(None) => return Decision::NoOpinion,
-            Err(()) => {
-                return error_decision(
-                    cc.on_unresolved,
-                    &format!("RiskGrep: could not determine the files {name} reads"),
-                )
-            }
+            Err(d) => return d,
         },
         _ => match resolve::read_target(hook, cwd) {
             Some(p) => Job::Files(vec![p]),
@@ -236,6 +351,8 @@ fn work(
         },
     };
     let names = matches!(job, Job::Names { .. });
+    let show_root = root.clone();
+    let show_bin = OnceCell::new();
     let (tx, rx) = mpsc::channel();
     let spawned = {
         let hook = hook.clone();
@@ -252,7 +369,13 @@ fn work(
     }
     match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(Ok(report)) if names => decide_names(&report, &cc),
-        Ok(Ok(report)) => decide(&report, unresolved, &cc, input::requested_lines(hook)),
+        Ok(Ok(report)) => decide_offering(
+            &report,
+            unresolved,
+            &cc,
+            input::requested_lines(hook),
+            &|target| masked_view_for(target, show_root.as_deref(), deadline, &show_bin),
+        ),
         Ok(Err(reason)) => error_decision(cc.on_error, &format!("RiskGrep: {reason}")),
         Err(RecvTimeoutError::Timeout) => {
             error_decision(cc.on_error, "RiskGrep: scan exceeded time budget")
@@ -263,36 +386,49 @@ fn work(
     }
 }
 
-/// The job for an MCP call: `Ok(None)` when it reads nothing, `Err` when
-/// the tool has no `claude_code.mcp_tools` entry or its path fields cannot
-/// be read.
-fn mcp_job(hook: &HookInput, cc: &config::ClaudeCodeConfig, cwd: &Path) -> Result<Option<Job>, ()> {
-    let tool = cc.mcp_tool(&hook.tool_name).ok_or(())?;
-    if tool.kind == McpKind::None {
-        return Ok(None);
-    }
+/// The job for an MCP call: `Ok(None)` when it reads nothing, `Err` with
+/// the decision when its files cannot be determined or its entry sets one.
+fn mcp_job(hook: &HookInput, cfg: &Config, cwd: &Path) -> Result<Option<Job>, Decision> {
+    let name = &hook.tool_name;
+    let unresolved = |a| {
+        error_decision(
+            a,
+            &format!("RiskGrep: could not determine the files {name} reads"),
+        )
+    };
+    let table = mcp::table(cfg);
     let home = std::env::var("HOME").ok();
-    let paths = resolve::mcp_paths(hook, &tool.paths, cwd, home.as_deref()).ok_or(())?;
-    if paths.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(match tool.kind {
-        McpKind::Read => {
-            let files = resolve::existing_files(paths);
-            if files.is_empty() {
-                return Ok(None);
+    Ok(Some(
+        match table.plan_entry(
+            mcp::entry(cfg, &table, name),
+            &hook.tool_input,
+            cwd,
+            home.as_deref(),
+        ) {
+            McpPlan::Nothing => return Ok(None),
+            McpPlan::Read(files) => Job::Files(files),
+            McpPlan::Walk(roots) => Job::Walk(roots),
+            McpPlan::Names { roots, max_depth } => Job::Names {
+                roots,
+                glob: None,
+                max_depth,
+            },
+            McpPlan::Unresolved(a) => return Err(unresolved(a)),
+            McpPlan::Decision(a) => {
+                let what = if a == Action::Ask {
+                    format!("asks before {name}")
+                } else {
+                    format!("denies {name}")
+                };
+                return Err(error_decision(
+                    a,
+                    &format!("RiskGrep: the MCP configuration {what}"),
+                ));
             }
-            Job::Files(files)
-        }
-        McpKind::Walk => Job::Walk(paths),
-        McpKind::Names | McpKind::None => Job::Names {
-            roots: paths,
-            glob: None,
-            max_depth: tool.max_depth,
+            // A plan this build does not know cannot be resolved to paths.
+            _ => return Err(unresolved(table.on_unresolved.unwrap_or(Action::Allow))),
         },
-        // A kind this build does not know cannot be resolved to paths.
-        _ => return Err(()),
-    }))
+    ))
 }
 
 /// Scores each name with the path rules alone (`RiskGrep::scan_names`). Names are
@@ -388,6 +524,7 @@ fn scan(
             text: false,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         });
         report = Report::from_targets(&report.riskgrep_version, &report.rules_bundle, targets);
     }

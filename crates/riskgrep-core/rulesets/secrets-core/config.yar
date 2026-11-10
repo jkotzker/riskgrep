@@ -20,9 +20,13 @@
 // `+/=_.-`), so templates (`${VAR}`, `{{ var }}`), prose, and short values do
 // not match. The post-processors then keep a value only when it has Shannon
 // entropy of at least 3.0 (a random 32-character hex value falls below 3.0
-// about once in 7,400 draws, below 3.5, `generic_api_key`'s minimum, about
-// once in 5), contains no word of `generic_api_key`'s stopword list, has both
-// a digit and a letter, is not a UUID (key ids and subjects under a
+// once in 9,468 draws, exact, and below 3.5, `generic_api_key`'s minimum,
+// about once in 5), contains no word of `generic_api_key`'s stopword list
+// (for a value made only of hex digits, no word of 8 or more characters:
+// `stopwords_hex_min_len`, since `dead` and `feed` occur by chance in a random
+// hex value, 32 digits holding one about once in 1,100 draws, while the
+// 32-digit example value in the list is a placeholder), has
+// both a digit and a letter, is not a UUID (key ids and subjects under a
 // `Credentials` object are UUIDs), contains no ascending or descending run
 // (`0123456`, `abcdef`), and is not a file path.
 //
@@ -50,6 +54,7 @@ rule xml_credential_element {
     secret_group = 1
     min_entropy = 3.0
     stopwords = "secrets_core_generic_api_key"
+    stopwords_hex_min_len = 8
     allow_regex = "^<[\\w.:-]{0,40}(?i:public)|^<add[ \\t][^>]*(?i:key|name)[ \\t]*=[ \\t]*[\"'][\\w.:-]{0,40}(?i:public)|^\"[\\w.-]{0,40}(?i:public)|^\\n?[ ]{0,6}[\\w.-]{0,40}(?i:public)[\\w.-]*:|^[^0-9]+$|^[^A-Za-z]+$|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$|^[A-Za-z0-9+/=_.-]*(?i:0123456|123456789|abcdef|fedcba)|^[A-Za-z0-9+/=_.-]*(?i:\\.(?:pem|key|crt|cer|p12|pfx|jks|keystore|txt|json|ya?ml|xml|conf|cfg|ini|der|asc|gpg|pub)$)|^/(?:bin|etc|home|opt|tmp|usr|var|run|srv|mnt|data|config|app|Users|private)/"
   strings:
     $re = /<([\w.:-]{0,40}(api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?key|[\w.:-]{0,40}(access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?token|token|[\w.:-]{0,40}(secret|passw(or)?d|passphrase|pwd|psk|credentials?))>[ \t]*[A-Za-z0-9+\/=_.-]{16,200}[ \t]*<\/[\w.:-]{1,80}>/ nocase
@@ -75,6 +80,7 @@ rule xml_add_key_value {
     secret_group = "first_nonempty"
     min_entropy = 3.0
     stopwords = "secrets_core_generic_api_key"
+    stopwords_hex_min_len = 8
     allow_regex = "^<[\\w.:-]{0,40}(?i:public)|^<add[ \\t][^>]*(?i:key|name)[ \\t]*=[ \\t]*[\"'][\\w.:-]{0,40}(?i:public)|^\"[\\w.-]{0,40}(?i:public)|^\\n?[ ]{0,6}[\\w.-]{0,40}(?i:public)[\\w.-]*:|^[^0-9]+$|^[^A-Za-z]+$|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$|^[A-Za-z0-9+/=_.-]*(?i:0123456|123456789|abcdef|fedcba)|^[A-Za-z0-9+/=_.-]*(?i:\\.(?:pem|key|crt|cer|p12|pfx|jks|keystore|txt|json|ya?ml|xml|conf|cfg|ini|der|asc|gpg|pub)$)|^/(?:bin|etc|home|opt|tmp|usr|var|run|srv|mnt|data|config|app|Users|private)/"
   strings:
     $re = /<add[ \t]+(key|name)[ \t]*=[ \t]*["']([\w.:-]{0,40}(api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?key|[\w.:-]{0,40}(access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?token|token|[\w.:-]{0,40}(secret|passw(or)?d|passphrase|pwd|psk|credentials?))["'][ \t]+value[ \t]*=[ \t]*["'][A-Za-z0-9+\/=_.-]{16,200}["']/ nocase
@@ -101,6 +107,7 @@ rule json_credential_object_member {
     secret_group = 1
     min_entropy = 3.0
     stopwords = "secrets_core_generic_api_key"
+    stopwords_hex_min_len = 8
     allow_regex = "^<[\\w.:-]{0,40}(?i:public)|^<add[ \\t][^>]*(?i:key|name)[ \\t]*=[ \\t]*[\"'][\\w.:-]{0,40}(?i:public)|^\"[\\w.-]{0,40}(?i:public)|^\\n?[ ]{0,6}[\\w.-]{0,40}(?i:public)[\\w.-]*:|^[^0-9]+$|^[^A-Za-z]+$|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$|^[A-Za-z0-9+/=_.-]*(?i:0123456|123456789|abcdef|fedcba)|^[A-Za-z0-9+/=_.-]*(?i:\\.(?:pem|key|crt|cer|p12|pfx|jks|keystore|txt|json|ya?ml|xml|conf|cfg|ini|der|asc|gpg|pub)$)|^/(?:bin|etc|home|opt|tmp|usr|var|run|srv|mnt|data|config|app|Users|private)/"
   strings:
     $re = /"([\w.-]{0,40}(api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?keys|[\w.-]{0,40}(access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?tokens|[\w.-]{0,40}(secrets?|credentials?|creds|passwords|passphrases))"[ \t\r\n]*:[ \t\r\n]*\{[^{}]{0,2000}"[^"\r\n]{1,64}"[ \t\r\n]*:[ \t\r\n]*"[A-Za-z0-9+\/=_.-]{16,200}"/ nocase
@@ -129,6 +136,7 @@ rule yaml_credential_mapping_member {
     secret_group = 1
     min_entropy = 3.0
     stopwords = "secrets_core_generic_api_key"
+    stopwords_hex_min_len = 8
     allow_regex = "^<[\\w.:-]{0,40}(?i:public)|^<add[ \\t][^>]*(?i:key|name)[ \\t]*=[ \\t]*[\"'][\\w.:-]{0,40}(?i:public)|^\"[\\w.-]{0,40}(?i:public)|^\\n?[ ]{0,6}[\\w.-]{0,40}(?i:public)[\\w.-]*:|^[^0-9]+$|^[^A-Za-z]+$|^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$|^[A-Za-z0-9+/=_.-]*(?i:0123456|123456789|abcdef|fedcba)|^[A-Za-z0-9+/=_.-]*(?i:\\.(?:pem|key|crt|cer|p12|pfx|jks|keystore|txt|json|ya?ml|xml|conf|cfg|ini|der|asc|gpg|pub)$)|^/(?:bin|etc|home|opt|tmp|usr|var|run|srv|mnt|data|config|app|Users|private)/"
   strings:
     $re0 = /(^|\n)([\w.-]{0,40}(api|access|secret|private|auth|client|encryption|decryption|signing|master|network|security|session|app|application|account|admin|shared|license|hmac|aes|psk)[_.-]?keys|[\w.-]{0,40}(access|api|auth|bearer|refresh|session|bot|app|user|personal|private|secret|security|oauth)[_.-]?tokens|[\w.-]{0,40}(secrets?|credentials?|creds|passwords|passphrases)):[ \t]*(#[^\r\n]*)?\r?\n(([ ]+[^\r\n]*)?\r?\n){0,30}[ ]+(- )?[\w.-]{1,64}:[ \t]+['"]?[A-Za-z0-9+\/=_.-]{16,200}['"]?[ \t]*(#[^\r\n]*)?(\r?\n|$)/ nocase

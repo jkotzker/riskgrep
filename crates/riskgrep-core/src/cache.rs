@@ -11,7 +11,7 @@ use crate::model::Evidence;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{Metadata, OpenOptions, Permissions};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -21,8 +21,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Version 2 drops pre-release rows that could hold tensor names. Version 3
 /// adds the time an `evidence` row was written, which pruning needs.
 /// Version 4 stores each row as an object that can also describe a
-/// container's members, and evidence that names its member.
-const SCHEMA_VERSION: i64 = 4;
+/// container's members, and evidence that names its member. Version 5 adds
+/// whether a path allowlist applied, and a container's counts by kind.
+const SCHEMA_VERSION: i64 = 5;
 const DB_NAME: &str = "evidence.sqlite";
 /// A stat entry written less than this long after the file's mtime may predate
 /// a further edit within the same timestamp granularity; it is not trusted.
@@ -67,6 +68,8 @@ struct Row {
     evidence: Vec<CachedEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     container: Option<ContainerRow>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    path_allowlisted: bool,
 }
 
 /// Member counts of a container read whole (only those are cached): member
@@ -77,6 +80,18 @@ pub struct ContainerRow {
     pub members: u64,
     pub scanned: u64,
     pub skipped: u64,
+    /// Members a path allowlist applied to.
+    #[serde(default)]
+    pub path_allowlisted: u64,
+    /// `skipped` by kind (see [`crate::model::ContainerReport::skipped_kinds`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skipped_kinds: BTreeMap<String, u64>,
+    /// Nested containers opened, by format.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub opened_formats: BTreeMap<String, u64>,
+    /// Those of them with evidence: the members a report lists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowlisted_listed: Vec<String>,
 }
 
 /// A cached scan result.
@@ -84,6 +99,8 @@ pub struct ContainerRow {
 pub struct Entry {
     pub evidence: Vec<Evidence>,
     pub container: Option<ContainerRow>,
+    /// A path allowlist applied to the target (for a container, to a member).
+    pub path_allowlisted: bool,
 }
 
 pub struct Cache {
@@ -356,6 +373,7 @@ impl Cache {
             }
         };
         let container = row.container;
+        let path_allowlisted = row.path_allowlisted;
         row.evidence
             .into_iter()
             .map(|c| {
@@ -376,6 +394,7 @@ impl Cache {
             .map(|evidence| Entry {
                 evidence,
                 container,
+                path_allowlisted,
             })
     }
 
@@ -387,19 +406,27 @@ impl Cache {
     /// written. The time is set only here, on a miss; a cache hit never
     /// writes, so the Claude Code hook's cached-read path stays read-only.
     pub fn put_evidence_at(&self, hash: [u8; 32], bundle: &str, ev: &[Evidence], now: SystemTime) {
-        self.put_entry_at(hash, bundle, ev, None, now);
+        self.put_entry_at(hash, bundle, ev, None, false, now);
     }
 
-    /// [`Cache::put_evidence`] for a container read whole, with its member
-    /// counts.
+    /// [`Cache::put_evidence`] with a container's member counts (for a
+    /// container read whole) and whether a path allowlist applied.
     pub fn put_entry(
         &self,
         hash: [u8; 32],
         bundle: &str,
         ev: &[Evidence],
         container: Option<&ContainerRow>,
+        path_allowlisted: bool,
     ) {
-        self.put_entry_at(hash, bundle, ev, container, SystemTime::now());
+        self.put_entry_at(
+            hash,
+            bundle,
+            ev,
+            container,
+            path_allowlisted,
+            SystemTime::now(),
+        );
     }
 
     fn put_entry_at(
@@ -408,6 +435,7 @@ impl Cache {
         bundle: &str,
         ev: &[Evidence],
         container: Option<&ContainerRow>,
+        path_allowlisted: bool,
         now: SystemTime,
     ) {
         if self.failed.get() {
@@ -425,6 +453,7 @@ impl Cache {
                 })
                 .collect(),
             container: container.cloned(),
+            path_allowlisted,
         };
         let json = match serde_json::to_string(&row) {
             Ok(j) => j,

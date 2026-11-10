@@ -38,6 +38,21 @@ struct Env {
     work: tempfile::TempDir,
 }
 
+/// A copy of the hook in a directory of its own, with no `riskgrep` beside
+/// it, so its reasons offer no masked view whatever else the build put
+/// next to the original.
+fn lone_hook() -> &'static Path {
+    static HOOK: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
+    &HOOK
+        .get_or_init(|| {
+            let d = tempfile::tempdir().unwrap();
+            let p = d.path().join("riskgrep-claude");
+            fs::copy(env!("CARGO_BIN_EXE_riskgrep-claude"), &p).unwrap();
+            (d, p)
+        })
+        .1
+}
+
 const CACHE_SUBDIRS: [&str; 2] = ["Library/Caches/riskgrep", ".cache/riskgrep"];
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -115,13 +130,25 @@ impl Env {
     }
 
     fn run_raw(&self, stdin: &[u8]) -> Out {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_riskgrep-claude"))
-            .current_dir(self.dir())
+        self.run_bin(lone_hook(), stdin)
+    }
+
+    fn run_bin(&self, bin: &Path, stdin: &[u8]) -> Out {
+        self.run_bin_env(bin, stdin, &[])
+    }
+
+    fn run_bin_env(&self, bin: &Path, stdin: &[u8], env: &[(&str, &Path)]) -> Out {
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(self.dir())
             .env("HOME", self.home.path())
             .env("XDG_CACHE_HOME", self.home.path().join(".cache"))
             .env("GIT_CEILING_DIRECTORIES", self.dir().parent().unwrap())
             .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_WORK_TREE");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -137,13 +164,29 @@ impl Env {
     }
 
     fn run(&self, tool: &str, tool_input: Value) -> Out {
+        self.run_with(lone_hook(), tool, tool_input)
+    }
+
+    /// A hook time budget that a loaded machine will not use up, for tests
+    /// that need a view to finish.
+    fn long_budget(&self) {
+        let cfg = self.home.path().join(".config/riskgrep");
+        fs::create_dir_all(&cfg).unwrap();
+        fs::write(
+            cfg.join("config.toml"),
+            "[claude_code]\ntime_budget_ms = 60000\n",
+        )
+        .unwrap();
+    }
+
+    fn run_with(&self, bin: &Path, tool: &str, tool_input: Value) -> Out {
         let input = json!({
             "hook_event_name": "PreToolUse",
             "tool_name": tool,
             "tool_input": tool_input,
             "cwd": self.dir(),
         });
-        self.run_raw(input.to_string().as_bytes())
+        self.run_bin(bin, input.to_string().as_bytes())
     }
 }
 
@@ -962,6 +1005,7 @@ fn print_config_outputs_settings_block() {
     assert_eq!(h["matcher"], "^(Read|NotebookRead|Grep|Glob|Bash|mcp__.*)$");
     assert_eq!(h["hooks"][0]["command"], "riskgrep-claude");
     assert_eq!(h["hooks"][0]["timeout"], 5);
+    assert_eq!(h["hooks"][0]["onFailure"], "block");
     assert_eq!(
         v["permissions"]["deny"],
         json!([
@@ -972,6 +1016,283 @@ fn print_config_outputs_settings_block() {
     assert!(String::from_utf8(o.stderr)
         .unwrap()
         .contains("settings.json"));
+}
+
+#[test]
+fn print_config_can_leave_out_on_failure() {
+    let o = Command::new(env!("CARGO_BIN_EXE_riskgrep-claude"))
+        .args(["print-config", "--no-block-on-failure"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let h = &v["hooks"]["PreToolUse"][0]["hooks"][0];
+    assert_eq!(h["command"], "riskgrep-claude");
+    assert!(h.get("onFailure").is_none(), "{h}");
+    let o = Command::new(env!("CARGO_BIN_EXE_riskgrep-claude"))
+        .args(["print-config", "--bogus"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(3));
+    assert!(o.stdout.is_empty());
+}
+
+// ---- the masked view ----
+
+/// A copy of the hook in its own directory, beside an executable named
+/// `riskgrep` (the binary it trusts) that reports this build's version.
+/// Returns the hook and the canonical path of the trusted file.
+fn hook_beside_riskgrep(dir: &Path) -> (PathBuf, String) {
+    hook_beside_version(dir, env!("CARGO_PKG_VERSION"))
+}
+
+/// [`hook_beside_riskgrep`], with a `riskgrep` that reports `version`.
+fn hook_beside_version(dir: &Path, version: &str) -> (PathBuf, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let hook = bin.join("riskgrep-claude");
+    fs::copy(env!("CARGO_BIN_EXE_riskgrep-claude"), &hook).unwrap();
+    let riskgrep = bin.join("riskgrep");
+    fs::write(&riskgrep, format!("#!/bin/sh\necho riskgrep {version}\n")).unwrap();
+    fs::set_permissions(&riskgrep, fs::Permissions::from_mode(0o755)).unwrap();
+    let trusted = fs::canonicalize(riskgrep).unwrap();
+    (hook, trusted.to_str().unwrap().to_string())
+}
+
+#[test]
+fn a_file_flagged_only_by_its_name_is_not_offered_the_masked_view() {
+    let e = Env::new();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, _) = hook_beside_riskgrep(tools.path());
+    let f = e.write(".netrc", b"plain body text\n");
+    let (d, reason) = e
+        .run_with(&hook, "Read", json!({ "file_path": f }))
+        .decision();
+    assert_eq!(d, "ask");
+    assert!(!reason.contains("masked"), "{reason}");
+}
+
+#[test]
+fn a_masked_view_that_would_refuse_is_not_offered() {
+    // Flagged in its content, but over the limit of `riskgrep show`.
+    let e = Env::new();
+    let cfg = e.home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[show]\nmax_bytes = 8\n").unwrap();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, _) = hook_beside_riskgrep(tools.path());
+    let f = e.write("config.env", aws_file().as_bytes());
+    let (d, reason) = e
+        .run_with(&hook, "Read", json!({ "file_path": f }))
+        .decision();
+    assert_eq!(d, "deny");
+    assert!(!reason.contains("masked"), "{reason}");
+}
+
+#[test]
+fn the_offered_masked_view_asks_and_nothing_else_is_exempt() {
+    let e = Env::new();
+    e.long_budget();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_riskgrep(tools.path());
+    let f = e.write("config.env", aws_file().as_bytes());
+    let (d, reason) = e
+        .run_with(&hook, "Read", json!({ "file_path": f }))
+        .decision();
+    assert_eq!(d, "deny");
+    let cmd = format!("{trusted} show {}", f.display());
+    assert!(
+        reason.contains(&format!("For a view with every match masked, run `{cmd}`.")),
+        "{reason}"
+    );
+    // The exact shape needs the user's approval when it would print a view.
+    for c in [
+        cmd.clone(),
+        format!("{trusted} show --rule-ids --lines 2:3 config.env"),
+    ] {
+        let (d, reason) = e
+            .run_with(&hook, "Bash", json!({ "command": c }))
+            .decision();
+        assert_eq!(d, "ask", "{c}");
+        assert!(reason.contains("do not detect"), "{reason}");
+    }
+    // Other binaries named riskgrep, wrappers, and anything attached are
+    // analysed as usual, and the file they name is flagged.
+    let other = tempfile::tempdir().unwrap();
+    let decoy = other.path().join("riskgrep");
+    fs::write(&decoy, b"#!/bin/sh\n").unwrap();
+    for c in [
+        format!("{cmd} | cat"),
+        format!("{cmd}; cat config.env"),
+        format!("{cmd} > out.txt"),
+        format!("{trusted} show $(echo config.env)"),
+        format!("{trusted} scan config.env"),
+        format!("{trusted} show config.env config.env"),
+        format!("HOME=/tmp {cmd}"),
+        format!("command {cmd}"),
+        format!("{} show config.env", decoy.display()),
+        "riskgrep show config.env".to_string(),
+        "cat config.env".to_string(),
+    ] {
+        let o = e.run_with(&hook, "Bash", json!({ "command": c }));
+        assert!(!o.stdout.is_empty(), "let through: {c}");
+        let (d, _) = o.decision();
+        assert_eq!(d, "deny", "{c}");
+    }
+}
+
+#[test]
+fn a_masked_view_that_would_refuse_is_not_prompted_for() {
+    let e = Env::new();
+    e.long_budget();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_riskgrep(tools.path());
+    let clean = e.write("notes.txt", b"hello\n");
+    let named = e.write(".netrc", b"plain body text\n");
+    let dir = e.dir().join("a-directory");
+    fs::create_dir(&dir).unwrap();
+    for c in [
+        format!("{trusted} show {}", clean.display()),
+        format!("{trusted} show notes.txt"),
+        format!("{trusted} show --rule-ids --lines 1:1 notes.txt"),
+        format!("{trusted} show {}", named.display()),
+        format!("{trusted} show {}", dir.display()),
+        format!("{trusted} show no-such-file.txt"),
+    ] {
+        let o = e.run_with(&hook, "Bash", json!({ "command": c }));
+        assert!(o.stdout.is_empty(), "prompted for: {c}: {}", o.stdout);
+    }
+}
+
+#[test]
+fn a_view_refused_for_a_reason_outside_the_file_still_asks() {
+    // An archive read only in part: the scan's limits, not only the file,
+    // decide that refusal, so the user decides.
+    let e = Env::new();
+    e.long_budget();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_riskgrep(tools.path());
+    let names: Vec<String> = (0..1001).map(|i| format!("{i}.txt")).collect();
+    let members: Vec<(&str, Vec<u8>)> = names
+        .iter()
+        .map(|n| (n.as_str(), b"plain\n".to_vec()))
+        .collect();
+    e.write("many.zip", &synth::npz(&members));
+    let (d, reason) = e
+        .run_with(
+            &hook,
+            "Bash",
+            json!({ "command": format!("{trusted} show many.zip") }),
+        )
+        .decision();
+    assert_eq!(d, "ask");
+    assert!(reason.contains("do not detect"), "{reason}");
+}
+
+#[test]
+fn a_view_refused_only_for_lack_of_time_still_asks() {
+    // With no time to scan, a refusal says nothing about the real command.
+    let e = Env::new();
+    let cfg = e.home.path().join(".config/riskgrep");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[show]\ntime_budget_ms = 1\n").unwrap();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_riskgrep(tools.path());
+    e.write("notes.txt", b"hello\n");
+    let (d, reason) = e
+        .run_with(
+            &hook,
+            "Bash",
+            json!({ "command": format!("{trusted} show notes.txt") }),
+        )
+        .decision();
+    assert_eq!(d, "ask");
+    assert!(reason.contains("do not detect"), "{reason}");
+}
+
+#[test]
+fn with_git_dir_set_nothing_is_offered_and_the_view_always_asks() {
+    // `riskgrep` then asks git for the repository whose configuration it
+    // reads, so the hook cannot say what it will do.
+    let e = Env::new();
+    e.long_budget();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_riskgrep(tools.path());
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.write("notes.txt", b"hello\n");
+    let other = tempfile::tempdir().unwrap();
+    for var in ["GIT_DIR", "GIT_WORK_TREE"] {
+        let env = [(var, other.path())];
+        let run = |tool: &str, input: Value| {
+            let input = json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool,
+                "tool_input": input,
+                "cwd": e.dir(),
+            });
+            e.run_bin_env(&hook, input.to_string().as_bytes(), &env)
+        };
+        let (d, reason) = run("Read", json!({ "file_path": f })).decision();
+        assert_eq!(d, "deny", "{var}");
+        assert!(!reason.contains("masked"), "{var}: {reason}");
+        let (d, _) = run(
+            "Bash",
+            json!({ "command": format!("{trusted} show notes.txt") }),
+        )
+        .decision();
+        assert_eq!(d, "ask", "{var}");
+    }
+}
+
+#[test]
+fn a_riskgrep_of_another_version_is_not_offered_and_always_asks() {
+    let e = Env::new();
+    let tools = tempfile::tempdir().unwrap();
+    let (hook, trusted) = hook_beside_version(tools.path(), "0.0.1");
+    let f = e.write("config.env", aws_file().as_bytes());
+    let (d, reason) = e
+        .run_with(&hook, "Read", json!({ "file_path": f }))
+        .decision();
+    assert_eq!(d, "deny");
+    assert!(!reason.contains("masked"), "{reason}");
+    // The hook cannot say what another version would do, so the user decides
+    // even where this version would refuse.
+    e.write("notes.txt", b"hello\n");
+    for c in [
+        format!("{trusted} show config.env"),
+        format!("{trusted} show notes.txt"),
+    ] {
+        let (d, reason) = e
+            .run_with(&hook, "Bash", json!({ "command": c }))
+            .decision();
+        assert_eq!(d, "ask", "{c}");
+        assert!(reason.contains("do not detect"), "{reason}");
+    }
+}
+
+#[test]
+fn without_a_trusted_binary_nothing_is_offered_or_exempt() {
+    let e = Env::new();
+    let tools = tempfile::tempdir().unwrap();
+    let bin = tools.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let hook = bin.join("riskgrep-claude");
+    fs::copy(env!("CARGO_BIN_EXE_riskgrep-claude"), &hook).unwrap();
+    let f = e.write("config.env", aws_file().as_bytes());
+    let (_, reason) = e
+        .run_with(&hook, "Read", json!({ "file_path": f }))
+        .decision();
+    assert!(!reason.contains("masked"), "{reason}");
+    let fake = bin.join("riskgrep");
+    let (d, _) = e
+        .run_with(
+            &hook,
+            "Bash",
+            json!({ "command": format!("{} show config.env", fake.display()) }),
+        )
+        .decision();
+    assert_eq!(d, "deny");
 }
 
 // ---- MCP tools and Glob ----
@@ -1073,6 +1394,248 @@ fn user_added_mcp_entry_is_used() {
     let (d, _) = e.run("mcp__notes__open", json!({ "file": f })).decision();
     assert_eq!(d, "deny");
     e.run("mcp__notes__list", json!({ "file": f })).silent();
+}
+
+#[test]
+fn shared_mcp_entry_is_used() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.open]\npaths = [\"file\"]\n\n\
+         [mcp.servers.notes.tools.\"*\"]\nkind = \"none\"\n",
+    );
+    let (d, _) = e.run("mcp__notes__open", json!({ "file": f })).decision();
+    assert_eq!(d, "deny");
+    e.run("mcp__notes__list", json!({ "file": f })).silent();
+    // A tool name holding `__` after the server is one tool of that server.
+    e.run("mcp__notes__open__v2", json!({ "file": f })).silent();
+}
+
+#[test]
+fn claude_code_mcp_tools_entry_wins_over_shared_entry() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.open]\nkind = \"none\"\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__open\"]\npaths = [\"file\"]\n\n\
+         [claude_code.mcp_tools.\"mcp__filesystem__read_text_file\"]\nkind = \"none\"\n",
+    );
+    let (d, _) = e.run("mcp__notes__open", json!({ "file": f })).decision();
+    assert_eq!(d, "deny");
+    // The alias replaces a built-in entry too.
+    e.run(FS_READ, json!({ "path": f })).silent();
+    let (d, _) = e
+        .run("mcp__filesystem__read_file", json!({ "path": f }))
+        .decision();
+    assert_eq!(d, "deny");
+}
+
+const UNRESOLVED_CMD: &str = "cat \"$(printf f)\"";
+
+#[test]
+fn mcp_on_unresolved_is_separate_from_the_shell_setting() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    let tool = "mcp__other__open_file";
+    let reason = format!("RiskGrep: could not determine the files {tool} reads");
+    // `mcp.on_unresolved` asks about MCP tools only.
+    e.user_config("[mcp]\non_unresolved = \"ask\"\n");
+    assert_eq!(
+        e.run(tool, json!({ "path": f })).decision(),
+        ("ask".to_string(), reason.clone())
+    );
+    e.run("Bash", json!({ "command": UNRESOLVED_CMD })).silent();
+    // The shell setting alone still covers MCP tools, as before.
+    e.user_config("[claude_code]\non_unresolved = \"ask\"\n");
+    assert_eq!(e.run(tool, json!({ "path": f })).decision().0, "ask");
+    // ... until `mcp.on_unresolved` is set.
+    e.user_config("[claude_code]\non_unresolved = \"ask\"\n\n[mcp]\non_unresolved = \"allow\"\n");
+    e.run(tool, json!({ "path": f })).silent();
+    assert_eq!(
+        e.run("Bash", json!({ "command": UNRESOLVED_CMD }))
+            .decision()
+            .0,
+        "ask"
+    );
+    // The agent's section overrides the shared setting.
+    e.user_config(
+        "[mcp]\non_unresolved = \"ask\"\n\n[claude_code.mcp]\non_unresolved = \"deny\"\n",
+    );
+    assert_eq!(
+        e.run(tool, json!({ "path": f })).decision(),
+        ("deny".to_string(), reason)
+    );
+    e.user_config(
+        "[mcp]\non_unresolved = \"ask\"\n\n[claude_code.mcp]\non_unresolved = \"allow\"\n",
+    );
+    e.run(tool, json!({ "path": f })).silent();
+}
+
+#[test]
+fn mcp_server_entry_decision_covers_its_unmapped_tools() {
+    let e = Env::new();
+    let clean = e.write("clean.txt", b"nothing here\n");
+    let flagged = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.desktop-commander.tools.\"*\"]\ndecision = \"ask\"\n\n\
+         [mcp.servers.desktop-commander.tools.kill_process]\nkind = \"none\"\n\n\
+         [mcp.servers.notes.tools.\"*\"]\ndecision = \"deny\"\n",
+    );
+    let tool = "mcp__desktop-commander__start_process";
+    assert_eq!(
+        e.run(tool, json!({ "command": "ls" })).decision(),
+        (
+            "ask".to_string(),
+            format!("RiskGrep: the MCP configuration asks before {tool}")
+        )
+    );
+    // The server's built-in and own entries still apply.
+    e.run(
+        "mcp__desktop-commander__read_file",
+        json!({ "path": clean }),
+    )
+    .silent();
+    let (d, _) = e
+        .run(
+            "mcp__desktop-commander__read_file",
+            json!({ "path": flagged }),
+        )
+        .decision();
+    assert_eq!(d, "deny");
+    e.run("mcp__desktop-commander__kill_process", json!({ "pid": 1 }))
+        .silent();
+    // The plugin's server name is another server.
+    e.run(
+        "mcp__plugin_desktop-commander_desktop-commander__start_process",
+        json!({ "command": "ls" }),
+    )
+    .silent();
+    assert_eq!(
+        e.run("mcp__notes__open", json!({})).decision(),
+        (
+            "deny".to_string(),
+            "RiskGrep: the MCP configuration denies mcp__notes__open".to_string()
+        )
+    );
+}
+
+#[test]
+fn agent_section_decision_overrides_shared_entry() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.\"*\"]\ndecision = \"ask\"\n\n\
+         [claude_code.mcp.servers.notes.tools.\"*\"]\nkind = \"none\"\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__open\"]\ndecision = \"deny\"\n",
+    );
+    e.run("mcp__notes__list", json!({ "file": f })).silent();
+    assert_eq!(e.run("mcp__notes__open", json!({})).decision().0, "deny");
+}
+
+#[test]
+fn mcp_server_pattern_does_not_hide_a_builtin_entry() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config("[mcp.servers.\"*\".tools.\"*\"]\nkind = \"none\"\n");
+    let (d, _) = e.run(FS_READ, json!({ "path": f })).decision();
+    assert_eq!(d, "deny");
+    e.run("mcp__other__open_file", json!({ "path": f }))
+        .silent();
+}
+
+const NOTE_READ: &str = "mcp__notes__read_note";
+
+#[test]
+fn mcp_alias_star_spans_server_and_tool() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config("[claude_code.mcp_tools.\"mcp__*read*\"]\nkind = \"read\"\npaths = [\"p\"]\n");
+    let (d, _) = e.run(NOTE_READ, json!({ "p": f })).decision();
+    assert_eq!(d, "deny");
+    // The key is matched against the whole name, so it does not reach a
+    // tool whose name has no `read`.
+    e.run("mcp__notes__open", json!({ "p": f })).silent();
+}
+
+#[test]
+fn mcp_alias_patterns_apply_in_key_order() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    // `*` sorts before a letter, so the tool pattern comes first even
+    // though the other key names the server exactly.
+    e.user_config(
+        "[claude_code.mcp_tools.\"mcp__*__read_note\"]\nkind = \"read\"\npaths = [\"p\"]\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__*\"]\nkind = \"none\"\n",
+    );
+    let (d, _) = e.run(NOTE_READ, json!({ "p": f })).decision();
+    assert_eq!(d, "deny");
+    e.user_config(
+        "[claude_code.mcp_tools.\"mcp__*__read_note\"]\nkind = \"none\"\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__*\"]\nkind = \"read\"\npaths = [\"p\"]\n",
+    );
+    e.run(NOTE_READ, json!({ "p": f })).silent();
+}
+
+#[test]
+fn mcp_alias_pattern_does_not_hide_an_exact_entry() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.read_note]\npaths = [\"p\"]\n\n\
+         [claude_code.mcp_tools.\"mcp__*\"]\nkind = \"none\"\n",
+    );
+    // A built-in entry and an `[mcp]` entry naming the exact server and
+    // tool both stand; the pattern covers the rest.
+    let (d, _) = e.run(FS_READ, json!({ "path": f })).decision();
+    assert_eq!(d, "deny");
+    let (d, _) = e.run(NOTE_READ, json!({ "p": f })).decision();
+    assert_eq!(d, "deny");
+    e.run("mcp__notes__open", json!({ "p": f })).silent();
+}
+
+#[test]
+fn mcp_alias_pattern_wins_over_shared_pattern() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    e.user_config(
+        "[mcp.servers.notes.tools.\"*\"]\nkind = \"none\"\n\n\
+         [claude_code.mcp_tools.\"mcp__notes__*\"]\npaths = [\"p\"]\n",
+    );
+    let (d, _) = e.run(NOTE_READ, json!({ "p": f })).decision();
+    assert_eq!(d, "deny");
+}
+
+#[test]
+fn mcp_shared_keys_match_server_and_tool_separately() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    // A `*` in an `[mcp]` key stays within the server or the tool name.
+    e.user_config("[mcp.servers.\"*read*\".tools.\"*\"]\npaths = [\"p\"]\n");
+    e.run(NOTE_READ, json!({ "p": f })).silent();
+    // An exact server key wins over a pattern that sorts first.
+    e.user_config(
+        "[mcp.servers.\"*\".tools.read_note]\npaths = [\"p\"]\n\n\
+         [mcp.servers.notes.tools.\"*\"]\nkind = \"none\"\n",
+    );
+    e.run(NOTE_READ, json!({ "p": f })).silent();
+}
+
+#[test]
+fn mcp_plugin_server_keeps_its_own_entries() {
+    let e = Env::new();
+    let f = e.write("config.env", aws_file().as_bytes());
+    // Replacing the shared Desktop Commander entry leaves the plugin's.
+    e.user_config("[mcp.servers.desktop-commander.tools.read_file]\nkind = \"none\"\n");
+    e.run("mcp__desktop-commander__read_file", json!({ "path": f }))
+        .silent();
+    let (d, _) = e.run(DC_READ, json!({ "path": f })).decision();
+    assert_eq!(d, "deny");
+    // A user's entry for the plugin's server replaces the built-in one.
+    e.user_config(
+        "[mcp.servers.plugin_desktop-commander_desktop-commander.tools.read_file]\n\
+         kind = \"none\"\n",
+    );
+    e.run(DC_READ, json!({ "path": f })).silent();
 }
 
 #[test]
@@ -1446,4 +2009,88 @@ fn an_archive_of_only_unknown_binaries_follows_on_skipped() {
     let (d, reason) = read_decision(&e, &f, None, None);
     assert_eq!(d, "ask", "{reason}");
     assert!(reason.contains("unknown format"), "{reason}");
+}
+
+/// A file name with control characters is written escaped in the decision
+/// message, so it can neither forge a line nor move a cursor; ordinary
+/// non-ASCII names are written as they are.
+#[test]
+fn decision_message_escapes_control_characters_in_file_names() {
+    let names = [
+        ("nl\nforged.env", "nl\\nforged.env"),
+        ("esc\u{1b}[2Jx.env", "esc\\u{1b}[2Jx.env"),
+        ("tab\tx.env", "tab\\tx.env"),
+        ("caf\u{e9}.env", "caf\u{e9}.env"),
+        ("\u{6a21}\u{578b}.env", "\u{6a21}\u{578b}.env"),
+        ("bidi\u{202e}gnp.env", "bidi\\u{202e}gnp.env"),
+        ("sep\u{2028}forged.env", "sep\\u{2028}forged.env"),
+        ("sep\u{2029}x.env", "sep\\u{2029}x.env"),
+        ("iso\u{2066}x\u{2069}.env", "iso\\u{2066}x\\u{2069}.env"),
+        ("mark\u{200f}\u{61c}.env", "mark\\u{200f}\\u{61c}.env"),
+        (
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd}.env",
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd}.env",
+        ),
+    ];
+    for (name, shown) in names {
+        let e = Env::new();
+        let f = e.write(name, aws_file().as_bytes());
+        let (d, reason) = e.run("Read", json!({ "file_path": f })).decision();
+        assert_eq!(d, "deny", "{name:?}");
+        assert!(
+            reason.contains(&format!("RiskGrep: {}/{shown} scored", e.dir().display())),
+            "{name:?}: {reason:?}"
+        );
+        assert!(
+            !reason.contains('\n') && !reason.contains('\u{1b}') && !reason.contains('\t'),
+            "{reason:?}"
+        );
+    }
+}
+
+#[test]
+fn unscanned_message_escapes_control_characters_in_file_names() {
+    if running_as_root() {
+        return;
+    }
+    let e = Env::new();
+    e.user_config("[claude_code]\non_error = \"deny\"\n");
+    let f = e.write("locked\nforged\u{1b}[31m.txt", b"hello\n");
+    fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let (d, reason) = e.run("Read", json!({ "file_path": f })).decision();
+    assert_eq!(d, "deny");
+    assert!(
+        reason.contains("locked\\nforged\\u{1b}[31m.txt"),
+        "{reason:?}"
+    );
+    assert!(
+        !reason.contains('\n') && !reason.contains('\u{1b}'),
+        "{reason:?}"
+    );
+}
+
+#[test]
+fn claude_code_path_allowlist_overrides_the_top_level_setting() {
+    // A key in a vendored file: gitleaks' global path allowlist skips it by
+    // default, so a `Read` gets no decision; `[claude_code] path_allowlist =
+    // false` makes the converted rules read it, whatever the top level says.
+    for (config, denied) in [
+        ("", false),
+        (
+            "path_allowlist = false\n[claude_code]\npath_allowlist = true\n",
+            false,
+        ),
+        ("[claude_code]\npath_allowlist = false\n", true),
+    ] {
+        let e = Env::new();
+        e.git_init();
+        e.user_config(config);
+        let p = e.write("node_modules/pkg/index.js", aws_file().as_bytes());
+        let out = e.run("Read", json!({ "file_path": p }));
+        if denied {
+            assert_eq!(out.decision().0, "deny", "{config}");
+        } else {
+            out.silent();
+        }
+    }
 }

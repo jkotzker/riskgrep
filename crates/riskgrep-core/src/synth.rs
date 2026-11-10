@@ -217,6 +217,46 @@ pub fn gzip(data: &[u8]) -> Vec<u8> {
     w.finish().expect("gzip finish")
 }
 
+/// A valid PNG image of one transparent pixel: the signature, then the
+/// `IHDR`, `IDAT`, and `IEND` chunks, each with its checksum.
+pub fn png_1x1() -> Vec<u8> {
+    fn crc32(bytes: impl Iterator<Item = u8>) -> u32 {
+        let mut crc = !0u32;
+        for b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let crc = crc32(kind.iter().chain(data).copied());
+        out.extend_from_slice(&crc.to_be_bytes());
+    }
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    // Width 1, height 1, 8 bits per channel, RGBA, no interlacing.
+    chunk(&mut out, b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+    // One scanline: filter type 0 and four zero bytes, in a stored zlib
+    // block (the Adler-32 of five bytes 0, 0, 0, 0, 0 is 0x0005_0001).
+    chunk(
+        &mut out,
+        b"IDAT",
+        &[
+            0x78, 0x01, 0x01, 0x05, 0x00, 0xFA, 0xFF, 0, 0, 0, 0, 0, 0x00, 0x05, 0x00, 0x01,
+        ],
+    );
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
 /// A safetensors file from `(name, dtype, shape)` triples, with random data.
 /// `dtype` uses safetensors names (`F32`, `I64`, ...).
 pub fn safetensors(tensors: &[(&str, &str, &[u64])]) -> Vec<u8> {

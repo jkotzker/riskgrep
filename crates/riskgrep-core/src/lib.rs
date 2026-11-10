@@ -6,6 +6,7 @@ pub mod container;
 pub mod encoding;
 pub mod engine;
 pub mod lines;
+pub mod mcp;
 pub mod meta;
 pub mod model;
 pub mod paths;
@@ -16,6 +17,7 @@ pub mod ruleset;
 mod ruleset_digest;
 pub mod scanner;
 pub mod score;
+pub mod show;
 pub mod suppress;
 #[doc(hidden)]
 pub mod synth;

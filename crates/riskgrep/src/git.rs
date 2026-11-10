@@ -302,15 +302,7 @@ fn split_sections(patch: &[u8]) -> Vec<&[u8]> {
 
 /// Lossy path text with control characters escaped.
 fn display(path: &[u8]) -> String {
-    let mut s = String::new();
-    for ch in String::from_utf8_lossy(path).chars() {
-        if ch.is_control() {
-            let _ = write!(s, "{}", ch.escape_default());
-        } else {
-            s.push(ch);
-        }
-    }
-    s
+    riskgrep_core::model::escape_controls(&String::from_utf8_lossy(path)).into_owned()
 }
 
 /// One line per category at or above its `block_at`, or `None` when the
@@ -597,6 +589,7 @@ mod tests {
             text: true,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         };
         assert_eq!(offences("x", &t(79.96), &cfg).len(), 1);
         assert!(offences("x", &t(79.94), &cfg).is_empty());
@@ -636,6 +629,7 @@ mod tests {
             text: false,
             container: None,
             read_failed: false,
+            path_allowlisted: false,
         };
         assert_eq!(
             offences("backup.zip", &t, &cfg),

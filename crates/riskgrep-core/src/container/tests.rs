@@ -439,6 +439,14 @@ fn reasons_never_name_members() {
 #[test]
 fn names_are_escaped_and_capped() {
     assert_eq!(escape_name("a\nb\tc", 1), "a\\nb\\tc");
+    assert_eq!(
+        escape_name("a\u{202e}b\u{2028}c", 1),
+        "a\\u{202e}b\\u{2028}c"
+    );
+    assert_eq!(
+        escape_name("\u{5e9}\u{5dc}\u{5d5}\u{5dd}", 1),
+        "\u{5e9}\u{5dc}\u{5d5}\u{5dd}"
+    );
     assert_eq!(escape_name("odd!/name", 1), "odd!!/name");
     // A trailing `!` is escaped too, so `a!` joined to `x` is `a!!!/x`,
     // never the escaped single name `a!/x`.
