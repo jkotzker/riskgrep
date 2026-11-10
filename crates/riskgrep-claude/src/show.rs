@@ -101,6 +101,22 @@ pub struct MaskedView {
     pub rule_ids: bool,
 }
 
+impl MaskedView {
+    /// The options that decide whether the command shows the file or
+    /// refuses: its marker. `--lines` only selects lines of a view.
+    pub fn options(&self) -> riskgrep_core::show::ShowOptions {
+        use riskgrep_core::show::Marker;
+        riskgrep_core::show::ShowOptions {
+            marker: if self.rule_ids {
+                Marker::RuleIds
+            } else {
+                Marker::Fixed
+            },
+            lines: None,
+        }
+    }
+}
+
 /// `command` as a masked view, or `None` when it does not have the exempt
 /// shape.
 pub fn masked_view(command: &str) -> Option<MaskedView> {
@@ -340,6 +356,17 @@ mod tests {
         ] {
             assert!(!is_masked_view(c, T), "{c:?}");
         }
+    }
+
+    #[test]
+    fn a_masked_view_is_checked_with_its_own_marker() {
+        use riskgrep_core::show::Marker;
+        let v = masked_view("/opt/rg/bin/riskgrep show --rule-ids --lines 2:3 a.env").unwrap();
+        let o = v.options();
+        assert_eq!(o.marker, Marker::RuleIds);
+        assert_eq!(o.lines, None, "lines do not change whether it is refused");
+        let v = masked_view("/opt/rg/bin/riskgrep show a.env").unwrap();
+        assert_eq!(v.options().marker, Marker::Fixed);
     }
 
     #[test]

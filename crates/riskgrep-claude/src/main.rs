@@ -16,7 +16,7 @@ use riskgrep_claude::resolve;
 use riskgrep_claude::show::{masked_view, reports_version, trusted_riskgrep, MaskedView};
 use riskgrep_core::config::{self, Action, Config, Mode, Overrides};
 use riskgrep_core::mcp::McpPlan;
-use riskgrep_core::show::{show_file, Marker, ShowOptions};
+use riskgrep_core::show::{show_file, RefusalKind, ShowOptions};
 use riskgrep_core::{Report, RiskGrep};
 use serde_json::json;
 use std::cell::OnceCell;
@@ -193,10 +193,12 @@ enum Preview {
 }
 
 /// What `riskgrep show` on `target` would do, found by making the view here
-/// and dropping it, in what is left of the hook's budget. The command has
-/// its own, longer budget, so a refusal counts only when it came before this
-/// check's budget ran out: only then can the budget not have caused it.
-fn preview(target: &str, marker: Marker, root: Option<&Path>, deadline: Instant) -> Preview {
+/// and dropping it, in what is left of the hook's budget. A refusal counts
+/// only when the file and the rules decided it ([`RefusalKind::File`]),
+/// since anything else may go the other way when the command runs, and
+/// only when it came before this check's budget ran out: the command has
+/// its own, longer budget.
+fn preview(target: &str, opts: ShowOptions, root: Option<&Path>, deadline: Instant) -> Preview {
     // With either set, `riskgrep` asks git for the repository whose
     // configuration it reads, which the hook does not.
     if std::env::var_os("GIT_DIR").is_some() || std::env::var_os("GIT_WORK_TREE").is_some() {
@@ -212,25 +214,23 @@ fn preview(target: &str, marker: Marker, root: Option<&Path>, deadline: Instant)
     cfg.time_budget = cfg.time_budget.min(left);
     let budget = cfg.time_budget;
     let path = PathBuf::from(target);
-    let opts = ShowOptions {
-        marker,
-        lines: None,
-    };
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("riskgrep-show".into())
         .stack_size(WORKER_STACK)
         .spawn(move || {
-            let shown = show_file(&cfg, &path, &opts, riskgrep_core::paths::cache_dir()).is_ok();
+            let shown = show_file(&cfg, &path, &opts, riskgrep_core::paths::cache_dir())
+                .map(|_| ())
+                .map_err(|r| r.kind);
             let _ = tx.send(shown);
         });
     if spawned.is_err() {
         return Preview::Unknown;
     }
     match rx.recv_timeout(left) {
-        Ok(true) => Preview::Shows,
-        Ok(false) if started.elapsed() < budget => Preview::Refuses,
+        Ok(Ok(())) => Preview::Shows,
+        Ok(Err(RefusalKind::File)) if started.elapsed() < budget => Preview::Refuses,
         _ => Preview::Unknown,
     }
 }
@@ -255,7 +255,7 @@ fn masked_view_for(
     let bin = bin
         .get_or_init(|| trusted_riskgrep().filter(|b| same_version(b, deadline)))
         .clone()?;
-    (preview(target, Marker::Fixed, root, deadline) == Preview::Shows).then_some(bin)
+    (preview(target, ShowOptions::default(), root, deadline) == Preview::Shows).then_some(bin)
 }
 
 /// The decision for a masked view by the trusted binary: no decision when
@@ -263,13 +263,8 @@ fn masked_view_for(
 /// the user's. A `riskgrep` of another version may not do what this build
 /// expects, so it always asks.
 fn masked_view_decision(view: &MaskedView, root: Option<&Path>, deadline: Instant) -> Decision {
-    let marker = if view.rule_ids {
-        Marker::RuleIds
-    } else {
-        Marker::Fixed
-    };
     if same_version(&view.binary, deadline)
-        && preview(&view.file, marker, root, deadline) == Preview::Refuses
+        && preview(&view.file, view.options(), root, deadline) == Preview::Refuses
     {
         return Decision::NoOpinion;
     }
