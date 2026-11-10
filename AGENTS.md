@@ -71,6 +71,7 @@ Anything private to a contributor or machine (plans, notes, scratch output, loca
 
 - Open a pull request to `main`; nothing is pushed to `main` directly.
 - Pull requests are merged with merge commits only (no squash or rebase merges).
+- Agents open pull requests and leave merging to a maintainer: an agent never merges a pull request, including its own, even when it has permission to.
 - CI must pass: `test (macos-latest)`, `test (ubuntu-latest)`, `riskgrep scan`, and `instruction counts`.
 - Commit subjects are under 72 characters and describe the change technically.
 
