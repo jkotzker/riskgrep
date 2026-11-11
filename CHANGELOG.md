@@ -4,6 +4,10 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Fixed
+
+- A `-wal` file whose header does not parse is handled as one whose header does. Scanned by itself it was `skipped` as a binary file of unknown format and is now `unscanned` (`sqlite write-ahead log not read`), and as an archive member beside its database it was counted as skipped, leaving the archive `scanned`, and is now not read, so the archive is `partial`. Beside its database on disk it already made the database `partial`, since that check looks only at the file's size. Any binary file whose name ends in `-wal` after a database's name counts; a text file so named is still scanned as text (`cargo test -p riskgrep-core --test container_sqlite whatever_its_header`) (#103). `riskgrep-core`: new function `container::sqlite::is_wal_name`.
+
 ## [1.3.0] – 2026-11-08
 
 ### Upgrading
