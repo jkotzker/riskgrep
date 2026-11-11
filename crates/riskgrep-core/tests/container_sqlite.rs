@@ -375,14 +375,25 @@ fn a_log_file_scanned_by_itself_is_unscanned() {
 
 // ---- A `-wal` file whatever its header (#103) ------------------------------
 
-/// The bytes of a non-empty `-wal` file: one that starts with the log's
-/// magic, and one whose header does not parse.
-fn wal_files() -> [(&'static str, Vec<u8>); 2] {
+/// The bytes of non-empty `-wal` files: one that starts with the log's
+/// magic, one whose header does not parse, one with no NUL byte that would
+/// otherwise read as text, and one that would otherwise read as UTF-16 text.
+fn wal_files() -> [(&'static str, Vec<u8>); 4] {
     let mut valid = b"\x37\x7f\x06\x82\x00\x2d\xe2\x18".to_vec();
     valid.resize(4096, 0);
     let mut invalid = b"\x01\x02\x03\x04 not a log header".to_vec();
     invalid.resize(4096, 0);
-    [("valid", valid), ("invalid", invalid)]
+    let no_nul: Vec<u8> = (0x80..=0xffu8).cycle().take(4096).collect();
+    let mut utf16 = b"\xff\xfe".to_vec();
+    for c in "plain text\n".repeat(200).encode_utf16() {
+        utf16.extend_from_slice(&c.to_le_bytes());
+    }
+    [
+        ("valid", valid),
+        ("invalid", invalid),
+        ("invalid without NUL", no_nul),
+        ("UTF-16 text", utf16),
+    ]
 }
 
 fn target<'r>(r: &'r Report, name: &str) -> &'r TargetReport {
@@ -403,15 +414,72 @@ fn a_wal_file_alone_is_unscanned_whatever_its_header() {
         let reason = unscanned(only(&r));
         assert!(reason.contains("write-ahead log"), "{header}: {reason}");
     }
-    // A text file so named is scanned as text.
+}
+
+#[test]
+fn a_text_file_named_as_a_wal_is_unscanned() {
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("notes-wal");
     fs::write(&p, b"plain text\n").unwrap();
     age(&p);
+    let r = scan(&mut scanner(), &p);
+    let reason = unscanned(only(&r));
+    assert!(reason.contains("write-ahead log not read"), "{reason}");
+}
+
+#[test]
+fn an_empty_wal_file_is_not_a_log() {
+    // Alone, it is read as the empty file it is.
+    let d = tempfile::tempdir().unwrap();
+    let wal = d.path().join("app.db-wal");
+    fs::write(&wal, b"").unwrap();
+    age(&wal);
+    assert_eq!(
+        only(&scan(&mut scanner(), &wal)).status,
+        TargetStatus::Scanned
+    );
+    // Beside its database, it leaves the database whole.
+    let p = db(
+        d.path(),
+        "app.db",
+        "CREATE TABLE t(v TEXT); INSERT INTO t VALUES ('ok');",
+    );
     assert_eq!(
         only(&scan(&mut scanner(), &p)).status,
         TargetStatus::Scanned
     );
+    // In an archive, beside its database, it leaves the archive whole.
+    let zp = d.path().join("empty.zip");
+    let members = [
+        ("data/app.db", fs::read(&p).unwrap()),
+        ("data/app.db-wal", Vec::new()),
+    ];
+    fs::write(&zp, synth::zip(&members)).unwrap();
+    age(&zp);
+    assert_eq!(
+        only(&scan(&mut scanner(), &zp)).status,
+        TargetStatus::Scanned
+    );
+}
+
+#[test]
+fn a_database_named_as_a_wal_is_still_read() {
+    let d = tempfile::tempdir().unwrap();
+    let src = db(
+        d.path(),
+        "app.db",
+        &format!(
+            "CREATE TABLE t(v TEXT); INSERT INTO t VALUES ('{}');",
+            aws(7)
+        ),
+    );
+    let p = d.path().join("odd.db-wal");
+    fs::rename(&src, &p).unwrap();
+    age(&p);
+    let r = scan(&mut scanner(), &p);
+    let t = only(&r);
+    assert_eq!(t.status, TargetStatus::Scanned);
+    assert!(t.scores[&secret()] >= 80.0, "{:?}", t.scores);
 }
 
 #[test]
