@@ -378,6 +378,12 @@ pub fn classify(name: &str, head: &[u8]) -> FileClass {
 
 /// Classify a file from its name, first bytes (the sniff window), and size.
 pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
+    // A non-empty file named as a database's write-ahead log is one, whatever
+    // its content: the database reader reports it not read, unless it holds
+    // a database's header, which is read as a database.
+    if size > 0 && crate::container::sqlite::is_wal_name(name) {
+        return FileClass::Container(ContainerKind::Sqlite);
+    }
     if head.starts_with(&[0x93, b'N', b'U', b'M', b'P', b'Y']) {
         return FileClass::KnownBinary(Known::Npy);
     }
@@ -439,12 +445,6 @@ pub fn classify_sized(name: &str, head: &[u8], size: u64) -> FileClass {
         return FileClass::EncodedText(e);
     }
     if head.contains(&0) {
-        // A binary file named as a database's write-ahead log is one, even
-        // when its header does not parse: the database reader reports it
-        // not read, as it does a log whose header does.
-        if crate::container::sqlite::is_wal_name(name) {
-            return FileClass::Container(ContainerKind::Sqlite);
-        }
         FileClass::UnknownBinary
     } else {
         FileClass::Text

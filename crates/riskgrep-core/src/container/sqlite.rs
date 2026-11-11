@@ -65,8 +65,9 @@ pub fn is_log(head: &[u8]) -> bool {
 
 /// Whether `name` (a file name or a container member's path) is named as a
 /// database's write-ahead log is: the database's name followed by `-wal`.
-/// Such a file is a log whatever its header holds, as the check beside a
-/// database ([`Extractor::beside`]) takes it to be.
+/// Such a file, when not empty, is a log whatever it holds, unless it holds
+/// a database's header, as the check beside a database
+/// ([`Extractor::beside`]) takes it to be.
 pub fn is_wal_name(name: &str) -> bool {
     let base = name.rsplit('/').next().unwrap_or(name);
     base.len() > WAL_SUFFIX.len() && base.ends_with(WAL_SUFFIX)
