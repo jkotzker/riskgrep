@@ -605,6 +605,7 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "keepass_xml",
     "keepass_csv",
     "keepassxc_csv",
+    "keepassxc_csv_six",
     "dashlane_csv",
     "dashlane_json",
     "keeper_json",
@@ -650,6 +651,7 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "firefox_csv_header_only",
     "keepass_xml_no_password",
     "keepass_csv_header_only",
+    "keepassxc_csv_six_header_only",
     "dashlane_json_no_password",
     "keeper_json_unrelated",
     "protonpass_csv_header_only",
@@ -661,6 +663,7 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "otpauth_encoded_no_secret",
     "firefox_csv_bom_crlf",
     "keepassxc_csv_bom_crlf",
+    "keepassxc_csv_six_bom_crlf",
     "protonpass_csv_bom_crlf",
     "dashlane_json_bom_crlf",
 ];
@@ -1467,6 +1470,24 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
                     l.name, l.user, l.password, l.url
                 )
                 .unwrap();
+            }
+        }
+        // The six columns KeePassXC wrote before TOTP, Icon, Last Modified,
+        // and Created were added (CsvExporter.cpp at tags 2.5.4 and 2.6.0).
+        "keepassxc_csv_six" | "keepassxc_csv_six_header_only" => {
+            let head = ["Group", "Title", "Username", "Password", "URL", "Notes"]
+                .map(|c| format!("\"{c}\""))
+                .join(",");
+            writeln!(out, "{head}").unwrap();
+            if kind == "keepassxc_csv_six" {
+                for l in logins(&mut r, 5) {
+                    writeln!(
+                        out,
+                        "\"Root/General\",\"{}\",\"{}\",\"{}\",\"{}\",\"\"",
+                        l.name, l.user, l.password, l.url
+                    )
+                    .unwrap();
+                }
             }
         }
         // Dashlane credentials export (`credentials.csv`).
