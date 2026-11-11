@@ -1473,7 +1473,7 @@ pub fn credential_file(kind: &str, seed: u64) -> Vec<u8> {
             }
         }
         // The six columns KeePassXC wrote before TOTP, Icon, Last Modified,
-        // and Created were added (CsvExporter.cpp at tags 2.5.4 and 2.6.0).
+        // and Created were added (CsvExporter.cpp at tags 2.4.0 to 2.6.2).
         "keepassxc_csv_six" | "keepassxc_csv_six_header_only" => {
             let head = ["Group", "Title", "Username", "Password", "URL", "Notes"]
                 .map(|c| format!("\"{c}\""))

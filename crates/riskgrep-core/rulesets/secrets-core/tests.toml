@@ -815,7 +815,7 @@ path = "Database.csv"
 expect = 95
 
 [[case]]
-# The six-column layout of KeePassXC 2.5 and 2.6.0.
+# The six-column layout of KeePassXC 2.4.0 to 2.6.2.
 rule = "keepassxc_csv_export"
 synth = "file:keepassxc_csv_six"
 path = "Database.csv"
