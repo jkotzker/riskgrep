@@ -126,6 +126,12 @@ pub struct ScanArgs {
     /// --on-error
     #[arg(long, value_enum, default_value = "error")]
     pub on_partial: OnPartial,
+    /// What a skipped target (status skipped: an image, a binary of unknown
+    /// format, an archive holding nothing else, a symlink, or a file that is
+    /// not regular) does to the exit status, unless a score already met
+    /// --fail-at: `block` exits 2
+    #[arg(long, value_enum, default_value = "allow")]
+    pub on_skipped: OnError,
     /// Whether rulesets' path allowlists apply (gitleaks' global path
     /// allowlist: vendored code, lock files, image and document names), which
     /// the converted secret rules skip. Default: the `path_allowlist` setting
