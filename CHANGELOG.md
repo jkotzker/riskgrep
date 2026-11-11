@@ -4,6 +4,10 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Upgrading
+
+- Any non-empty file named `<name>-wal` is now taken to be a SQLite write-ahead log, whatever it holds, and is reported `unscanned` (`sqlite write-ahead log not read`) unless it starts with a database's header. A binary file so named was `skipped`, and `riskgrep scan --on-error block` exited 0 for it; it now exits 2. A text file so named was scanned and now is not read. How a file is read when its name and its content disagree is decided in general in #146; see `docs/known-limitations.md`, "Any non-empty file named `<name>-wal` is taken to be a SQLite write-ahead log".
+
 ### Fixed
 
 - A `-wal` file is handled by its name, whatever its content. Any non-empty file whose name is a database's name followed by `-wal` is a write-ahead log: scanned by itself it is `unscanned` (`sqlite write-ahead log not read`), and as an archive member it is not read, so the archive holding it beside its database is `partial`. Before, one whose header did not parse was `skipped` as a binary file of unknown format, or scanned as text when it held no NUL byte or read as UTF-16, and in an archive it left the archive `scanned`. A text file so named is now not scanned and is reported `unscanned`. A file holding a database's header is still read as a database, and a zero-byte `-wal` file is unaffected. Beside its database on disk, a non-empty `-wal` file already made the database `partial`, since that check looks only at the file's size (`cargo test -p riskgrep-core --test container_sqlite wal`) (#103). `riskgrep-core`: new function `container::sqlite::is_wal_name`.
