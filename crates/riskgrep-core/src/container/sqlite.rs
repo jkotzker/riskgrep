@@ -63,6 +63,19 @@ pub fn is_log(head: &[u8]) -> bool {
     WAL_MAGIC.iter().any(|m| head.starts_with(*m)) || head.starts_with(JOURNAL_MAGIC)
 }
 
+/// Whether `name` (a file name or a container member's path) is named as a
+/// database's write-ahead log is: the database's name followed by `-wal`.
+/// Such a file, when not empty, is a log whatever it holds, unless it holds
+/// a database's header, as the check beside a database
+/// ([`Extractor::beside`]) takes it to be.
+pub fn is_wal_name(name: &str) -> bool {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    base.len() > WAL_SUFFIX.len() && base.ends_with(WAL_SUFFIX)
+}
+
+/// The suffix SQLite adds to a database's name to name its write-ahead log.
+const WAL_SUFFIX: &str = "-wal";
+
 pub struct Sqlite;
 
 pub static SQLITE: Sqlite = Sqlite;
@@ -114,15 +127,21 @@ struct Db<'a> {
 impl<'a> Db<'a> {
     /// Read the header. `Err` when this is not a database that can be read,
     /// which includes one encrypted past its first bytes. Also returns the
-    /// bytes the header's page count does not account for.
-    fn open(src: &'a dyn Source, size: u64) -> Result<(Db<'a>, u64), ContainerError> {
+    /// bytes the header's page count does not account for. `wal_named`: the
+    /// file is named as a write-ahead log, so it is one unless it holds a
+    /// database's header.
+    fn open(
+        src: &'a dyn Source,
+        size: u64,
+        wal_named: bool,
+    ) -> Result<(Db<'a>, u64), ContainerError> {
         let unreadable =
             || ContainerError("sqlite header not readable: encrypted or corrupt".into());
         let head = src
             .range(0, size.min(HEADER as u64))
             .map_err(|_| unreadable())?;
         if !head.starts_with(MAGIC) {
-            if WAL_MAGIC.iter().any(|m| head.starts_with(*m)) {
+            if wal_named || WAL_MAGIC.iter().any(|m| head.starts_with(*m)) {
                 return Err(ContainerError("sqlite write-ahead log not read".into()));
             }
             if head.starts_with(JOURNAL_MAGIC) {
@@ -953,7 +972,7 @@ impl Extractor for Sqlite {
             p
         };
         let mut out = Vec::new();
-        if fs::metadata(named("-wal")).is_ok_and(|m| m.len() > 0) {
+        if fs::metadata(named(WAL_SUFFIX)).is_ok_and(|m| m.len() > 0) {
             out.push((WAL_MEMBER, "write-ahead log beside the database"));
         }
         if journal_is_live(Path::new(&named("-journal"))) {
@@ -968,7 +987,7 @@ impl Extractor for Sqlite {
         size: u64,
         walk: &mut dyn Walk,
     ) -> Result<(), ContainerError> {
-        let (db, outside) = Db::open(src, size)?;
+        let (db, outside) = Db::open(src, size, is_wal_name(walk.own_name()))?;
         let not_readable =
             || ContainerError("sqlite page 1 not readable: encrypted or corrupt".into());
         let first = db.page(1).ok_or_else(not_readable)?;
@@ -1480,5 +1499,16 @@ mod tests {
         assert!(is_log(WAL_MAGIC[1]));
         assert!(is_log(JOURNAL_MAGIC));
         assert!(!is_log(MAGIC));
+    }
+
+    #[test]
+    fn a_wal_name_is_a_name_followed_by_the_suffix() {
+        assert!(is_wal_name("app.db-wal"));
+        assert!(is_wal_name("data/app.db-wal"));
+        assert!(!is_wal_name("-wal"));
+        assert!(!is_wal_name("data/-wal"));
+        assert!(!is_wal_name("app.db-wal/x"));
+        assert!(!is_wal_name("app.db-wal.bak"));
+        assert!(!is_wal_name("app.db"));
     }
 }
