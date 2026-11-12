@@ -173,7 +173,12 @@ pub fn scan(a: ScanArgs) -> Result<i32, CliError> {
         OnPartial::Allow => OnError::Allow,
         OnPartial::Block => OnError::Block,
     };
-    let code = exit_code(&report, &thresholds, on_error, on_partial);
+    let actions = Actions {
+        on_error,
+        on_partial,
+        on_skipped: a.on_skipped,
+    };
+    let code = exit_code(&report, &thresholds, actions);
     match written.and_then(|()| stdout.flush()) {
         // The reader closed the pipe on purpose: no message, and the exit
         // code the scan computed still applies (a gate must not pass).
@@ -195,15 +200,23 @@ fn merge(mut parts: Vec<Report>) -> Report {
     Report::from_targets(&version, &bundle, targets)
 }
 
+/// What each status of a target that was not read whole does to the exit
+/// status, unless a score already met its threshold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Actions {
+    /// A target that could not be scanned (status unscanned).
+    pub on_error: OnError,
+    /// A target with content that was not read (status partial).
+    pub on_partial: OnError,
+    /// A target that was not read (status skipped).
+    pub on_skipped: OnError,
+}
+
 /// 1 when a score meets its threshold (`meets_threshold`), else 2 when a target is
-/// unscanned and `on_error` blocks or part of a target's content was not read
-/// ([`riskgrep_core::TargetReport::unseen_part`]) and `on_partial` blocks, else 0.
-pub fn exit_code(
-    report: &Report,
-    thresholds: &BTreeMap<String, f64>,
-    on_error: OnError,
-    on_partial: OnError,
-) -> i32 {
+/// unscanned and `on_error` blocks, part of a target's content was not read
+/// ([`riskgrep_core::TargetReport::unseen_part`]) and `on_partial` blocks, or a
+/// target was skipped and `on_skipped` blocks, else 0.
+pub fn exit_code(report: &Report, thresholds: &BTreeMap<String, f64>, actions: Actions) -> i32 {
     let exceeded = report.targets.iter().any(|t| {
         thresholds.iter().any(|(cat, n)| {
             t.scores
@@ -214,10 +227,13 @@ pub fn exit_code(
     if exceeded {
         return EXIT_THRESHOLD;
     }
-    if on_error == OnError::Block && report.summary.unscanned > 0 {
+    if actions.on_error == OnError::Block && report.summary.unscanned > 0 {
         return EXIT_UNSCANNED;
     }
-    if on_partial == OnError::Block && report.summary.partial > 0 {
+    if actions.on_partial == OnError::Block && report.summary.partial > 0 {
+        return EXIT_UNSCANNED;
+    }
+    if actions.on_skipped == OnError::Block && report.summary.skipped > 0 {
         return EXIT_UNSCANNED;
     }
     EXIT_OK
@@ -285,6 +301,7 @@ pub fn baseline(a: BaselineArgs) -> Result<i32, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::OnError::{Allow, Block};
     use riskgrep_core::TargetReport;
 
     fn t(status: TargetStatus, secret: f64) -> TargetReport {
@@ -301,6 +318,30 @@ mod tests {
         }
     }
 
+    /// Every action `allow`; a test names the ones it sets to `block`.
+    const ALLOW: Actions = Actions {
+        on_error: Allow,
+        on_partial: Allow,
+        on_skipped: Allow,
+    };
+    const BLOCK_ERROR: Actions = Actions {
+        on_error: Block,
+        ..ALLOW
+    };
+    const BLOCK_PARTIAL: Actions = Actions {
+        on_partial: Block,
+        ..ALLOW
+    };
+    const BLOCK_SKIPPED: Actions = Actions {
+        on_skipped: Block,
+        ..ALLOW
+    };
+    const BLOCK_ERROR_PARTIAL: Actions = Actions {
+        on_error: Block,
+        on_partial: Block,
+        ..ALLOW
+    };
+
     fn th(n: f64) -> BTreeMap<String, f64> {
         BTreeMap::from([("secret".to_string(), n)])
     }
@@ -309,17 +350,14 @@ mod tests {
     fn exit_codes() {
         let un = TargetStatus::Unscanned { reason: "r".into() };
         let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 80.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 1);
-        assert_eq!(exit_code(&r, &th(80.1), OnError::Block, OnError::Allow), 0);
-        assert_eq!(
-            exit_code(&r, &BTreeMap::new(), OnError::Block, OnError::Allow),
-            0
-        );
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_ERROR), 1);
+        assert_eq!(exit_code(&r, &th(80.1), BLOCK_ERROR), 0);
+        assert_eq!(exit_code(&r, &BTreeMap::new(), BLOCK_ERROR), 0);
         let r = Report::from_targets("0", "b", vec![t(un.clone(), 0.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 2);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Allow), 0);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_ERROR), 2);
+        assert_eq!(exit_code(&r, &th(80.0), ALLOW), 0);
         let r = Report::from_targets("0", "b", vec![t(un, 0.0), t(TargetStatus::Scanned, 90.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 1);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_ERROR), 1);
     }
 
     #[test]
@@ -342,22 +380,37 @@ mod tests {
             listed: vec![],
         });
         let r = Report::from_targets("0", "b", vec![c]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Block), 2);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_PARTIAL), 2);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_ERROR), 0);
         // So is a file with content that could not be read, such as an `.npz`.
         let mut gap = t(p.clone(), 0.0);
         gap.read_failed = true;
         let r = Report::from_targets("0", "b", vec![gap]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Block), 2);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_PARTIAL), 2);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_ERROR), 0);
         // So is a file read in part, such as sampled text.
         let r = Report::from_targets("0", "b", vec![t(p.clone(), 0.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Allow, OnError::Block), 2);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_PARTIAL), 2);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_ERROR), 0);
         // A score at its threshold keeps its status either way.
         let r = Report::from_targets("0", "b", vec![t(p, 90.0)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Block), 1);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 1);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_ERROR_PARTIAL), 1);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_ERROR), 1);
+    }
+
+    #[test]
+    fn skipped_targets_follow_on_skipped() {
+        let s = TargetStatus::Skipped {
+            reason: "png image not scanned in v1".into(),
+        };
+        let r = Report::from_targets("0", "b", vec![t(s.clone(), 0.0)]);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_SKIPPED), 2);
+        assert_eq!(exit_code(&r, &BTreeMap::new(), BLOCK_SKIPPED), 2);
+        // on_error and on_partial do not reach a skipped target.
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_ERROR_PARTIAL), 0);
+        // A score at its threshold keeps its status.
+        let r = Report::from_targets("0", "b", vec![t(s, 0.0), t(TargetStatus::Scanned, 90.0)]);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_SKIPPED), 1);
     }
 
     #[test]
@@ -392,10 +445,10 @@ mod tests {
     #[test]
     fn exit_code_uses_the_rounded_score() {
         let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 79.96)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 1);
-        assert_eq!(exit_code(&r, &th(80.1), OnError::Block, OnError::Allow), 0);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_ERROR), 1);
+        assert_eq!(exit_code(&r, &th(80.1), BLOCK_ERROR), 0);
         let r = Report::from_targets("0", "b", vec![t(TargetStatus::Scanned, 79.94)]);
-        assert_eq!(exit_code(&r, &th(80.0), OnError::Block, OnError::Allow), 0);
+        assert_eq!(exit_code(&r, &th(80.0), BLOCK_ERROR), 0);
     }
 
     #[test]
