@@ -815,6 +815,26 @@ path = "Database.csv"
 expect = 95
 
 [[case]]
+# The six-column layout of KeePassXC 2.4.0 to 2.6.2.
+rule = "keepassxc_csv_export"
+synth = "file:keepassxc_csv_six"
+path = "Database.csv"
+expect = 95
+
+[[case]]
+rule = "keepassxc_csv_export"
+synth = "file:keepassxc_csv_six_bom_crlf"
+path = "Database.csv"
+expect = 95
+
+[[case]]
+# A header with no entries holds no password.
+rule = "keepassxc_csv_export"
+synth = "file:keepassxc_csv_six_header_only"
+path = "Database.csv"
+expect = "none"
+
+[[case]]
 rule = "dashlane_csv_export"
 synth = "file:dashlane_csv"
 path = "credentials.csv"
