@@ -1043,6 +1043,82 @@ fn a_file_read_whole_or_for_its_header_alone_ignores_on_partial() {
     }
 }
 
+/// Targets reported `skipped`: a lone binary of unknown format, an image, and
+/// an archive holding nothing but unknown binaries.
+fn skipped_files() -> [(&'static str, Vec<u8>); 3] {
+    let blob = vec![0u8, 1, 2, 3, 0xff, 0xfe];
+    [
+        ("blob.bin", blob.clone()),
+        ("pixel.png", synth::png_1x1()),
+        ("blobs.zip", synth::zip(&[("a", blob.clone()), ("b", blob)])),
+    ]
+}
+
+#[test]
+fn a_skipped_target_follows_on_skipped() {
+    let d = tempfile::tempdir().unwrap();
+    for (name, bytes) in skipped_files() {
+        fs::write(d.path().join(name), bytes).unwrap();
+        let run = |args: &[&str]| riskgrep(d.path()).args(["scan", name]).args(args).assert();
+        // The default is allow, with or without a gate.
+        run(&[])
+            .code(0)
+            .stdout(predicate::str::contains(" 1 skipped,"));
+        run(&["--fail-at", "secret=80"]).code(0);
+        run(&["--on-error", "block"]).code(0);
+        run(&["--on-skipped", "allow"]).code(0);
+        run(&["--fail-at", "secret=80", "--on-skipped", "allow"]).code(0);
+        // Block exits 2, as an unscanned target does under --on-error block.
+        run(&["--on-skipped", "block"]).code(2);
+        run(&["--fail-at", "secret=80", "--on-skipped", "block"]).code(2);
+        run(&["--on-error", "allow", "--on-skipped", "block"]).code(2);
+    }
+}
+
+#[test]
+fn a_score_at_its_threshold_wins_over_on_skipped() {
+    let (dir, _, _) = key_dir();
+    fs::write(dir.path().join("pixel.png"), synth::png_1x1()).unwrap();
+    let run = |args: &[&str]| riskgrep(dir.path()).arg("scan").args(args).assert();
+    run(&["--fail-at", "secret=80", "--on-skipped", "block"]).code(1);
+    run(&["--fail-at", "secret=99", "--on-skipped", "block"]).code(2);
+    run(&["--fail-at", "secret=99"]).code(0);
+}
+
+#[test]
+fn links_and_non_regular_files_in_a_directory_walk_follow_on_skipped() {
+    let d = tempfile::tempdir().unwrap();
+    fs::write(d.path().join("notes.txt"), "plain text\n").unwrap();
+    std::os::unix::fs::symlink("notes.txt", d.path().join("link.txt")).unwrap();
+    let run = |args: &[&str]| riskgrep(d.path()).arg("scan").args(args).assert();
+    // A directory walk does not follow the link and reports it skipped.
+    run(&["."])
+        .code(0)
+        .stdout(predicate::str::contains(" 1 skipped,"));
+    run(&[".", "--on-skipped", "block"]).code(2);
+    // A link named on the command line is followed and scanned.
+    run(&["link.txt", "--on-skipped", "block"]).code(0);
+    // A FIFO is not a regular file: skipped, and never opened.
+    let made = std::process::Command::new("mkfifo")
+        .arg(d.path().join("pipe"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    run(&["."])
+        .code(0)
+        .stdout(predicate::str::contains(" 2 skipped,"));
+    run(&[".", "--on-skipped", "block"]).code(2);
+}
+
+#[test]
+fn on_skipped_takes_allow_or_block() {
+    let d = tempfile::tempdir().unwrap();
+    riskgrep(d.path())
+        .args(["scan", "--on-skipped", "ask"])
+        .assert()
+        .code(3);
+}
+
 /// Input for `riskgrep scan -`: plain text past the 64 MiB limit, between `prefix` and `suffix`.
 fn stdin_past_limit(prefix: &str, suffix: &str) -> Vec<u8> {
     let line = "plain text line\n";
