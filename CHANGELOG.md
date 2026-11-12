@@ -8,6 +8,10 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 - `riskgrep scan --on-skipped allow|block`: what a `skipped` target (an image, a binary of unknown format, an archive holding nothing else, a symbolic link, or a file that is not regular) does to the exit status, as `on_skipped` does in the hooks. `block` exits 2, as an unscanned target does under `--on-error block`, unless a score met `--fail-at`, which exits 1. The default, `allow`, keeps the earlier behaviour, under `--fail-at` too, so an archive of unknown binaries still exits 0 by default (`cargo test -p riskgrep --test cli a_skipped_target_follows_on_skipped`).
 
+### Fixed
+
+- KeePassXC CSV exports in the six-column layout (`Group`, `Title`, `Username`, `Password`, `URL`, `Notes`), which KeePassXC's `CsvExporter.cpp` writes at tags 2.4.0 to 2.6.2, score 95 like the ten-column layout of 2.6.3 and later; they scored 0 (`riskgrep rules test`, cases `file:keepassxc_csv_six` and `file:keepassxc_csv_six_bom_crlf`). A header with no entry line still scores 0. The evaluation's synthetic corpus gains 20 six-column exports, all flagged (`recall.provider.keepassxc_csv_six` 1.0), and 3 header-only near misses, none flagged; `eval/baseline-metrics.json` is rewritten for the new counts, and its other metrics are unchanged (`cargo xtask eval`). `riskgrep-core`: `synth::CREDENTIAL_FILE_KINDS` gains `keepassxc_csv_six`, `keepassxc_csv_six_header_only`, and `keepassxc_csv_six_bom_crlf` (#102).
+
 ## [1.3.0] – 2026-11-08
 
 ### Upgrading

@@ -109,6 +109,7 @@ pub const CREDENTIAL_FILE_KINDS: &[&str] = &[
     "keepass_xml",
     "keepass_csv",
     "keepassxc_csv",
+    "keepassxc_csv_six",
     "dashlane_csv",
     "dashlane_json",
     "keeper_json",
@@ -533,6 +534,11 @@ fn credential_files(out: &mut Vec<Sample>) {
         push("keepass_xml", "Database.xml", file("keepass_xml", i));
         push("keepass_csv", "Database.csv", file("keepass_csv", i));
         push("keepassxc_csv", "Database.csv", file("keepassxc_csv", i));
+        push(
+            "keepassxc_csv_six",
+            "Database.csv",
+            file("keepassxc_csv_six", i),
+        );
         push("dashlane_csv", "credentials.csv", file("dashlane_csv", i));
         push(
             "dashlane_json",
@@ -590,6 +596,7 @@ fn credential_files(out: &mut Vec<Sample>) {
         ("firefox_csv_header_only", "logins.csv"),
         ("keepass_xml_no_password", "Database.xml"),
         ("keepass_csv_header_only", "Database.csv"),
+        ("keepassxc_csv_six_header_only", "Database.csv"),
         ("dashlane_json_no_password", "Dashlane Export.json"),
         ("keeper_json_unrelated", "records.json"),
         ("protonpass_csv_header_only", "Proton Pass.csv"),

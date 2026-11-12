@@ -205,13 +205,14 @@ rule keepass_csv_export {
 // the KeePassXC source:
 //   https://github.com/keepassxreboot/keepassxc/blob/develop/src/format/CsvExporter.cpp
 // (Group, Title, Username, Password, URL, Notes, TOTP, Icon, Last Modified,
-// Created; every name is quoted)
+// Created; every name is quoted). Tags 2.4.0 to 2.6.2 of that file write
+// only the first six columns, through Notes; 2.6.3 adds the other four.
 rule keepassxc_csv_export {
   meta:
     category = "secret"
     weight = 95
   strings:
-    $hdr = /(\xEF\xBB\xBF)?"?Group"?,"?Title"?,"?Username"?,"?Password"?,"?URL"?,"?Notes"?,"?TOTP"?,"?Icon"?,"?Last Modified"?,"?Created"?\r?\n[^\r\n]/
+    $hdr = /(\xEF\xBB\xBF)?"?Group"?,"?Title"?,"?Username"?,"?Password"?,"?URL"?,"?Notes"?(,"?TOTP"?,"?Icon"?,"?Last Modified"?,"?Created"?)?\r?\n[^\r\n]/
   condition:
     $hdr at 0
 }
