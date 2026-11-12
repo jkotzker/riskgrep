@@ -6,7 +6,7 @@ All notable changes to RiskGrep are recorded here. The format follows [Keep a Ch
 
 ### Added
 
-- `riskgrep scan --on-skipped allow|block`: what a `skipped` target (an image, a binary of unknown format, an archive holding nothing else, a symbolic link, or a file that is not regular) does to the exit status, as `on_skipped` does in the hooks. `block` exits 2, as an unscanned target does under `--on-error block`, unless a score met `--fail-at`, which exits 1. The default, `allow`, keeps the earlier behaviour, under `--fail-at` too, so an archive of unknown binaries still exits 0 by default (`cargo test -p riskgrep --test cli a_skipped_target_follows_on_skipped`).
+- `riskgrep scan --on-skipped allow|block`: what a `skipped` target (an image, a binary of unknown format, an archive holding nothing else, a symbolic link met in a directory walk, or a file that is not regular) does to the exit status, as `on_skipped` does in the hooks. `block` exits 2, as an unscanned target does under `--on-error block`, unless a score met `--fail-at`, which exits 1. The default, `allow`, keeps the earlier behaviour, under `--fail-at` too, so an archive of unknown binaries still exits 0 by default (`cargo test -p riskgrep --test cli a_skipped_target_follows_on_skipped` and `links_and_non_regular_files_in_a_directory_walk_follow_on_skipped`).
 
 ### Fixed
 

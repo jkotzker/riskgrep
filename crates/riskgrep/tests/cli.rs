@@ -1086,6 +1086,31 @@ fn a_score_at_its_threshold_wins_over_on_skipped() {
 }
 
 #[test]
+fn links_and_non_regular_files_in_a_directory_walk_follow_on_skipped() {
+    let d = tempfile::tempdir().unwrap();
+    fs::write(d.path().join("notes.txt"), "plain text\n").unwrap();
+    std::os::unix::fs::symlink("notes.txt", d.path().join("link.txt")).unwrap();
+    let run = |args: &[&str]| riskgrep(d.path()).arg("scan").args(args).assert();
+    // A directory walk does not follow the link and reports it skipped.
+    run(&["."])
+        .code(0)
+        .stdout(predicate::str::contains(" 1 skipped,"));
+    run(&[".", "--on-skipped", "block"]).code(2);
+    // A link named on the command line is followed and scanned.
+    run(&["link.txt", "--on-skipped", "block"]).code(0);
+    // A FIFO is not a regular file: skipped, and never opened.
+    let made = std::process::Command::new("mkfifo")
+        .arg(d.path().join("pipe"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    run(&["."])
+        .code(0)
+        .stdout(predicate::str::contains(" 2 skipped,"));
+    run(&[".", "--on-skipped", "block"]).code(2);
+}
+
+#[test]
 fn on_skipped_takes_allow_or_block() {
     let d = tempfile::tempdir().unwrap();
     riskgrep(d.path())
